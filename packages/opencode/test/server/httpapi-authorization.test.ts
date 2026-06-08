@@ -171,4 +171,24 @@ describe("HttpApi authorization middleware", () => {
       expect(body).toEqual({ _tag: "UnauthorizedError", message: "Authentication required" })
     }),
   )
+
+  itV2Secret.live("rejects v2 auth token query credentials", () =>
+    Effect.gen(function* () {
+      const response = yield* HttpClient.get(`/api/probe?auth_token=${encodeURIComponent(token("opencode", "secret"))}`)
+
+      expect(response.status).toBe(401)
+      expect(response.headers["www-authenticate"] ?? "").toContain("Basic")
+    }),
+  )
+
+  itV2Secret.live("does not prefer v2 auth token query credentials over bad basic auth", () =>
+    Effect.gen(function* () {
+      const response = yield* HttpClientRequest.get(
+        `/api/probe?auth_token=${encodeURIComponent(token("opencode", "secret"))}`,
+      ).pipe(HttpClientRequest.setHeader("authorization", basic("opencode", "wrong")), HttpClient.execute)
+
+      expect(response.status).toBe(401)
+      expect(response.headers["www-authenticate"] ?? "").toContain("Basic")
+    }),
+  )
 })
