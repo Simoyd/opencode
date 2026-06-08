@@ -84,7 +84,7 @@ function selectedV2WorkspaceID(
 }
 
 function defaultDirectory(request: HttpServerRequest.HttpServerRequest, url: URL): string {
-  return url.searchParams.get("directory") || request.headers["x-opencode-directory"] || process.cwd()
+  return request.headers["x-opencode-directory"] || url.searchParams.get("directory") || process.cwd()
 }
 
 function shouldStayOnControlPlane(request: HttpServerRequest.HttpServerRequest, url: URL): boolean {
@@ -164,6 +164,9 @@ function planRequest(
   return Effect.gen(function* () {
     const url = requestURL(request)
     const envWorkspaceID = configuredWorkspaceID()
+    if (Flag.OPENCODE_AVALONIA_DISABLE_WORKSPACE_ROUTING && (url.searchParams.has("workspace") || envWorkspaceID)) {
+      return RequestPlan.InvalidWorkspace()
+    }
     const workspaceID = url.pathname.startsWith("/api/")
       ? selectedV2WorkspaceID(url, session?.workspaceID)
       : selectedWorkspaceID(url, session?.workspaceID)

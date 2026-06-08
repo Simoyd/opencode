@@ -1,4 +1,5 @@
 import { NodeHttpServer, NodeServices } from "@effect/platform-node"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { describe, expect } from "bun:test"
 import { Context, Effect, Layer, Queue, Ref, Schema, Stream } from "effect"
 import {
@@ -260,6 +261,27 @@ const serveProbe = HttpApiBuilder.layer(ProbeApi).pipe(
 )
 
 describe("HttpApi workspace routing middleware", () => {
+  it.live("fails closed for workspace routing when Avalonia isolation is enabled", () =>
+    Effect.gen(function* () {
+      const previous = Flag.OPENCODE_AVALONIA_DISABLE_WORKSPACE_ROUTING
+      Flag.OPENCODE_AVALONIA_DISABLE_WORKSPACE_ROUTING = true
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          Flag.OPENCODE_AVALONIA_DISABLE_WORKSPACE_ROUTING = previous
+        }),
+      )
+      yield* HttpRouter.add("GET", "/probe", HttpServerResponse.text("route called")).pipe(
+        Layer.provide(workspaceRoutingTestLayer),
+        HttpRouter.serve,
+        Layer.build,
+      )
+
+      const response = yield* HttpClient.get(`/probe?workspace=${WorkspaceV2.ID.make("wrk_avalonia_blocked")}`)
+
+      expect(response.status).toBe(400)
+    }),
+  )
+
   it.live("proxies remote workspace HTTP requests through the selected workspace target", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped({ git: true })

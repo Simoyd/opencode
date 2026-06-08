@@ -32,6 +32,7 @@ import * as DateTime from "effect/DateTime"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { toolFileSourceFromUri, Usage, type LLMEvent } from "@opencode-ai/llm"
 import { ToolOutput } from "@opencode-ai/core/tool-output"
+import { StreamDiagnostics } from "@/diagnostic/stream"
 
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
@@ -399,8 +400,25 @@ export const layer = Layer.effect(
             return
 
           case "reasoning-delta":
+            StreamDiagnostics.record({
+              stage: "processor.delta",
+              action: "observed",
+              eventType: "reasoning-delta",
+              length: value.text.length,
+              correlation: StreamDiagnostics.correlationForSession(ctx.sessionID),
+            })
             // Match dev: silently drop orphan deltas (no preceding reasoning-start).
-            if (!(value.id in ctx.reasoningMap)) return
+            if (!(value.id in ctx.reasoningMap)) {
+              StreamDiagnostics.record({
+                stage: "processor.delta",
+                action: "skipped",
+                eventType: "reasoning-delta",
+                length: value.text.length,
+                correlation: StreamDiagnostics.correlationForSession(ctx.sessionID),
+                match: false,
+              })
+              return
+            }
             ctx.reasoningMap[value.id].text += value.text
             if (value.providerMetadata) ctx.reasoningMap[value.id].metadata = value.providerMetadata
             if (mirrorAssistant) {
@@ -418,6 +436,14 @@ export const layer = Layer.effect(
               partID: ctx.reasoningMap[value.id].id,
               field: "text",
               delta: value.text,
+            })
+            StreamDiagnostics.record({
+              stage: "processor.delta",
+              action: "updated",
+              eventType: "reasoning-delta",
+              length: value.text.length,
+              correlation: StreamDiagnostics.correlationForSession(ctx.sessionID),
+              match: true,
             })
             return
 
@@ -785,7 +811,24 @@ export const layer = Layer.effect(
             return
 
           case "text-delta":
-            if (!ctx.currentText) return
+            StreamDiagnostics.record({
+              stage: "processor.delta",
+              action: "observed",
+              eventType: "text-delta",
+              length: value.text.length,
+              correlation: StreamDiagnostics.correlationForSession(ctx.sessionID),
+            })
+            if (!ctx.currentText) {
+              StreamDiagnostics.record({
+                stage: "processor.delta",
+                action: "skipped",
+                eventType: "text-delta",
+                length: value.text.length,
+                correlation: StreamDiagnostics.correlationForSession(ctx.sessionID),
+                match: false,
+              })
+              return
+            }
             ctx.currentText.text += value.text
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
             if (mirrorAssistant) {
@@ -803,6 +846,14 @@ export const layer = Layer.effect(
               partID: ctx.currentText.id,
               field: "text",
               delta: value.text,
+            })
+            StreamDiagnostics.record({
+              stage: "processor.delta",
+              action: "updated",
+              eventType: "text-delta",
+              length: value.text.length,
+              correlation: StreamDiagnostics.correlationForSession(ctx.sessionID),
+              match: true,
             })
             return
 

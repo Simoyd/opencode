@@ -117,6 +117,10 @@ const scenarios: Scenario[] = [
       },
       "status",
     ),
+  http.protected
+    .get("/debug/stream-diagnostics", "debug.streamDiagnostics")
+    .global()
+    .status(404, undefined, "status"),
   http.protected.get("/path", "path.get").json(200, (body, ctx) => {
     object(body)
     check(body.directory === ctx.directory, "directory should resolve from x-opencode-directory")
@@ -987,6 +991,81 @@ const scenarios: Scenario[] = [
     }))
     .json(200, (body, ctx) => {
       check(stable(body) === stable(ctx.state.todos), "todos should match seeded state")
+    }),
+  http.protected
+    .get("/session/{sessionID}/turns", "session.turns")
+    .seeded((ctx) =>
+      Effect.gen(function* () {
+        const session = yield* ctx.session({ title: "Turns session" })
+        yield* ctx.message(session.id, { text: "turn prompt" })
+        return session
+      }),
+    )
+    .at((ctx) => ({ path: route("/session/{sessionID}/turns", { sessionID: ctx.state.id }), headers: ctx.headers() }))
+    .json(200, (body, ctx) => {
+      object(body)
+      check(body.sessionID === ctx.state.id, "turns should report requested session")
+      check(Array.isArray(body.turns) && body.turns.length === 1, "turns should include seeded prompt turn")
+    }),
+  http.protected
+    .post("/session/{sessionID}/context/stage", "session.context.stage")
+    .seeded((ctx) => ctx.session({ title: "Stage context session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/context/stage", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: { parts: [{ type: "text", text: "provider-only context", label: "Context" }] },
+    }))
+    .json(200, (body, ctx) => {
+      object(body)
+      check(body.sessionID === ctx.state.id, "staged context should report requested session")
+      check(Array.isArray(body.parts) && body.parts.length === 1, "staged context should include text part")
+    }),
+  http.protected
+    .post("/session/{sessionID}/context/stage", "session.context.stage.empty")
+    .seeded((ctx) => ctx.session({ title: "Empty staged context session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/context/stage", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: { parts: [{ type: "text", text: "" }] },
+    }))
+    .status(400),
+  http.protected
+    .get("/session/{sessionID}/context/stage", "session.context.listStaged")
+    .seeded((ctx) => ctx.session({ title: "List staged context session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/context/stage", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, array),
+  http.protected
+    .delete("/session/{sessionID}/context/stage", "session.context.clearStaged")
+    .seeded((ctx) => ctx.session({ title: "Clear staged context session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/context/stage", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .status(204),
+  http.protected
+    .delete("/session/{sessionID}/context/stage/{contextID}", "session.context.clearStagedItem")
+    .seeded((ctx) => ctx.session({ title: "Clear staged context item session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/context/stage/{contextID}", {
+        sessionID: ctx.state.id,
+        contextID: "ctx_missing",
+      }),
+      headers: ctx.headers(),
+    }))
+    .status(204),
+  http.protected
+    .get("/session/{sessionID}/compacted_range", "session.compactedRange")
+    .seeded((ctx) => ctx.session({ title: "Compacted range session" }))
+    .at((ctx) => ({
+      path: `${route("/session/{sessionID}/compacted_range", { sessionID: ctx.state.id })}?marker=msg_missing`,
+      headers: ctx.headers(),
+    }))
+    .json(200, (body) => {
+      object(body)
+      check(body.complete === false, "missing compaction marker should return incomplete range")
     }),
   http.protected
     .get("/session/{sessionID}/diff", "session.diff")

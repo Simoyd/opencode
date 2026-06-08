@@ -3,9 +3,9 @@ import { Permission } from "@/permission"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 
 import { Session } from "@/session/session"
-import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
+import { SessionStagedContext } from "@/session/staged-context"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
@@ -45,7 +45,48 @@ export const MessagesQuery = Schema.Struct({
   limit: Schema.optional(Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
   before: Schema.optional(Schema.String),
 })
+export const CompactedRangeQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
+  marker: MessageID,
+  tail_start_id: Schema.optional(MessageID),
+})
 export const StatusMap = Schema.Record(Schema.String, SessionStatus.Info)
+export const SessionTurnCompaction = Schema.Struct({
+  compactionMessageID: MessageID,
+  summaryMessageID: MessageID,
+  summaryPreview: Schema.String,
+  fullSummary: Schema.String,
+  preCompactionMessageIDs: Schema.Array(MessageID),
+  postCompactionMessageIDs: Schema.Array(MessageID),
+  syntheticPromptMessageIDs: Schema.Array(MessageID),
+  replayPromptMessageIDs: Schema.Array(MessageID),
+  recallMarkerID: Schema.optional(MessageID),
+  recallTailStartMessageID: Schema.optional(MessageID),
+}).annotate({ identifier: "SessionTurnCompaction" })
+export const SessionTurn = Schema.Struct({
+  id: Schema.String,
+  startMessageID: MessageID,
+  messageIDs: Schema.Array(MessageID),
+  intermediateMessageIDs: Schema.Array(MessageID),
+  compactionBoundaryMessageIDs: Schema.Array(MessageID),
+  finalOutputMessageID: Schema.optional(MessageID),
+  status: Schema.Literals(["complete", "incomplete"]),
+  compaction: Schema.optional(SessionTurnCompaction),
+}).annotate({ identifier: "SessionTurn" })
+export const SessionTurnsResponse = Schema.Struct({
+  sessionID: SessionID,
+  turns: Schema.Array(SessionTurn),
+}).annotate({ identifier: "SessionTurnsResponse" })
+export const CompactedRangeResponse = Schema.Struct({
+  reference: Schema.Struct({
+    markerID: Schema.String,
+    tailStartID: Schema.optional(Schema.String),
+    messageID: Schema.optional(Schema.String),
+  }),
+  messages: Schema.Array(SessionV1.WithParts),
+  complete: Schema.Boolean,
+  notice: Schema.optional(Schema.String),
+}).annotate({ identifier: "CompactedRangeResponse" })
 export const UpdatePayload = Schema.Struct({
   title: Schema.optional(Schema.String),
   metadata: Schema.optional(Session.Metadata),
@@ -68,6 +109,7 @@ export const SummarizePayload = Schema.Struct({
   auto: Schema.optional(Schema.Boolean),
 })
 export const PromptPayload = Schema.Struct(Struct.omit(SessionPrompt.PromptInput.fields, ["sessionID"]))
+export const StagedContextPayload = Schema.Struct(Struct.omit(SessionStagedContext.StageInput.fields, ["sessionID"]))
 export const CommandPayload = Schema.Struct(Struct.omit(SessionPrompt.CommandInput.fields, ["sessionID"]))
 export const ShellPayload = Schema.Struct(Struct.omit(SessionPrompt.ShellInput.fields, ["sessionID"]))
 export const RevertPayload = Schema.Struct(Struct.omit(SessionRevert.RevertInput.fields, ["sessionID"]))
@@ -81,9 +123,13 @@ export const SessionPaths = {
   get: `${root}/:sessionID`,
   children: `${root}/:sessionID/children`,
   todo: `${root}/:sessionID/todo`,
+  turns: `${root}/:sessionID/turns`,
   diff: `${root}/:sessionID/diff`,
   messages: `${root}/:sessionID/message`,
   message: `${root}/:sessionID/message/:messageID`,
+  contextStage: `${root}/:sessionID/context/stage`,
+  contextStageItem: `${root}/:sessionID/context/stage/:contextID`,
+  compactedRange: `${root}/:sessionID/compacted_range`,
   create: root,
   remove: `${root}/:sessionID`,
   update: `${root}/:sessionID`,
@@ -165,6 +211,18 @@ export const SessionApi = HttpApi.make("session")
             description: "Retrieve the todo list associated with a specific session, showing tasks and action items.",
           }),
         ),
+        HttpApiEndpoint.get("turns", SessionPaths.turns, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(SessionTurnsResponse, "Session turn facts"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.turns",
+            summary: "Get session turns",
+            description: "Return authoritative session turn and compaction boundary facts derived from persisted messages.",
+          }),
+        ),
         HttpApiEndpoint.get("diff", SessionPaths.diff, {
           params: { sessionID: SessionID },
           query: DiffQuery,
@@ -198,6 +256,69 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.message",
             summary: "Get message",
             description: "Retrieve a specific message from a session by its message ID.",
+          }),
+        ),
+        HttpApiEndpoint.post("contextStage", SessionPaths.contextStage, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          payload: StagedContextPayload,
+          success: described(SessionStagedContext.Info, "Staged context"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.context.stage",
+            summary: "Stage provider-only context",
+            description:
+              "Stage provider-only context for the next real prompt in this session without creating transcript messages or submitting a prompt.",
+          }),
+        ),
+        HttpApiEndpoint.get("contextListStaged", SessionPaths.contextStage, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(Schema.Array(SessionStagedContext.Info), "Staged contexts"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.context.listStaged",
+            summary: "List staged provider-only context",
+            description: "List provider-only context currently staged for the next prompt in this session.",
+          }),
+        ),
+        HttpApiEndpoint.delete("contextClearStaged", SessionPaths.contextStage, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(HttpApiSchema.NoContent, "Staged context cleared"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.context.clearStaged",
+            summary: "Clear staged provider-only context",
+            description: "Clear all provider-only contexts staged for the next prompt in this session.",
+          }),
+        ),
+        HttpApiEndpoint.delete("contextClearStagedItem", SessionPaths.contextStageItem, {
+          params: { sessionID: SessionID, contextID: Schema.String },
+          query: WorkspaceRoutingQuery,
+          success: described(HttpApiSchema.NoContent, "Staged context cleared"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.context.clearStagedItem",
+            summary: "Clear staged provider-only context item",
+            description: "Clear one provider-only context staged for the next prompt in this session.",
+          }),
+        ),
+        HttpApiEndpoint.get("compactedRange", SessionPaths.compactedRange, {
+          params: { sessionID: SessionID },
+          query: CompactedRangeQuery,
+          success: described(CompactedRangeResponse, "Compacted transcript range"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.compactedRange",
+            summary: "Recall compacted transcript range",
+            description:
+              "Return the transcript messages summarized by a completed compaction marker without changing session state.",
           }),
         ),
         HttpApiEndpoint.post("create", SessionPaths.create, {

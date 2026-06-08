@@ -41,6 +41,7 @@ import { LLM } from "@/session/llm"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
 import { SessionRunState } from "@/session/run-state"
+import { SessionStagedContext } from "@/session/staged-context"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
@@ -100,6 +101,7 @@ import { corsVaryFix } from "./middleware/cors-vary"
 import { errorLayer } from "./middleware/error"
 import { fenceLayer } from "./middleware/fence"
 import { schemaErrorLayer } from "./middleware/schema-error"
+import { StreamDiagnostics } from "@/diagnostic/stream"
 
 export const context = Context.makeUnsafe<unknown>(new Map())
 
@@ -128,6 +130,15 @@ const rootApiRoutes = HttpApiBuilder.layer(RootHttpApi).pipe(
   Layer.provide(schemaErrorLayer),
   Layer.provide(httpApiAuthLayer),
 )
+const diagnosticsRoute = HttpRouter.use((router) =>
+  router.add("GET", "/debug/stream-diagnostics", () =>
+    Effect.succeed(
+      StreamDiagnostics.enabled()
+        ? HttpServerResponse.jsonUnsafe(StreamDiagnostics.snapshot())
+        : HttpServerResponse.empty({ status: 404 }),
+    ),
+  ),
+).pipe(Layer.provide(authOnlyRouterLayer))
 const eventApiRoutes = HttpApiBuilder.layer(EventApi).pipe(
   Layer.provide(eventHandlers),
   Layer.provide([httpApiAuthLayer, workspaceRoutingLive, instanceContextLayer]),
@@ -198,6 +209,7 @@ export function createRoutes(
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
   return Layer.mergeAll(
     rootApiRoutes,
+    diagnosticsRoute,
     eventApiRoutes,
     ptyConnectApiRoutes,
     instanceRoutes,
@@ -240,6 +252,7 @@ export function createRoutes(
       SessionCompaction.defaultLayer,
       SessionPrompt.defaultLayer,
       SessionRevert.defaultLayer,
+      SessionStagedContext.defaultLayer,
       SessionShare.defaultLayer,
       SessionRunState.defaultLayer,
       SessionStatus.defaultLayer,

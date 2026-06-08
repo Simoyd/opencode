@@ -6,7 +6,6 @@ import { hasPtyConnectTicketURL } from "@/server/shared/pty-ticket"
 import { isPublicUIPath } from "@/server/shared/public-ui"
 export { V2Authorization, v2AuthorizationLayer } from "@opencode-ai/server/middleware/authorization"
 
-const AUTH_TOKEN_QUERY = "auth_token"
 const UNAUTHORIZED = 401
 const WWW_AUTHENTICATE = 'Basic realm="Secure Area"'
 
@@ -45,7 +44,7 @@ function validateCredential<A, E, R>(
       yield* HttpEffect.appendPreResponseHandler((_request, response) =>
         Effect.succeed(HttpServerResponse.setHeader(response, "www-authenticate", WWW_AUTHENTICATE)),
       )
-      return yield* new HttpApiError.Unauthorized({})
+      return yield* Effect.fail(new HttpApiError.Unauthorized({}))
     }
     return yield* effect
   })
@@ -71,9 +70,7 @@ function credentialFromRequest(request: HttpServerRequest.HttpServerRequest) {
   return credentialFromURL(new URL(request.url, "http://localhost"), request)
 }
 
-function credentialFromURL(url: URL, request: HttpServerRequest.HttpServerRequest) {
-  const token = url.searchParams.get(AUTH_TOKEN_QUERY)
-  if (token) return decodeCredential(token)
+function credentialFromURL(_url: URL, request: HttpServerRequest.HttpServerRequest) {
   const match = /^Basic\s+(.+)$/i.exec(request.headers.authorization ?? "")
   if (match) return decodeCredential(match[1])
   return Effect.succeed(emptyCredential())

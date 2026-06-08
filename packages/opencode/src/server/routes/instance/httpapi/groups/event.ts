@@ -3,6 +3,13 @@ import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiSchema, OpenApi } from "
 import { Authorization } from "../middleware/authorization"
 import { InstanceContextMiddleware } from "../middleware/instance-context"
 import { WorkspaceRoutingMiddleware, WorkspaceRoutingQuery } from "../middleware/workspace-routing"
+import { SessionID } from "@/session/schema"
+
+export const EventQuery = Schema.Struct({
+  ...WorkspaceRoutingQuery.fields,
+  sessionID: Schema.optional(SessionID),
+  type: Schema.optional(Schema.String),
+})
 
 export const EventPaths = {
   event: "/event",
@@ -12,7 +19,7 @@ export const EventApi = HttpApi.make("event").add(
   HttpApiGroup.make("event")
     .add(
       HttpApiEndpoint.get("subscribe", EventPaths.event, {
-        query: WorkspaceRoutingQuery,
+        query: EventQuery,
         success: Schema.String.pipe(HttpApiSchema.asText({ contentType: "text/event-stream" })),
       }).annotateMerge(
         OpenApi.annotations({

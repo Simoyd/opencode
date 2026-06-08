@@ -13,6 +13,7 @@ import { Provider } from "@/provider/provider"
 import { type Tool as AITool, tool, jsonSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { SessionCompaction } from "./compaction"
+import { SessionStagedContext } from "./staged-context"
 import { SystemPrompt } from "./system"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
@@ -1405,6 +1406,7 @@ export const layer = Layer.effect(
               }
             }
 
+            msgs = yield* SessionStagedContext.injectAndConsume({ sessionID, lastUser, messages: msgs })
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
             const [skills, env, instructions, modelMsgs] = yield* Effect.all([

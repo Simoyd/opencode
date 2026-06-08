@@ -11,10 +11,12 @@ import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
 import { SessionRunState } from "@/session/run-state"
+import { SessionStagedContext } from "@/session/staged-context"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
+import { StreamDiagnostics } from "@/diagnostic/stream"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Cause, Effect, Option, Schema, Scope } from "effect"
 import * as Stream from "effect/Stream"
@@ -23,6 +25,7 @@ import { HttpApiBuilder, HttpApiError, HttpApiSchema } from "effect/unstable/htt
 import { InstanceHttpApi } from "../api"
 import {
   CommandPayload,
+  CompactedRangeQuery,
   DiffQuery,
   ForkPayload,
   InitPayload,
@@ -33,6 +36,7 @@ import {
   RevertPayload,
   ShellPayload,
   SummarizePayload,
+  StagedContextPayload,
   UpdatePayload,
 } from "../groups/session"
 import { PermissionNotFoundError } from "../errors"
@@ -44,6 +48,165 @@ const tryParseJson = (text: string) =>
     catch: () => new HttpApiError.BadRequest({}),
   })
 
+function messageText(message: SessionV1.WithParts) {
+  return message.parts
+    .filter(
+      (part): part is SessionV1.TextPart | SessionV1.ReasoningPart => part.type === "text" || part.type === "reasoning",
+    )
+    .map((part) => part.text.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim()
+}
+
+function isCompactionMessage(message: SessionV1.WithParts) {
+  return message.info.role === "user" && message.parts.some((part) => part.type === "compaction")
+}
+
+function isCompactionReplayMessage(message: SessionV1.WithParts) {
+  return (
+    message.info.role === "user" &&
+    message.parts.some((part) => part.type === "text" && part.metadata?.compaction_replay === true)
+  )
+}
+
+function isPromptMessage(message: SessionV1.WithParts) {
+  return (
+    message.info.role === "user" &&
+    !isCompactionMessage(message) &&
+    !isCompactionReplayMessage(message) &&
+    !message.parts.every((part) => "synthetic" in part && !!part.synthetic)
+  )
+}
+
+function isFinalAssistant(message: SessionV1.WithParts) {
+  if (message.info.role !== "assistant" || !message.info.finish || message.info.error || message.info.summary)
+    return false
+  if (message.info.finish === "tool-calls" || message.info.finish === "tool_calls") return false
+  return !!messageText(message).trim()
+}
+
+function createSummaryPreview(summary: string) {
+  const normalized = summary.split(/\s+/).filter(Boolean).join(" ")
+  return normalized.length <= 80 ? normalized : `${normalized.slice(0, 77)}...`
+}
+
+function buildTurnCompaction(
+  promptMessageID: MessageID,
+  segment: SessionV1.WithParts[],
+  finalOutputMessageID: MessageID | undefined,
+) {
+  if (!finalOutputMessageID) return undefined
+  const compactionItems = segment
+    .map((message, index) => ({
+      message,
+      index,
+      part: message.parts.find((part): part is SessionV1.CompactionPart => part.type === "compaction"),
+    }))
+    .filter((item) => item.part)
+  if (compactionItems.length !== 1) return undefined
+
+  const compaction = compactionItems[0]
+  const compactionPart = compaction.part
+  if (!compactionPart) return undefined
+  const summaryItems = segment
+    .map((message, index) => ({ message, index }))
+    .filter(
+      (item) =>
+        item.message.info.role === "assistant" &&
+        item.message.info.parentID === compaction.message.info.id &&
+        !!item.message.info.summary &&
+        !!item.message.info.finish &&
+        !item.message.info.error,
+    )
+  if (summaryItems.length !== 1) return undefined
+
+  const summary = summaryItems[0]
+  const fullSummary = messageText(summary.message)
+  if (!fullSummary) return undefined
+
+  const syntheticPromptMessageIDs = segment
+    .filter(
+      (message) =>
+        message.info.role === "user" &&
+        message.parts.some(
+          (part) => part.type === "text" && part.synthetic && part.metadata?.compaction_continue === true,
+        ),
+    )
+    .map((message) => message.info.id)
+  const replayPromptMessageIDs = segment.filter(isCompactionReplayMessage).map((message) => message.info.id)
+  if (syntheticPromptMessageIDs.length + replayPromptMessageIDs.length === 0) return undefined
+  if (compactionPart.overflow && replayPromptMessageIDs.length === 0) return undefined
+
+  const finalIndex = segment.findIndex((message) => message.info.id === finalOutputMessageID)
+  const represented = new Set<MessageID>([
+    compaction.message.info.id,
+    summary.message.info.id,
+    ...syntheticPromptMessageIDs,
+    ...replayPromptMessageIDs,
+  ])
+  const allowedParents = new Set<MessageID>([promptMessageID, ...syntheticPromptMessageIDs, ...replayPromptMessageIDs])
+  const isCollapsibleOperationalMessage = (message: SessionV1.WithParts) =>
+    message.info.role === "assistant" &&
+    allowedParents.has(message.info.parentID) &&
+    message.info.id !== finalOutputMessageID &&
+    !represented.has(message.info.id)
+
+  return {
+    compactionMessageID: compaction.message.info.id,
+    summaryMessageID: summary.message.info.id,
+    summaryPreview: createSummaryPreview(fullSummary),
+    fullSummary,
+    preCompactionMessageIDs: segment
+      .slice(0, compaction.index)
+      .filter(isCollapsibleOperationalMessage)
+      .map((message) => message.info.id),
+    postCompactionMessageIDs: segment
+      .slice(summary.index + 1, finalIndex >= 0 ? finalIndex : segment.length)
+      .filter(isCollapsibleOperationalMessage)
+      .map((message) => message.info.id),
+    syntheticPromptMessageIDs,
+    replayPromptMessageIDs,
+    recallMarkerID: compaction.message.info.id,
+    recallTailStartMessageID: compactionPart.tail_start_id,
+  }
+}
+
+function buildSessionTurns(sessionID: SessionID, messages: SessionV1.WithParts[]) {
+  return {
+    sessionID,
+    turns: messages.flatMap((prompt, start) => {
+      if (!isPromptMessage(prompt)) return []
+      const nextPrompt = messages.findIndex((message, index) => index > start && isPromptMessage(message))
+      const segment = messages.slice(start, nextPrompt < 0 ? messages.length : nextPrompt)
+      const finalOutputMessageID = segment.filter(isFinalAssistant).at(-1)?.info.id
+      const intermediateMessageIDs = finalOutputMessageID
+        ? segment
+            .slice(
+              1,
+              segment.findIndex((message) => message.info.id === finalOutputMessageID),
+            )
+            .map((message) => message.info.id)
+        : segment.slice(1).map((message) => message.info.id)
+      const compaction = buildTurnCompaction(prompt.info.id, segment, finalOutputMessageID)
+      return [
+        {
+          id: `turn:${prompt.info.id}`,
+          startMessageID: prompt.info.id,
+          messageIDs: segment.map((message) => message.info.id),
+          intermediateMessageIDs: compaction
+            ? [...compaction.preCompactionMessageIDs, ...compaction.postCompactionMessageIDs]
+            : intermediateMessageIDs,
+          compactionBoundaryMessageIDs: compaction ? [compaction.compactionMessageID] : [],
+          finalOutputMessageID,
+          status: finalOutputMessageID ? ("complete" as const) : ("incomplete" as const),
+          compaction,
+        },
+      ]
+    }),
+  }
+}
+
 export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", (handlers) =>
   Effect.gen(function* () {
     const session = yield* Session.Service
@@ -52,6 +215,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const revertSvc = yield* SessionRevert.Service
     const compactSvc = yield* SessionCompaction.Service
     const runState = yield* SessionRunState.Service
+    const stagedContext = yield* SessionStagedContext.Service
     const agentSvc = yield* Agent.Service
     const permissionSvc = yield* Permission.Service
     const statusSvc = yield* SessionStatus.Service
@@ -92,6 +256,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const todo = Effect.fn("SessionHttpApi.todo")(function* (ctx: { params: { sessionID: SessionID } }) {
       yield* requireSession(ctx.params.sessionID)
       return yield* todoSvc.get(ctx.params.sessionID)
+    })
+
+    const turns = Effect.fn("SessionHttpApi.turns")(function* (ctx: { params: { sessionID: SessionID } }) {
+      yield* requireSession(ctx.params.sessionID)
+      return buildSessionTurns(
+        ctx.params.sessionID,
+        yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID })),
+      )
     })
 
     const diff = Effect.fn("SessionHttpApi.diff")(function* (ctx: {
@@ -148,6 +320,64 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return yield* SessionError.mapStorageNotFound(
         MessageV2.get({ sessionID: ctx.params.sessionID, messageID: ctx.params.messageID }),
       )
+    })
+
+    const contextStage = Effect.fn("SessionHttpApi.contextStage")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof StagedContextPayload.Type
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      if (!ctx.payload.parts.some((part) => part.type === "text" && part.text.length > 0)) {
+        return yield* new HttpApiError.BadRequest({})
+      }
+      return yield* stagedContext.stage({ ...ctx.payload, sessionID: ctx.params.sessionID })
+    })
+
+    const contextListStaged = Effect.fn("SessionHttpApi.contextListStaged")(function* (ctx: {
+      params: { sessionID: SessionID }
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      return yield* stagedContext.list({ sessionID: ctx.params.sessionID })
+    })
+
+    const contextClearStaged = Effect.fn("SessionHttpApi.contextClearStaged")(function* (ctx: {
+      params: { sessionID: SessionID; contextID?: string }
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      yield* stagedContext.clear({ sessionID: ctx.params.sessionID, contextID: ctx.params.contextID })
+      return HttpApiSchema.NoContent.make()
+    })
+
+    const compactedRange = Effect.fn("SessionHttpApi.compactedRange")(function* (ctx: {
+      params: { sessionID: SessionID }
+      query: typeof CompactedRangeQuery.Type
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
+      const markerIndex = messages.findIndex((message) => message.info.id === ctx.query.marker)
+      if (markerIndex < 0) {
+        return {
+          reference: { markerID: ctx.query.marker, tailStartID: ctx.query.tail_start_id },
+          messages: [],
+          complete: false,
+          notice: "Compaction marker was not found in this session.",
+        }
+      }
+
+      const marker = messages[markerIndex]
+      const markerPart = marker.parts.find((part): part is SessionV1.CompactionPart => part.type === "compaction")
+      const tailStartID = ctx.query.tail_start_id ?? markerPart?.tail_start_id
+      const tailStartIndex = tailStartID ? messages.findIndex((message) => message.info.id === tailStartID) : markerIndex
+      return {
+        reference: { markerID: ctx.query.marker, tailStartID, messageID: marker.info.id },
+        messages: messages.slice(0, Math.max(0, tailStartIndex >= 0 ? tailStartIndex : markerIndex)),
+        complete: !!markerPart && (!tailStartID || tailStartIndex >= 0),
+        notice: markerPart
+          ? tailStartID && tailStartIndex < 0
+            ? "Compaction tail start message was not found; returned the best available compacted range."
+            : undefined
+          : "Requested marker is not a compaction message.",
+      }
     })
 
     const create = Effect.fn("SessionHttpApi.create")(function* (ctx: { payload?: Session.CreateInput }) {
@@ -295,12 +525,31 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof PromptPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const correlation = StreamDiagnostics.correlationFromHeader(
+        request.headers["x-opencode-avalonia-stream-diagnostic"],
+      )
+      StreamDiagnostics.bindCorrelation(ctx.params.sessionID, correlation)
+      StreamDiagnostics.record({
+        stage: "prompt.route",
+        action: "accepted",
+        routeMode: "prompt-sync",
+        correlation,
+      })
       const message = yield* promptSvc
         .prompt({
           ...ctx.payload,
           sessionID: ctx.params.sessionID,
         })
         .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      StreamDiagnostics.record({
+        stage: "prompt.route",
+        action: "returned",
+        routeMode: "prompt-sync",
+        count: message.parts.length,
+        correlation,
+        match: true,
+      })
       return HttpServerResponse.stream(Stream.make(JSON.stringify(message)).pipe(Stream.encodeText), {
         contentType: "application/json",
       })
@@ -311,6 +560,17 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof PromptPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const correlation = StreamDiagnostics.correlationFromHeader(
+        request.headers["x-opencode-avalonia-stream-diagnostic"],
+      )
+      StreamDiagnostics.bindCorrelation(ctx.params.sessionID, correlation)
+      StreamDiagnostics.record({
+        stage: "prompt.route",
+        action: "accepted",
+        routeMode: "prompt-async",
+        correlation,
+      })
       yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
@@ -321,10 +581,24 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
               sessionID: ctx.params.sessionID,
               error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
             })
+            StreamDiagnostics.record({
+              stage: "prompt.route",
+              action: "error",
+              routeMode: "prompt-async",
+              correlation,
+              match: false,
+            })
           }),
         ),
         Effect.forkIn(scope, { startImmediately: true }),
       )
+      StreamDiagnostics.record({
+        stage: "prompt.route",
+        action: "returned",
+        routeMode: "prompt-async",
+        correlation,
+        match: true,
+      })
       return HttpApiSchema.NoContent.make()
     })
 
@@ -416,9 +690,15 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("get", get)
       .handle("children", children)
       .handle("todo", todo)
+      .handle("turns", turns)
       .handle("diff", diff)
       .handle("messages", messages)
       .handle("message", message)
+      .handle("contextStage", contextStage)
+      .handle("contextListStaged", contextListStaged)
+      .handle("contextClearStaged", contextClearStaged)
+      .handle("contextClearStagedItem", contextClearStaged)
+      .handle("compactedRange", compactedRange)
       .handleRaw("create", createRaw)
       .handle("remove", remove)
       .handle("update", update)

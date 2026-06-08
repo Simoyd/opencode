@@ -116,21 +116,21 @@ describe("HttpApi authorization middleware", () => {
     }),
   )
 
-  itSecret.live("accepts auth token query credentials", () =>
+  itSecret.live("rejects auth token query credentials", () =>
     Effect.gen(function* () {
       const response = yield* HttpClient.get(`/probe?auth_token=${encodeURIComponent(token("opencode", "secret"))}`)
 
-      expect(response.status).toBe(200)
+      expect(response.status).toBe(401)
     }),
   )
 
-  itSecret.live("prefers auth token query credentials over basic auth", () =>
+  itSecret.live("does not prefer auth token query credentials over bad basic auth", () =>
     Effect.gen(function* () {
       const response = yield* HttpClientRequest.get(
         `/probe?auth_token=${encodeURIComponent(token("opencode", "secret"))}`,
       ).pipe(HttpClientRequest.setHeader("authorization", basic("opencode", "wrong")), HttpClient.execute)
 
-      expect(response.status).toBe(200)
+      expect(response.status).toBe(401)
     }),
   )
 
@@ -145,11 +145,11 @@ describe("HttpApi authorization middleware", () => {
     }),
   )
 
-  itSecret.live("preserves handler errors when auth token query succeeds", () =>
+  itSecret.live("rejects auth token query credentials before handler errors", () =>
     Effect.gen(function* () {
       const response = yield* HttpClient.get(`/missing?auth_token=${encodeURIComponent(token("opencode", "secret"))}`)
 
-      expect(response.status).toBe(404)
+      expect(response.status).toBe(401)
     }),
   )
 

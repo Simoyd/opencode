@@ -4,8 +4,8 @@ export const PTY_CONNECT_TOKEN_HEADER_VALUE = "1"
 
 const PTY_CONNECT_PATH = /^\/pty\/[^/]+\/connect$/
 
-// Auth middleware skips Basic Auth when this matches; the PTY connect handler
-// is then responsible for validating the ticket.
+// PTY tickets are an application-layer guard after Basic auth succeeds. The
+// custom sidecar auth middleware does not skip Basic for ticketed connects.
 export function isPtyConnectPath(pathname: string) {
   return PTY_CONNECT_PATH.test(pathname)
 }

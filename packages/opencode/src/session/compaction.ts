@@ -497,11 +497,21 @@ export const layer = Layer.effect(
               part.type === "file" && MessageV2.isMedia(part.mime)
                 ? { type: "text" as const, text: `[Attached ${part.mime}: ${part.filename ?? "file"}]` }
                 : part
+            const metadata =
+              replayPart.type === "text"
+                ? {
+                    ...(part.type === "text" ? (part.metadata ?? {}) : {}),
+                    compaction_replay: true,
+                    compaction_replay_source_message_id: original.id,
+                    source_message_id: part.messageID,
+                  }
+                : undefined
             yield* session.updatePart({
               ...replayPart,
               id: PartID.ascending(),
               messageID: replayMsg.id,
               sessionID: input.sessionID,
+              ...(metadata ? { metadata } : {}),
             })
           }
         }

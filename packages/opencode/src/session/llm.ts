@@ -28,6 +28,7 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import { StreamDiagnostics } from "@/diagnostic/stream"
 
 const log = Log.create({ service: "llm" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
@@ -49,6 +50,69 @@ export type StreamInput = {
 
 export type StreamRequest = StreamInput & {
   abort: AbortSignal
+}
+
+function providerEventCategory(event: LLMEvent) {
+  switch (event.type) {
+    case "text-delta":
+      return { eventType: "text-delta", length: event.text.length, shape: "text-delta" }
+    case "reasoning-delta":
+      return { eventType: "reasoning-delta", length: event.text.length, shape: "reasoning-delta" }
+    case "tool-input-start":
+    case "tool-input-delta":
+    case "tool-input-end":
+    case "tool-call":
+    case "tool-result":
+    case "tool-error":
+      return { eventType: event.type, shape: "tool-control" }
+    case "step-finish":
+    case "finish":
+      return { eventType: "final", shape: "final" }
+    case "provider-error":
+      return { eventType: "error", shape: "error" }
+    default:
+      return { eventType: event.type, shape: "control" }
+  }
+}
+
+function instrumentProviderStream(sessionID: string, stream: Stream.Stream<LLMEvent, unknown>) {
+  const correlation = StreamDiagnostics.correlationForSession(sessionID)
+  StreamDiagnostics.record({
+    stage: "provider.stream",
+    action: "start",
+    routeMode: "provider-stream",
+    correlation,
+  })
+  let count = 0
+  return stream.pipe(
+    Stream.tap((event) =>
+      Effect.sync(() => {
+        count++
+        const category = providerEventCategory(event)
+        StreamDiagnostics.record({
+          stage: "provider.stream",
+          action: "chunk",
+          eventType: category.eventType,
+          count,
+          length: category.length,
+          shape: category.shape,
+          routeMode: "provider-stream",
+          correlation,
+        })
+      }),
+    ),
+    Stream.ensuring(
+      Effect.sync(() =>
+        StreamDiagnostics.record({
+          stage: "provider.stream",
+          action: "end",
+          count,
+          routeMode: "provider-stream",
+          correlation,
+        }),
+      ),
+    ),
+  )
 }
 
 export interface Interface {
@@ -363,17 +427,18 @@ const live: Layer.Layer<
 
             const result = yield* run({ ...input, abort: ctrl.signal })
 
-            if (result.type === "native") return result.stream
+            if (result.type === "native") return instrumentProviderStream(input.sessionID, result.stream)
 
             // Adapter seam: both runtimes expose the same LLMEvent stream. Native
             // already returns one; AI SDK streams are converted here.
             const state = LLMAISDK.adapterState()
-            return Stream.fromAsyncIterable(result.result.fullStream, (e) =>
+            const stream = Stream.fromAsyncIterable(result.result.fullStream, (e) =>
               e instanceof Error ? e : new Error(String(e)),
             ).pipe(
               Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
               Stream.flatMap((events) => Stream.fromIterable(events)),
             )
+            return instrumentProviderStream(input.sessionID, stream)
           }),
         ),
       )

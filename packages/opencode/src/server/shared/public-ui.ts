@@ -1,6 +1,6 @@
-// Static UI assets the browser fetches without app-managed credentials, e.g.
-// the manifest link in <head>. These bypass auth so the page can install/render
-// the manifest icons even when a server password is configured.
+// Static UI asset paths historically fetched without app-managed credentials.
+// The custom sidecar does not bypass Basic auth for these paths when a server
+// password is configured.
 export const PUBLIC_UI_PATHS = new Set<string>([
   "/site.webmanifest",
   "/web-app-manifest-192x192.png",

@@ -42,6 +42,7 @@ import { Global } from "@opencode-ai/core/global"
 import { Effect, Layer, Option, Context, Schema, Types } from "effect"
 import { NonNegativeInt, optionalOmitUndefined } from "@opencode-ai/core/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { StreamDiagnostics } from "@/diagnostic/stream"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 
@@ -910,7 +911,42 @@ export const layer: Layer.Layer<
       field: string
       delta: string
     }) {
-      yield* events.publish(MessageV2.Event.PartDelta, input)
+      yield* Effect.sync(() =>
+        StreamDiagnostics.record({
+          stage: "session.updatePartDelta",
+          action: "attempt",
+          eventType: MessageV2.Event.PartDelta.type,
+          length: input.delta.length,
+          correlation: StreamDiagnostics.correlationForSession(input.sessionID),
+        }),
+      )
+      yield* events.publish(MessageV2.Event.PartDelta, input).pipe(
+        Effect.catch((error) =>
+          Effect.gen(function* () {
+            yield* Effect.sync(() =>
+              StreamDiagnostics.record({
+                stage: "session.updatePartDelta",
+                action: "error",
+                eventType: MessageV2.Event.PartDelta.type,
+                length: input.delta.length,
+                correlation: StreamDiagnostics.correlationForSession(input.sessionID),
+                match: false,
+              }),
+            )
+            return yield* Effect.fail(error)
+          }),
+        ),
+      )
+      yield* Effect.sync(() =>
+        StreamDiagnostics.record({
+          stage: "session.updatePartDelta",
+          action: "returned",
+          eventType: MessageV2.Event.PartDelta.type,
+          length: input.delta.length,
+          correlation: StreamDiagnostics.correlationForSession(input.sessionID),
+          match: true,
+        }),
+      )
     })
 
     /** Finds the first message matching the predicate, searching newest-first. */

@@ -2,6 +2,7 @@ import { Config } from "@/config/config"
 import { GlobalBus, type GlobalEvent as GlobalBusEvent } from "@/bus/global"
 import { EffectBridge } from "@/effect/bridge"
 import { EventV2 } from "@opencode-ai/core/event"
+import { StreamDiagnostics } from "@/diagnostic/stream"
 import { Installation } from "@/installation"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -17,6 +18,15 @@ import { GlobalUpgradeInput } from "../groups/global"
 const log = Log.create({ service: "server" })
 
 function eventData(data: unknown): Sse.Event {
+  StreamDiagnostics.record({
+    stage: "route.global",
+    action: "write",
+    eventType: StreamDiagnostics.eventType(data),
+    length: JSON.stringify(data).length,
+    routeMode: "global",
+    shape: StreamDiagnostics.shape(data),
+    correlation: StreamDiagnostics.correlationForPayload(data),
+  })
   return {
     _tag: "Event",
     event: "message",
@@ -35,6 +45,12 @@ function parseBody(body: string) {
 
 function eventResponse() {
   log.info("global event connected")
+  StreamDiagnostics.record({
+    stage: "route.global",
+    action: "connect",
+    routeMode: "global",
+    readiness: "connected",
+  })
   const events = Stream.callback<GlobalBusEvent>((queue) => {
     const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
     return Effect.acquireRelease(
@@ -45,15 +61,58 @@ function eventResponse() {
   const heartbeat = Stream.tick("10 seconds").pipe(
     Stream.drop(1),
     Stream.map(() => ({ payload: { id: EventV2.ID.create(), type: "server.heartbeat", properties: {} } })),
+    Stream.tap((event) =>
+      Effect.sync(() =>
+        StreamDiagnostics.record({
+          stage: "route.global",
+          action: "queue",
+          eventType: "server.heartbeat",
+          length: JSON.stringify(event).length,
+          routeMode: "global",
+          shape: "global-envelope",
+        }),
+      ),
+    ),
   )
+  const connected = { payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }
+  StreamDiagnostics.record({
+    stage: "route.global",
+    action: "queue",
+    eventType: "server.connected",
+    length: JSON.stringify(connected).length,
+    routeMode: "global",
+    shape: "global-envelope",
+  })
 
   return HttpServerResponse.stream(
-    Stream.make({ payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }).pipe(
-      Stream.concat(events.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
+    Stream.make(connected).pipe(
+      Stream.concat(
+        events.pipe(
+          Stream.tap((event) =>
+            Effect.sync(() =>
+              StreamDiagnostics.record({
+                stage: "route.global",
+                action: "queue",
+                eventType: StreamDiagnostics.eventType(event),
+                length: JSON.stringify(event).length,
+                routeMode: "global",
+                shape: StreamDiagnostics.shape(event),
+                correlation: StreamDiagnostics.correlationForPayload(event),
+              }),
+            ),
+          ),
+          Stream.merge(heartbeat, { haltStrategy: "left" }),
+        ),
+      ),
       Stream.map(eventData),
       Stream.pipeThroughChannel(Sse.encode()),
       Stream.encodeText,
-      Stream.ensuring(Effect.sync(() => log.info("global event disconnected"))),
+      Stream.ensuring(
+        Effect.sync(() => {
+          log.info("global event disconnected")
+          StreamDiagnostics.record({ stage: "route.global", action: "disconnect", routeMode: "global" })
+        }),
+      ),
     ),
     {
       contentType: "text/event-stream",
