@@ -105,8 +105,11 @@ export const make = Effect.gen(function* () {
     return path.resolve(opts.cwd)
   })
 
-  const env = (opts: ChildProcess.CommandOptions) =>
-    opts.extendEnv ? scrubUserToolEnv({ ...globalThis.process.env, ...opts.env }) : opts.env
+  const env = (opts: ChildProcess.CommandOptions) => {
+    if (opts.extendEnv) return scrubUserToolEnv({ ...globalThis.process.env, ...opts.env })
+    if (Predicate.isUndefined(opts.env)) return scrubUserToolEnv(globalThis.process.env)
+    return opts.env
+  }
 
   const input = (x: ChildProcess.CommandInput | undefined): NodeChildProcess.IOType | undefined =>
     Stream.isStream(x) ? "pipe" : x

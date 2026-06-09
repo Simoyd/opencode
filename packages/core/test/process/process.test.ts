@@ -88,6 +88,53 @@ describe("AppProcess", () => {
     )
 
     it.effect(
+      "default child env inherits normal tool env without sidecar-only controls",
+      Effect.gen(function* () {
+        const saved = new Map<string, string | undefined>()
+        const keys = [
+          "HOME",
+          "XDG_CONFIG_HOME",
+          "OPENCODE_API_KEY",
+          Environment.ISOLATED_ROOT_ENV,
+          "OPENCODE_SERVER_PASSWORD",
+          "OPENCODE_AVALONIA_MANAGED_WSL_STATE_ENVIRONMENT_LABEL",
+        ]
+        for (const key of keys) saved.set(key, process.env[key])
+        process.env.HOME = "normal-home"
+        process.env.XDG_CONFIG_HOME = "normal-xdg-config"
+        process.env.OPENCODE_API_KEY = "provider-present"
+        process.env[Environment.ISOLATED_ROOT_ENV] = "isolated-root"
+        process.env.OPENCODE_SERVER_PASSWORD = "sidecar-secret"
+        process.env.OPENCODE_AVALONIA_MANAGED_WSL_STATE_ENVIRONMENT_LABEL = "source-dev"
+        try {
+          const svc = yield* AppProcess.Service
+          const script = `process.stdout.write(JSON.stringify({
+            home: process.env.HOME === "normal-home",
+            xdg: process.env.XDG_CONFIG_HOME === "normal-xdg-config",
+            tool: process.env.OPENCODE_API_KEY === "provider-present",
+            isolated: process.env.${Environment.ISOLATED_ROOT_ENV} === undefined,
+            serverPassword: process.env.OPENCODE_SERVER_PASSWORD === undefined,
+            stateLabel: process.env.OPENCODE_AVALONIA_MANAGED_WSL_STATE_ENVIRONMENT_LABEL === undefined
+          }))`
+          const result = yield* svc.run(ChildProcess.make(NODE, ["-e", script]))
+          expect(JSON.parse(result.stdout.toString("utf8"))).toEqual({
+            home: true,
+            xdg: true,
+            tool: true,
+            isolated: true,
+            serverPassword: true,
+            stateLabel: true,
+          })
+        } finally {
+          for (const [key, value] of saved) {
+            if (value === undefined) delete process.env[key]
+            else process.env[key] = value
+          }
+        }
+      }),
+    )
+
+    it.effect(
       "captures stdout and exit code zero",
       Effect.gen(function* () {
         const svc = yield* AppProcess.Service
