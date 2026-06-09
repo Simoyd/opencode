@@ -2,6 +2,7 @@ import { type ChildProcess } from "child_process"
 import launch from "cross-spawn"
 import { buffer } from "node:stream/consumers"
 import { errorMessage } from "./error"
+import { Environment } from "@opencode-ai/core/environment"
 
 export type Stdio = "inherit" | "pipe" | "ignore"
 export type Shell = boolean | string
@@ -62,7 +63,7 @@ export function spawn(cmd: string[], opts: Options = {}): Child {
   const proc = launch(cmd[0], cmd.slice(1), {
     cwd: opts.cwd,
     shell: opts.shell,
-    env: opts.env === null ? {} : opts.env ? { ...process.env, ...opts.env } : undefined,
+    env: opts.env === null ? {} : opts.env ? Environment.userToolEnv(process.env, opts.env) : Environment.scrubUserToolEnv(),
     stdio: [opts.stdin ?? "ignore", opts.stdout ?? "ignore", opts.stderr ?? "ignore"],
     windowsHide: process.platform === "win32",
   })

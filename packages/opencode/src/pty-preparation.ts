@@ -5,6 +5,7 @@ import * as InstanceState from "@/effect/instance-state"
 import { Plugin } from "@/plugin"
 import { Shell } from "@/shell/shell"
 import { Pty } from "@opencode-ai/core/pty"
+import { Environment } from "@opencode-ai/core/environment"
 import { Effect } from "effect"
 
 export const prepareCreate = Effect.fn("PtyPreparation.prepareCreate")(function* (input: Pty.CreateInput) {
@@ -14,13 +15,10 @@ export const prepareCreate = Effect.fn("PtyPreparation.prepareCreate")(function*
   const args = Shell.login(command) ? [...(input.args ?? []), "-l"] : [...(input.args ?? [])]
   const cwd = input.cwd || (yield* InstanceState.context).directory
   const shell = yield* plugin.trigger("shell.env", { cwd }, { env: {} })
-  const env = {
-    ...process.env,
-    ...input.env,
-    ...shell.env,
+  const env = Environment.userToolEnv(process.env, input.env, shell.env, {
     TERM: "xterm-256color",
     OPENCODE_TERMINAL: "1",
-  } as Record<string, string>
+  }) as Record<string, string>
   if (process.platform === "win32") {
     env.LC_ALL = "C.UTF-8"
     env.LC_CTYPE = "C.UTF-8"

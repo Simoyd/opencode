@@ -22,6 +22,7 @@ import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
+import { Environment } from "@opencode-ai/core/environment"
 
 export { Parameters } from "./shell/prompt"
 
@@ -428,10 +429,7 @@ export const ShellTool = Tool.define(
         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
         { env: {} },
       )
-      return {
-        ...process.env,
-        ...extra.env,
-      }
+      return Environment.userToolEnv(process.env, extra.env)
     })
 
     const run = Effect.fn("ShellTool.run")(function* (

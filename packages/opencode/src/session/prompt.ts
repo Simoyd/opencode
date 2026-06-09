@@ -51,6 +51,7 @@ import { SessionRunState } from "./run-state"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
+import { Environment } from "@opencode-ai/core/environment"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -606,8 +607,7 @@ export const layer = Layer.effect(
               )
               const cmd = ChildProcess.make(sh, args, {
                 cwd,
-                extendEnv: true,
-                env: { ...shellEnv.env, TERM: "dumb" },
+                env: Environment.userToolEnv(process.env, shellEnv.env, { TERM: "dumb" }),
                 stdin: "ignore",
                 forceKillAfter: "3 seconds",
               })

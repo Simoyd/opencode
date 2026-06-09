@@ -7,6 +7,7 @@ import { Effect } from "effect"
 
 export type FlockGlobal = {
   state: string
+  locks?: string
 }
 
 export namespace Flock {
@@ -18,7 +19,7 @@ export namespace Flock {
 
   const root = () => {
     if (!global) throw new Error("Flock global not set")
-    return path.join(global.state, "locks")
+    return global.locks ?? path.join(global.state, "locks")
   }
 
   // Defaults for callers that do not provide timing options.

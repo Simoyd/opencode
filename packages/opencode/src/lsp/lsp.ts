@@ -13,6 +13,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { containsPath } from "@/project/instance-context"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Environment } from "@opencode-ai/core/environment"
 
 const log = Log.create({ service: "lsp" })
 
@@ -177,7 +178,7 @@ export const layer = Layer.effect(
                 spawn: async (root) => ({
                   process: lspspawn(item.command[0], item.command.slice(1), {
                     cwd: root,
-                    env: { ...process.env, ...item.env },
+                    env: Environment.userToolEnv(process.env, item.env),
                   }),
                   initialization: item.initialization,
                 }),
