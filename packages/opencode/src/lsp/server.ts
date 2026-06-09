@@ -14,6 +14,7 @@ import { Module } from "@opencode-ai/core/util/module"
 import { spawn } from "./launch"
 import { Npm } from "@opencode-ai/core/npm"
 import type { RuntimeFlags } from "@/effect/runtime-flags"
+import { Environment } from "@opencode-ai/core/environment"
 
 const log = Log.create({ service: "lsp.server" })
 const pathExists = async (p: string) =>
@@ -106,9 +107,7 @@ export const Typescript: Info = {
     if (!bin) return
     const proc = spawn(bin, ["--stdio"], {
       cwd: root,
-      env: {
-        ...process.env,
-      },
+      env: Environment.scrubUserToolEnv(),
     })
     return {
       process: proc,
@@ -137,9 +136,7 @@ export const Vue: Info = {
     args.push("--stdio")
     const proc = spawn(binary, args, {
       cwd: root,
-      env: {
-        ...process.env,
-      },
+      env: Environment.scrubUserToolEnv(),
     })
     return {
       process: proc,
@@ -196,9 +193,7 @@ export const ESLint: Info = {
 
     const proc = spawn("node", [serverPath, "--stdio"], {
       cwd: root,
-      env: {
-        ...process.env,
-      },
+      env: Environment.scrubUserToolEnv(),
     })
 
     return {
@@ -331,9 +326,7 @@ export const Biome: Info = {
 
     const proc = spawn(bin, args, {
       cwd: root,
-      env: {
-        ...process.env,
-      },
+      env: Environment.scrubUserToolEnv(),
     })
 
     return {
@@ -358,7 +351,7 @@ export const Gopls: Info = {
 
       log.info("installing gopls")
       const proc = Process.spawn(["go", "install", "golang.org/x/tools/gopls@latest"], {
-        env: { ...process.env, GOBIN: Global.Path.bin },
+        env: Environment.userToolEnv(process.env, { GOBIN: Global.Path.bin }),
         stdout: "pipe",
         stderr: "pipe",
         stdin: "pipe",
@@ -514,9 +507,7 @@ export const Pyright: Info = {
 
     const proc = spawn(binary, args, {
       cwd: root,
-      env: {
-        ...process.env,
-      },
+      env: Environment.scrubUserToolEnv(),
     })
     return {
       process: proc,
@@ -569,7 +560,7 @@ export const ElixirLS: Info = {
         })
 
         const cwd = path.join(Global.Path.bin, "elixir-ls-master")
-        const env = { MIX_ENV: "prod", ...process.env }
+        const env = Environment.userToolEnv(process.env, { MIX_ENV: "prod" })
         await Process.run(["mix", "deps.get"], { cwd, env })
         await Process.run(["mix", "compile"], { cwd, env })
         await Process.run(["mix", "elixir_ls.release2", "-o", "release"], { cwd, env })
@@ -1124,9 +1115,7 @@ export const Svelte: Info = {
     args.push("--stdio")
     const proc = spawn(binary, args, {
       cwd: root,
-      env: {
-        ...process.env,
-      },
+      env: Environment.scrubUserToolEnv(),
     })
     return {
       process: proc,
@@ -1158,9 +1147,7 @@ export const Astro: Info = {
     args.push("--stdio")
     const proc = spawn(binary, args, {
       cwd: root,
-      env: {
-        ...process.env,
-      },
+      env: Environment.scrubUserToolEnv(),
     })
     return {
       process: proc,
@@ -1409,9 +1396,7 @@ export const YamlLS: Info = {
     args.push("--stdio")
     const proc = spawn(binary, args, {
       cwd: root,
-      env: {
-        ...process.env,
-      },
+      env: Environment.scrubUserToolEnv(),
     })
     return {
       process: proc,
@@ -1576,9 +1561,7 @@ export const PHPIntelephense: Info = {
     args.push("--stdio")
     const proc = spawn(binary, args, {
       cwd: root,
-      env: {
-        ...process.env,
-      },
+      env: Environment.scrubUserToolEnv(),
     })
     return {
       process: proc,
@@ -1660,9 +1643,7 @@ export const BashLS: Info = {
     args.push("start")
     const proc = spawn(binary, args, {
       cwd: root,
-      env: {
-        ...process.env,
-      },
+      env: Environment.scrubUserToolEnv(),
     })
     return {
       process: proc,
@@ -1855,9 +1836,7 @@ export const DockerfileLS: Info = {
     args.push("--stdio")
     const proc = spawn(binary, args, {
       cwd: root,
-      env: {
-        ...process.env,
-      },
+      env: Environment.scrubUserToolEnv(),
     })
     return {
       process: proc,
@@ -1927,9 +1906,7 @@ export const Nixd: Info = {
     return {
       process: spawn(nixd, [], {
         cwd: root,
-        env: {
-          ...process.env,
-        },
+        env: Environment.scrubUserToolEnv(),
       }),
     }
   },

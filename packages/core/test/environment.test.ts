@@ -75,6 +75,8 @@ describe("Environment", () => {
       PATH: "/usr/bin",
       OPENCODE_API_KEY: "provider-key",
       [Environment.ISOLATED_ROOT_ENV]: "/isolated",
+      OPENCODE_AVALONIA_MANAGED_WSL_STATE_ENVIRONMENT_LABEL: "source-dev",
+      OPENCODE_AVALONIA_RUNTIME_ASSET_ROOT: "/sidecar/assets",
       OPENCODE_SERVER_PASSWORD: "secret",
       opencode_server_username: "case-insensitive-secret",
       OPENCODE_AVALONIA_STREAM_DIAGNOSTICS: "1",
@@ -87,6 +89,8 @@ describe("Environment", () => {
     expect(scrubbed.PATH).toBe("/usr/bin")
     expect(scrubbed.OPENCODE_API_KEY).toBe("provider-key")
     expect(scrubbed[Environment.ISOLATED_ROOT_ENV]).toBeUndefined()
+    expect(scrubbed.OPENCODE_AVALONIA_MANAGED_WSL_STATE_ENVIRONMENT_LABEL).toBeUndefined()
+    expect(scrubbed.OPENCODE_AVALONIA_RUNTIME_ASSET_ROOT).toBeUndefined()
     expect(scrubbed.OPENCODE_SERVER_PASSWORD).toBeUndefined()
     expect(scrubbed.opencode_server_username).toBeUndefined()
     expect(scrubbed.OPENCODE_AVALONIA_STREAM_DIAGNOSTICS).toBeUndefined()
@@ -95,7 +99,7 @@ describe("Environment", () => {
     expect(scrubbed.OPENCODE_AUTH_CONTENT).toBeUndefined()
   })
 
-  test("keeps explicit user-tool overrides after scrubbing inherited sidecar variables", () => {
+  test("scrubs sidecar-only overrides while preserving normal user-tool overrides", () => {
     const env = Environment.userToolEnv(
       {
         [Environment.ISOLATED_ROOT_ENV]: "/isolated",
@@ -106,6 +110,6 @@ describe("Environment", () => {
     expect(env[Environment.ISOLATED_ROOT_ENV]).toBeUndefined()
     expect(env.PATH).toBe("/usr/bin")
     expect(env.EXTRA).toBe("1")
-    expect(env.OPENCODE_SERVER_PASSWORD).toBe("explicit")
+    expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
   })
 })

@@ -24,6 +24,7 @@ import {
 import * as NodeChildProcess from "node:child_process"
 import { PassThrough } from "node:stream"
 import launch from "cross-spawn"
+import { scrubUserToolEnv } from "./environment"
 
 const toError = (err: unknown): Error => (err instanceof globalThis.Error ? err : new globalThis.Error(String(err)))
 
@@ -105,7 +106,7 @@ export const make = Effect.gen(function* () {
   })
 
   const env = (opts: ChildProcess.CommandOptions) =>
-    opts.extendEnv ? { ...globalThis.process.env, ...opts.env } : opts.env
+    opts.extendEnv ? scrubUserToolEnv({ ...globalThis.process.env, ...opts.env }) : opts.env
 
   const input = (x: ChildProcess.CommandInput | undefined): NodeChildProcess.IOType | undefined =>
     Stream.isStream(x) ? "pipe" : x

@@ -6,6 +6,7 @@ import path from "node:path"
 import { Effect, Exit, Fiber, Stream } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { AppProcess } from "@opencode-ai/core/process"
+import { Environment } from "@opencode-ai/core/environment"
 import { testEffect } from "../lib/effect"
 
 const it = testEffect(AppProcess.defaultLayer)
@@ -27,6 +28,65 @@ const waitForFile = (file: string) =>
 
 describe("AppProcess", () => {
   describe("run", () => {
+    it.effect(
+      "extendEnv children inherit normal tool env without sidecar-only controls",
+      Effect.gen(function* () {
+        const saved = new Map<string, string | undefined>()
+        const keys = [
+          "HOME",
+          "XDG_CONFIG_HOME",
+          "OPENCODE_API_KEY",
+          Environment.ISOLATED_ROOT_ENV,
+          "OPENCODE_SERVER_PASSWORD",
+          "OPENCODE_AVALONIA_MANAGED_WSL_STATE_ENVIRONMENT_LABEL",
+        ]
+        for (const key of keys) saved.set(key, process.env[key])
+        process.env.HOME = "normal-home"
+        process.env.XDG_CONFIG_HOME = "normal-xdg-config"
+        process.env.OPENCODE_API_KEY = "provider-present"
+        process.env[Environment.ISOLATED_ROOT_ENV] = "isolated-root"
+        process.env.OPENCODE_SERVER_PASSWORD = "sidecar-secret"
+        process.env.OPENCODE_AVALONIA_MANAGED_WSL_STATE_ENVIRONMENT_LABEL = "source-dev"
+        try {
+          const svc = yield* AppProcess.Service
+          const script = `process.stdout.write(JSON.stringify({
+            home: process.env.HOME === "normal-home",
+            xdg: process.env.XDG_CONFIG_HOME === "normal-xdg-config",
+            tool: process.env.OPENCODE_API_KEY === "provider-present",
+            isolated: process.env.${Environment.ISOLATED_ROOT_ENV} === undefined,
+            serverPassword: process.env.OPENCODE_SERVER_PASSWORD === undefined,
+            stateLabel: process.env.OPENCODE_AVALONIA_MANAGED_WSL_STATE_ENVIRONMENT_LABEL === undefined,
+            overrideSecret: process.env.OPENCODE_AVALONIA_STREAM_DIAGNOSTICS === undefined,
+            overrideTool: process.env.OCA_ALLOWED_TOOL_ENV === "ok"
+          }))`
+          const result = yield* svc.run(
+            ChildProcess.make(NODE, ["-e", script], {
+              extendEnv: true,
+              env: {
+                OPENCODE_AVALONIA_STREAM_DIAGNOSTICS: "1",
+                OCA_ALLOWED_TOOL_ENV: "ok",
+              },
+            }),
+          )
+          expect(JSON.parse(result.stdout.toString("utf8"))).toEqual({
+            home: true,
+            xdg: true,
+            tool: true,
+            isolated: true,
+            serverPassword: true,
+            stateLabel: true,
+            overrideSecret: true,
+            overrideTool: true,
+          })
+        } finally {
+          for (const [key, value] of saved) {
+            if (value === undefined) delete process.env[key]
+            else process.env[key] = value
+          }
+        }
+      }),
+    )
+
     it.effect(
       "captures stdout and exit code zero",
       Effect.gen(function* () {
