@@ -91,6 +91,8 @@ const SHAPES = new Set([
   "unknown",
 ])
 const TASK_METADATA_ACTIONS = new Set([
+  "processor.tool-call.registered-before-execute",
+  "task.child-session.created-or-reused",
   "task.metadata.publish.attempted",
   "task.metadata.publish.completed",
   "task.metadata.update.applied",
@@ -108,6 +110,7 @@ const TOOL_EVENT_SOURCES = new Set([
   "tool-call",
   "tool-result",
   "tool-error",
+  "tool-execute-before",
   "unknown",
 ])
 
@@ -157,8 +160,15 @@ export type StreamDiagnosticTaskMetadataTraceEvent = {
   toolCallToken?: string
   sessionToken?: string
   parentSessionToken?: string
+  sourceMessageToken?: string
   childSessionToken?: string
   hasTaskMetadataChildSession?: boolean
+  childSessionOriginPresent?: boolean
+  childSessionReused?: boolean
+  originParentSessionPresent?: boolean
+  originSourceMessagePresent?: boolean
+  originToolCallPresent?: boolean
+  originChildSessionPresent?: boolean
   updateMatched?: boolean
   registeredToolCallCount?: number
   stateMetadataChildSessionPresent?: boolean
@@ -222,9 +232,20 @@ function safeTaskMetadataInput(input: TaskMetadataInput): TaskMetadataInput | un
     toolCallToken: input.toolCallToken,
     sessionToken: input.sessionToken,
     parentSessionToken: input.parentSessionToken,
+    sourceMessageToken: input.sourceMessageToken,
     childSessionToken: input.childSessionToken,
     hasTaskMetadataChildSession:
       typeof input.hasTaskMetadataChildSession === "boolean" ? input.hasTaskMetadataChildSession : undefined,
+    childSessionOriginPresent:
+      typeof input.childSessionOriginPresent === "boolean" ? input.childSessionOriginPresent : undefined,
+    childSessionReused: typeof input.childSessionReused === "boolean" ? input.childSessionReused : undefined,
+    originParentSessionPresent:
+      typeof input.originParentSessionPresent === "boolean" ? input.originParentSessionPresent : undefined,
+    originSourceMessagePresent:
+      typeof input.originSourceMessagePresent === "boolean" ? input.originSourceMessagePresent : undefined,
+    originToolCallPresent: typeof input.originToolCallPresent === "boolean" ? input.originToolCallPresent : undefined,
+    originChildSessionPresent:
+      typeof input.originChildSessionPresent === "boolean" ? input.originChildSessionPresent : undefined,
     updateMatched: typeof input.updateMatched === "boolean" ? input.updateMatched : undefined,
     registeredToolCallCount: number(input.registeredToolCallCount),
     stateMetadataChildSessionPresent:
@@ -282,8 +303,15 @@ function recordTaskMetadata(input: {
   toolCallID?: string
   sessionID?: string
   parentSessionID?: string
+  sourceMessageID?: string
   childSessionID?: string
   hasTaskMetadataChildSession?: boolean
+  childSessionOriginPresent?: boolean
+  childSessionReused?: boolean
+  originParentSessionPresent?: boolean
+  originSourceMessagePresent?: boolean
+  originToolCallPresent?: boolean
+  originChildSessionPresent?: boolean
   updateMatched?: boolean
   registeredToolCallCount?: number
   stateMetadataChildSessionPresent?: boolean
@@ -296,8 +324,15 @@ function recordTaskMetadata(input: {
     toolCallToken: safeTaskMetadataToken("toolCall", input.toolCallID),
     sessionToken: safeTaskMetadataToken("session", input.sessionID),
     parentSessionToken: safeTaskMetadataToken("session", input.parentSessionID),
+    sourceMessageToken: safeTaskMetadataToken("message", input.sourceMessageID),
     childSessionToken: safeTaskMetadataToken("childSession", input.childSessionID),
     hasTaskMetadataChildSession: input.hasTaskMetadataChildSession,
+    childSessionOriginPresent: input.childSessionOriginPresent,
+    childSessionReused: input.childSessionReused,
+    originParentSessionPresent: input.originParentSessionPresent,
+    originSourceMessagePresent: input.originSourceMessagePresent,
+    originToolCallPresent: input.originToolCallPresent,
+    originChildSessionPresent: input.originChildSessionPresent,
     updateMatched: input.updateMatched,
     registeredToolCallCount: input.registeredToolCallCount,
     stateMetadataChildSessionPresent: input.stateMetadataChildSessionPresent,

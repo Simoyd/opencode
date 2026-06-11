@@ -60,6 +60,7 @@ export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
   readonly message: SessionV1.Assistant
+  readonly registerToolCall: (input: { toolCallID: string; toolName: string }) => Effect.Effect<SessionV1.ToolPart>
   readonly updateToolCall: (
     toolCallID: string,
     update: (part: SessionV1.ToolPart) => SessionV1.ToolPart,
@@ -218,6 +219,7 @@ export const layer = Layer.effect(
             action: "processor.updateToolCall.miss",
             toolCallID,
             sessionID: ctx.sessionID,
+            sourceMessageID: ctx.assistantMessage.id,
             updateMatched: false,
             registeredToolCallCount: Object.keys(ctx.toolcalls).length,
           })
@@ -234,6 +236,7 @@ export const layer = Layer.effect(
           action: "processor.updateToolCall.success",
           toolCallID,
           sessionID: ctx.sessionID,
+          sourceMessageID: ctx.assistantMessage.id,
           updateMatched: true,
           registeredToolCallCount: Object.keys(ctx.toolcalls).length,
           stateMetadataChildSessionPresent: hasStateMetadataChildSession(part),
@@ -346,6 +349,7 @@ export const layer = Layer.effect(
             eventSource: input.eventSource ?? "unknown",
             toolCallID: input.id,
             sessionID: ctx.sessionID,
+            sourceMessageID: ctx.assistantMessage.id,
             registeredToolCallCount: Object.keys(ctx.toolcalls).length,
             stateMetadataChildSessionPresent: hasStateMetadataChildSession(existing.part),
           })
@@ -397,11 +401,34 @@ export const layer = Layer.effect(
           eventSource: input.eventSource ?? "unknown",
           toolCallID: input.id,
           sessionID: ctx.sessionID,
+          sourceMessageID: ctx.assistantMessage.id,
           registeredToolCallCount: Object.keys(ctx.toolcalls).length,
           stateMetadataChildSessionPresent: hasStateMetadataChildSession(part),
           topLevelProviderMetadataPresent: hasProviderMetadata(part.metadata),
         })
         return { call: ctx.toolcalls[input.id], part }
+      })
+
+      const registerToolCall = Effect.fn("SessionProcessor.registerToolCall")(function* (input: {
+        toolCallID: string
+        toolName: string
+      }) {
+        const toolCall = yield* ensureToolCall({
+          id: input.toolCallID,
+          name: input.toolName,
+          eventSource: "tool-execute-before",
+        })
+        StreamDiagnostics.recordTaskMetadata({
+          action: "processor.tool-call.registered-before-execute",
+          eventSource: "tool-execute-before",
+          toolCallID: input.toolCallID,
+          sessionID: ctx.sessionID,
+          sourceMessageID: ctx.assistantMessage.id,
+          registeredToolCallCount: Object.keys(ctx.toolcalls).length,
+          stateMetadataChildSessionPresent: hasStateMetadataChildSession(toolCall.part),
+          topLevelProviderMetadataPresent: hasProviderMetadata(toolCall.part.metadata),
+        })
+        return toolCall.part
       })
 
       const isFilePart = (value: unknown): value is SessionV1.FilePart => Schema.is(SessionV1.FilePart)(value)
@@ -604,6 +631,7 @@ export const layer = Layer.effect(
               eventSource: "tool-call",
               toolCallID: value.id,
               sessionID: ctx.sessionID,
+              sourceMessageID: ctx.assistantMessage.id,
               updateMatched: updated !== undefined,
               registeredToolCallCount: Object.keys(ctx.toolcalls).length,
               stateMetadataChildSessionPresent: hasStateMetadataChildSession(updated ?? toolCall.part),
@@ -1147,6 +1175,7 @@ export const layer = Layer.effect(
         get message() {
           return ctx.assistantMessage
         },
+        registerToolCall,
         updateToolCall,
         completeToolCall,
         process,

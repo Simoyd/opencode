@@ -78,6 +78,31 @@ function renderOutput(input: {
   ].join("\n")
 }
 
+function childSessionMetadataWithTaskOrigin(input: {
+  existing: Record<string, unknown> | undefined
+  parentSessionID: SessionID
+  sourceMessageID: MessageID
+  toolCallID: string
+  childSessionID: SessionID
+  agent: string
+  model: { modelID: string; providerID: string }
+  background: boolean
+}) {
+  const origin = {
+    parentSessionId: input.parentSessionID,
+    sourceMessageId: input.sourceMessageID,
+    toolCallId: input.toolCallID,
+    childSessionId: input.childSessionID,
+    agent: input.agent,
+    model: input.model,
+    ...(input.background ? { background: true } : {}),
+  }
+  return {
+    ...(input.existing ?? {}),
+    taskOrigin: origin,
+  }
+}
+
 export const TaskTool = Tool.define(
   id,
   Effect.gen(function* () {
@@ -118,15 +143,16 @@ export const TaskTool = Tool.define(
         return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
       }
 
-      const session = params.task_id
+      const existingSession = params.task_id
         ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
+      const reusedChildSession = existingSession !== undefined
       const parent = yield* sessions.get(ctx.sessionID)
       const parentAgent = parent.agent
         ? yield* agent.get(parent.agent).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
       const nextSession =
-        session ??
+        existingSession ??
         (yield* sessions.create({
           parentID: ctx.sessionID,
           title: params.description + ` (@${next.name} subagent)`,
@@ -156,6 +182,35 @@ export const TaskTool = Tool.define(
         modelID: msg.info.modelID,
         providerID: msg.info.providerID,
       }
+      const childSessionMetadata = childSessionMetadataWithTaskOrigin({
+        existing: nextSession.metadata,
+        parentSessionID: ctx.sessionID,
+        sourceMessageID: ctx.messageID,
+        toolCallID: ctx.callID,
+        childSessionID: nextSession.id,
+        agent: next.name,
+        model,
+        background: runInBackground,
+      })
+      yield* sessions.setMetadata({
+        sessionID: nextSession.id,
+        metadata: childSessionMetadata,
+      })
+      StreamDiagnostics.recordTaskMetadata({
+        action: "task.child-session.created-or-reused",
+        toolCallID: ctx.callID,
+        sessionID: ctx.sessionID,
+        parentSessionID: ctx.sessionID,
+        sourceMessageID: ctx.messageID,
+        childSessionID: nextSession.id,
+        hasTaskMetadataChildSession: true,
+        childSessionOriginPresent: true,
+        childSessionReused: reusedChildSession,
+        originParentSessionPresent: true,
+        originSourceMessagePresent: true,
+        originToolCallPresent: true,
+        originChildSessionPresent: true,
+      })
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
@@ -168,6 +223,7 @@ export const TaskTool = Tool.define(
         toolCallID: ctx.callID,
         sessionID: ctx.sessionID,
         parentSessionID: ctx.sessionID,
+        sourceMessageID: ctx.messageID,
         childSessionID: nextSession.id,
         hasTaskMetadataChildSession: true,
       })
@@ -180,6 +236,7 @@ export const TaskTool = Tool.define(
         toolCallID: ctx.callID,
         sessionID: ctx.sessionID,
         parentSessionID: ctx.sessionID,
+        sourceMessageID: ctx.messageID,
         childSessionID: nextSession.id,
         hasTaskMetadataChildSession: true,
       })
@@ -277,6 +334,7 @@ export const TaskTool = Tool.define(
               toolCallID: ctx.callID,
               sessionID: ctx.sessionID,
               parentSessionID: ctx.sessionID,
+              sourceMessageID: ctx.messageID,
               childSessionID: nextSession.id,
               hasTaskMetadataChildSession: true,
             }),
@@ -291,6 +349,7 @@ export const TaskTool = Tool.define(
               toolCallID: ctx.callID,
               sessionID: ctx.sessionID,
               parentSessionID: ctx.sessionID,
+              sourceMessageID: ctx.messageID,
               childSessionID: nextSession.id,
               hasTaskMetadataChildSession: true,
             }),

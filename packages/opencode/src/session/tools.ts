@@ -39,7 +39,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
   model: Provider.Model
   session: Session.Info
-  processor: Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
+  processor: Pick<SessionProcessor.Handle, "message" | "registerToolCall" | "updateToolCall" | "completeToolCall">
   bypassAgentCheck: boolean
   messages: SessionV1.WithParts[]
   promptOps: TaskPromptOps
@@ -83,6 +83,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           toolCallID: options.toolCallId,
           sessionID: input.session.id,
           parentSessionID,
+          sourceMessageID: input.processor.message.id,
           childSessionID,
           hasTaskMetadataChildSession: childSessionID !== undefined,
           updateMatched: updated !== undefined,
@@ -112,6 +113,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         return run.promise(
           Effect.gen(function* () {
             const ctx = context(args, options)
+            yield* input.processor.registerToolCall({ toolCallID: options.toolCallId, toolName: item.id })
             yield* plugin.trigger(
               "tool.execute.before",
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
