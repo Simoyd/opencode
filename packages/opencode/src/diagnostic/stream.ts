@@ -3,7 +3,6 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 const SCHEMA = "opencode.avalonia.stream.diagnostics.v1"
 const DEFAULT_LIMIT = 512
 const DEFAULT_SUMMARY_LIMIT = 128
-const DEFAULT_TASK_METADATA_TRACE_LIMIT = 256
 const STAGES = new Set([
   "prompt.route",
   "provider.stream",
@@ -90,30 +89,6 @@ const SHAPES = new Set([
   "tool-control",
   "unknown",
 ])
-const TASK_METADATA_ACTIONS = new Set([
-  "processor.tool-call.registered-before-execute",
-  "task.child-session.created-or-reused",
-  "task.metadata.publish.attempted",
-  "task.metadata.publish.completed",
-  "task.metadata.update.applied",
-  "task.metadata.update.no-registered-toolcall",
-  "processor.updateToolCall.miss",
-  "processor.updateToolCall.success",
-  "processor.ensureToolCall.created",
-  "processor.ensureToolCall.existing",
-  "processor.tool-call.running-update",
-])
-const TOOL_EVENT_SOURCES = new Set([
-  "tool-input-start",
-  "tool-input-delta",
-  "tool-input-end",
-  "tool-call",
-  "tool-result",
-  "tool-error",
-  "tool-execute-before",
-  "unknown",
-])
-
 export type StreamDiagnosticEvent = {
   seq: number
   relativeMs: number
@@ -152,31 +127,6 @@ export type StreamDiagnosticStageSummary = {
   lengthTotal: number
 }
 
-export type StreamDiagnosticTaskMetadataTraceEvent = {
-  seq: number
-  relativeMs: number
-  action: string
-  eventSource?: string
-  toolCallToken?: string
-  sessionToken?: string
-  parentSessionToken?: string
-  sourceMessageToken?: string
-  childSessionToken?: string
-  hasTaskMetadataChildSession?: boolean
-  childSessionOriginPresent?: boolean
-  childSessionReused?: boolean
-  originParentSessionPresent?: boolean
-  originSourceMessagePresent?: boolean
-  originToolCallPresent?: boolean
-  originChildSessionPresent?: boolean
-  updateMatched?: boolean
-  registeredToolCallCount?: number
-  stateMetadataChildSessionPresent?: boolean
-  topLevelProviderMetadataPresent?: boolean
-}
-
-type TaskMetadataInput = Omit<StreamDiagnosticTaskMetadataTraceEvent, "seq" | "relativeMs">
-
 const state = {
   started: Date.now(),
   seq: 0,
@@ -187,11 +137,6 @@ const state = {
   events: [] as StreamDiagnosticEvent[],
   summaries: new Map<string, StreamDiagnosticStageSummary>(),
   correlations: new Map<string, string>(),
-  taskMetadataTrace: [] as StreamDiagnosticTaskMetadataTraceEvent[],
-  taskMetadataTraceLimit: DEFAULT_TASK_METADATA_TRACE_LIMIT,
-  taskMetadataTraceDropped: 0,
-  taskMetadataTokens: new Map<string, string>(),
-  taskMetadataTokenSeq: 0,
 }
 
 function allowlisted(value: unknown, allowed: Set<string>) {
@@ -208,51 +153,6 @@ function safeCorrelation(value: unknown) {
   if (typeof value !== "string") return undefined
   if (!/^[A-Za-z0-9._:-]{1,64}$/.test(value)) return undefined
   return value
-}
-
-function safeTaskMetadataToken(kind: string, value: unknown) {
-  if (!enabled()) return undefined
-  if (typeof value !== "string") return undefined
-  if (value.trim().length === 0) return undefined
-  const key = `${kind}\u001f${value.trim()}`
-  let token = state.taskMetadataTokens.get(key)
-  if (!token) {
-    token = `${kind}:${++state.taskMetadataTokenSeq}`
-    state.taskMetadataTokens.set(key, token)
-  }
-  return token
-}
-
-function safeTaskMetadataInput(input: TaskMetadataInput): TaskMetadataInput | undefined {
-  const action = allowlisted(input.action, TASK_METADATA_ACTIONS)
-  if (!action) return
-  return {
-    action,
-    eventSource: allowlisted(input.eventSource, TOOL_EVENT_SOURCES),
-    toolCallToken: input.toolCallToken,
-    sessionToken: input.sessionToken,
-    parentSessionToken: input.parentSessionToken,
-    sourceMessageToken: input.sourceMessageToken,
-    childSessionToken: input.childSessionToken,
-    hasTaskMetadataChildSession:
-      typeof input.hasTaskMetadataChildSession === "boolean" ? input.hasTaskMetadataChildSession : undefined,
-    childSessionOriginPresent:
-      typeof input.childSessionOriginPresent === "boolean" ? input.childSessionOriginPresent : undefined,
-    childSessionReused: typeof input.childSessionReused === "boolean" ? input.childSessionReused : undefined,
-    originParentSessionPresent:
-      typeof input.originParentSessionPresent === "boolean" ? input.originParentSessionPresent : undefined,
-    originSourceMessagePresent:
-      typeof input.originSourceMessagePresent === "boolean" ? input.originSourceMessagePresent : undefined,
-    originToolCallPresent: typeof input.originToolCallPresent === "boolean" ? input.originToolCallPresent : undefined,
-    originChildSessionPresent:
-      typeof input.originChildSessionPresent === "boolean" ? input.originChildSessionPresent : undefined,
-    updateMatched: typeof input.updateMatched === "boolean" ? input.updateMatched : undefined,
-    registeredToolCallCount: number(input.registeredToolCallCount),
-    stateMetadataChildSessionPresent:
-      typeof input.stateMetadataChildSessionPresent === "boolean" ? input.stateMetadataChildSessionPresent : undefined,
-    topLevelProviderMetadataPresent:
-      typeof input.topLevelProviderMetadataPresent === "boolean" ? input.topLevelProviderMetadataPresent : undefined,
-  }
 }
 
 function sanitize(input: Input): Input | undefined {
@@ -294,61 +194,6 @@ function record(input: Input) {
     event.overflow = true
   }
   state.events.push(event)
-  return true
-}
-
-function recordTaskMetadata(input: {
-  action: string
-  eventSource?: string
-  toolCallID?: string
-  sessionID?: string
-  parentSessionID?: string
-  sourceMessageID?: string
-  childSessionID?: string
-  hasTaskMetadataChildSession?: boolean
-  childSessionOriginPresent?: boolean
-  childSessionReused?: boolean
-  originParentSessionPresent?: boolean
-  originSourceMessagePresent?: boolean
-  originToolCallPresent?: boolean
-  originChildSessionPresent?: boolean
-  updateMatched?: boolean
-  registeredToolCallCount?: number
-  stateMetadataChildSessionPresent?: boolean
-  topLevelProviderMetadataPresent?: boolean
-}) {
-  if (!enabled()) return false
-  const safe = safeTaskMetadataInput({
-    action: input.action,
-    eventSource: input.eventSource,
-    toolCallToken: safeTaskMetadataToken("toolCall", input.toolCallID),
-    sessionToken: safeTaskMetadataToken("session", input.sessionID),
-    parentSessionToken: safeTaskMetadataToken("session", input.parentSessionID),
-    sourceMessageToken: safeTaskMetadataToken("message", input.sourceMessageID),
-    childSessionToken: safeTaskMetadataToken("childSession", input.childSessionID),
-    hasTaskMetadataChildSession: input.hasTaskMetadataChildSession,
-    childSessionOriginPresent: input.childSessionOriginPresent,
-    childSessionReused: input.childSessionReused,
-    originParentSessionPresent: input.originParentSessionPresent,
-    originSourceMessagePresent: input.originSourceMessagePresent,
-    originToolCallPresent: input.originToolCallPresent,
-    originChildSessionPresent: input.originChildSessionPresent,
-    updateMatched: input.updateMatched,
-    registeredToolCallCount: input.registeredToolCallCount,
-    stateMetadataChildSessionPresent: input.stateMetadataChildSessionPresent,
-    topLevelProviderMetadataPresent: input.topLevelProviderMetadataPresent,
-  })
-  if (!safe) return false
-  const event: StreamDiagnosticTaskMetadataTraceEvent = {
-    seq: ++state.seq,
-    relativeMs: Math.max(0, Date.now() - state.started),
-    ...safe,
-  }
-  if (state.taskMetadataTrace.length >= state.taskMetadataTraceLimit) {
-    state.taskMetadataTrace.shift()
-    state.taskMetadataTraceDropped++
-  }
-  state.taskMetadataTrace.push(event)
   return true
 }
 
@@ -472,37 +317,25 @@ function snapshot() {
         )
       : [],
     events: enabled() ? [...state.events] : [],
-    taskMetadataTrace: {
-      limit: state.taskMetadataTraceLimit,
-      dropped: state.taskMetadataTraceDropped,
-      overflow: state.taskMetadataTraceDropped > 0,
-      events: enabled() ? [...state.taskMetadataTrace] : [],
-    },
   }
 }
 
-function resetForTest(limit = DEFAULT_LIMIT, summaryLimit = DEFAULT_SUMMARY_LIMIT, taskMetadataTraceLimit = DEFAULT_TASK_METADATA_TRACE_LIMIT) {
+function resetForTest(limit = DEFAULT_LIMIT, summaryLimit = DEFAULT_SUMMARY_LIMIT) {
   state.started = Date.now()
   state.seq = 0
   state.limit = Math.max(1, Math.floor(limit))
   state.summaryLimit = Math.max(1, Math.floor(summaryLimit))
-  state.taskMetadataTraceLimit = Math.max(1, Math.floor(taskMetadataTraceLimit))
   state.dropped = 0
   state.droppedSummaries = 0
-  state.taskMetadataTraceDropped = 0
   state.events = []
-  state.taskMetadataTrace = []
   state.summaries.clear()
   state.correlations.clear()
-  state.taskMetadataTokens.clear()
-  state.taskMetadataTokenSeq = 0
 }
 
 export const StreamDiagnostics = {
   schema: SCHEMA,
   enabled,
   record,
-  recordTaskMetadata,
   bindCorrelation,
   correlationForSession,
   correlationForPayload,

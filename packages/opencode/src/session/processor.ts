@@ -37,25 +37,6 @@ import { StreamDiagnostics } from "@/diagnostic/stream"
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
 
-function metadataString(record: unknown, ...keys: string[]) {
-  if (!record || typeof record !== "object") return undefined
-  const source = record as Record<string, unknown>
-  for (const key of keys) {
-    const value = source[key]
-    if (typeof value === "string" && value.trim().length > 0) return value
-  }
-  return undefined
-}
-
-function hasStateMetadataChildSession(part: SessionV1.ToolPart | undefined) {
-  if (!part || (part.state.status !== "running" && part.state.status !== "completed")) return false
-  return metadataString(part.state.metadata, "sessionId", "sessionID") !== undefined
-}
-
-function hasProviderMetadata(record: unknown) {
-  return !!record && typeof record === "object" && Object.keys(record).length > 0
-}
-
 export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
@@ -215,14 +196,6 @@ export const layer = Layer.effect(
       ) {
         const match = yield* readToolCall(toolCallID)
         if (!match) {
-          StreamDiagnostics.recordTaskMetadata({
-            action: "processor.updateToolCall.miss",
-            toolCallID,
-            sessionID: ctx.sessionID,
-            sourceMessageID: ctx.assistantMessage.id,
-            updateMatched: false,
-            registeredToolCallCount: Object.keys(ctx.toolcalls).length,
-          })
           return undefined
         }
         const part = yield* session.updatePart(update(match.part))
@@ -232,15 +205,6 @@ export const layer = Layer.effect(
           messageID: part.messageID,
           sessionID: part.sessionID,
         }
-        StreamDiagnostics.recordTaskMetadata({
-          action: "processor.updateToolCall.success",
-          toolCallID,
-          sessionID: ctx.sessionID,
-          sourceMessageID: ctx.assistantMessage.id,
-          updateMatched: true,
-          registeredToolCallCount: Object.keys(ctx.toolcalls).length,
-          stateMetadataChildSessionPresent: hasStateMetadataChildSession(part),
-        })
         return part
       })
 
@@ -340,19 +304,9 @@ export const layer = Layer.effect(
         id: string
         name: string
         providerExecuted?: boolean
-        eventSource?: string
       }) {
         const existing = yield* readToolCall(input.id)
         if (existing) {
-          StreamDiagnostics.recordTaskMetadata({
-            action: "processor.ensureToolCall.existing",
-            eventSource: input.eventSource ?? "unknown",
-            toolCallID: input.id,
-            sessionID: ctx.sessionID,
-            sourceMessageID: ctx.assistantMessage.id,
-            registeredToolCallCount: Object.keys(ctx.toolcalls).length,
-            stateMetadataChildSessionPresent: hasStateMetadataChildSession(existing.part),
-          })
           if (!input.providerExecuted || existing.part.metadata?.providerExecuted) return existing
           const part = yield* session.updatePart({
             ...existing.part,
@@ -396,16 +350,6 @@ export const layer = Layer.effect(
           inputEnded: false,
           raw: "",
         }
-        StreamDiagnostics.recordTaskMetadata({
-          action: "processor.ensureToolCall.created",
-          eventSource: input.eventSource ?? "unknown",
-          toolCallID: input.id,
-          sessionID: ctx.sessionID,
-          sourceMessageID: ctx.assistantMessage.id,
-          registeredToolCallCount: Object.keys(ctx.toolcalls).length,
-          stateMetadataChildSessionPresent: hasStateMetadataChildSession(part),
-          topLevelProviderMetadataPresent: hasProviderMetadata(part.metadata),
-        })
         return { call: ctx.toolcalls[input.id], part }
       })
 
@@ -416,17 +360,6 @@ export const layer = Layer.effect(
         const toolCall = yield* ensureToolCall({
           id: input.toolCallID,
           name: input.toolName,
-          eventSource: "tool-execute-before",
-        })
-        StreamDiagnostics.recordTaskMetadata({
-          action: "processor.tool-call.registered-before-execute",
-          eventSource: "tool-execute-before",
-          toolCallID: input.toolCallID,
-          sessionID: ctx.sessionID,
-          sourceMessageID: ctx.assistantMessage.id,
-          registeredToolCallCount: Object.keys(ctx.toolcalls).length,
-          stateMetadataChildSessionPresent: hasStateMetadataChildSession(toolCall.part),
-          topLevelProviderMetadataPresent: hasProviderMetadata(toolCall.part.metadata),
         })
         return toolCall.part
       })
@@ -539,12 +472,12 @@ export const layer = Layer.effect(
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
             }
-            yield* ensureToolCall({ ...value, eventSource: "tool-input-start" })
+            yield* ensureToolCall(value)
             return
 
           case "tool-input-delta":
             {
-              const toolCall = yield* ensureToolCall({ ...value, eventSource: "tool-input-delta" })
+              const toolCall = yield* ensureToolCall(value)
               const assistantMessageID = mirrorAssistant ? yield* requireV2AssistantMessage(toolCall.call) : undefined
               if (assistantMessageID) {
                 yield* events.publish(SessionEvent.Tool.Input.Delta, {
@@ -560,7 +493,7 @@ export const layer = Layer.effect(
             return
 
           case "tool-input-end": {
-            const toolCall = yield* ensureToolCall({ ...value, eventSource: "tool-input-end" })
+            const toolCall = yield* ensureToolCall(value)
             // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
             if (mirrorAssistant) {
               const assistantMessageID = yield* requireV2AssistantMessage(toolCall.call)
@@ -580,7 +513,7 @@ export const layer = Layer.effect(
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
             }
-            const toolCall = yield* ensureToolCall({ ...value, eventSource: "tool-call" })
+            const toolCall = yield* ensureToolCall(value)
             const input = isRecord(value.input) ? value.input : { value: value.input }
             if (!toolCall.call.inputEnded) {
               // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
@@ -611,7 +544,7 @@ export const layer = Layer.effect(
                 timestamp: DateTime.makeUnsafe(Date.now()),
               })
             }
-            const updated = yield* updateToolCall(value.id, (match) => ({
+            yield* updateToolCall(value.id, (match) => ({
               ...match,
               tool: value.name,
               state:
@@ -626,17 +559,6 @@ export const layer = Layer.effect(
                 ? { ...value.providerMetadata, providerExecuted: true }
                 : value.providerMetadata,
             }))
-            StreamDiagnostics.recordTaskMetadata({
-              action: "processor.tool-call.running-update",
-              eventSource: "tool-call",
-              toolCallID: value.id,
-              sessionID: ctx.sessionID,
-              sourceMessageID: ctx.assistantMessage.id,
-              updateMatched: updated !== undefined,
-              registeredToolCallCount: Object.keys(ctx.toolcalls).length,
-              stateMetadataChildSessionPresent: hasStateMetadataChildSession(updated ?? toolCall.part),
-              topLevelProviderMetadataPresent: hasProviderMetadata(value.providerMetadata),
-            })
 
             const parts = yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
               Effect.provideService(Database.Service, database),

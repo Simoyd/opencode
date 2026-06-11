@@ -14,7 +14,6 @@ import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
-import { StreamDiagnostics } from "@/diagnostic/stream"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -146,7 +145,6 @@ export const TaskTool = Tool.define(
       const existingSession = params.task_id
         ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
-      const reusedChildSession = existingSession !== undefined
       const parent = yield* sessions.get(ctx.sessionID)
       const parentAgent = parent.agent
         ? yield* agent.get(parent.agent).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
@@ -196,21 +194,6 @@ export const TaskTool = Tool.define(
         sessionID: nextSession.id,
         metadata: childSessionMetadata,
       })
-      StreamDiagnostics.recordTaskMetadata({
-        action: "task.child-session.created-or-reused",
-        toolCallID: ctx.callID,
-        sessionID: ctx.sessionID,
-        parentSessionID: ctx.sessionID,
-        sourceMessageID: ctx.messageID,
-        childSessionID: nextSession.id,
-        hasTaskMetadataChildSession: true,
-        childSessionOriginPresent: true,
-        childSessionReused: reusedChildSession,
-        originParentSessionPresent: true,
-        originSourceMessagePresent: true,
-        originToolCallPresent: true,
-        originChildSessionPresent: true,
-      })
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
@@ -218,27 +201,9 @@ export const TaskTool = Tool.define(
         ...(runInBackground ? { background: true } : {}),
       }
 
-      StreamDiagnostics.recordTaskMetadata({
-        action: "task.metadata.publish.attempted",
-        toolCallID: ctx.callID,
-        sessionID: ctx.sessionID,
-        parentSessionID: ctx.sessionID,
-        sourceMessageID: ctx.messageID,
-        childSessionID: nextSession.id,
-        hasTaskMetadataChildSession: true,
-      })
       yield* ctx.metadata({
         title: params.description,
         metadata,
-      })
-      StreamDiagnostics.recordTaskMetadata({
-        action: "task.metadata.publish.completed",
-        toolCallID: ctx.callID,
-        sessionID: ctx.sessionID,
-        parentSessionID: ctx.sessionID,
-        sourceMessageID: ctx.messageID,
-        childSessionID: nextSession.id,
-        hasTaskMetadataChildSession: true,
       })
 
       const ops = ctx.extra?.promptOps as TaskPromptOps
@@ -328,32 +293,10 @@ export const TaskTool = Tool.define(
         title: params.description,
         metadata,
         onPromote: Effect.all([
-          Effect.sync(() =>
-            StreamDiagnostics.recordTaskMetadata({
-              action: "task.metadata.publish.attempted",
-              toolCallID: ctx.callID,
-              sessionID: ctx.sessionID,
-              parentSessionID: ctx.sessionID,
-              sourceMessageID: ctx.messageID,
-              childSessionID: nextSession.id,
-              hasTaskMetadataChildSession: true,
-            }),
-          ),
           ctx.metadata({
             title: params.description,
             metadata: { ...metadata, background: true, jobId: nextSession.id },
           }),
-          Effect.sync(() =>
-            StreamDiagnostics.recordTaskMetadata({
-              action: "task.metadata.publish.completed",
-              toolCallID: ctx.callID,
-              sessionID: ctx.sessionID,
-              parentSessionID: ctx.sessionID,
-              sourceMessageID: ctx.messageID,
-              childSessionID: nextSession.id,
-              hasTaskMetadataChildSession: true,
-            }),
-          ),
           notify(nextSession.id),
         ]),
         run: runTask().pipe(Effect.onInterrupt(() => ops.cancel(nextSession.id))),
