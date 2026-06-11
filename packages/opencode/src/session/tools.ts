@@ -21,8 +21,19 @@ import { Log } from "@opencode-ai/core/util/log"
 import { EffectBridge } from "@/effect/bridge"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { StreamDiagnostics } from "@/diagnostic/stream"
 
 const log = Log.create({ service: "session.tools" })
+
+function metadataString(record: unknown, ...keys: string[]) {
+  if (!record || typeof record !== "object") return undefined
+  const source = record as Record<string, unknown>
+  for (const key of keys) {
+    const value = source[key]
+    if (typeof value === "string" && value.trim().length > 0) return value
+  }
+  return undefined
+}
 
 export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
@@ -51,18 +62,31 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     agent: input.agent.name,
     messages: input.messages,
     metadata: (val) =>
-      input.processor.updateToolCall(options.toolCallId, (match) => {
-        if (!["running", "pending"].includes(match.state.status)) return match
-        return {
-          ...match,
-          state: {
-            title: val.title,
-            metadata: val.metadata,
-            status: "running",
-            input: args,
-            time: { start: Date.now() },
-          },
-        }
+      Effect.gen(function* () {
+        const childSessionID = metadataString(val.metadata, "sessionId", "sessionID")
+        const parentSessionID = metadataString(val.metadata, "parentSessionId", "parentSessionID")
+        const updated = yield* input.processor.updateToolCall(options.toolCallId, (match) => {
+          if (!["running", "pending"].includes(match.state.status)) return match
+          return {
+            ...match,
+            state: {
+              title: val.title,
+              metadata: val.metadata,
+              status: "running",
+              input: args,
+              time: { start: Date.now() },
+            },
+          }
+        })
+        StreamDiagnostics.recordTaskMetadata({
+          action: updated ? "task.metadata.update.applied" : "task.metadata.update.no-registered-toolcall",
+          toolCallID: options.toolCallId,
+          sessionID: input.session.id,
+          parentSessionID,
+          childSessionID,
+          hasTaskMetadataChildSession: childSessionID !== undefined,
+          updateMatched: updated !== undefined,
+        })
       }),
     ask: (req) =>
       permission
