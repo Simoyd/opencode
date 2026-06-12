@@ -1,11 +1,26 @@
 export * as ConfigMarkdown from "./markdown"
 
 import matter from "gray-matter"
+
+type MatterWithCache = typeof matter & {
+  cache?: Record<string, ReturnType<typeof matter>>
+}
+
+const matterWithCache = matter as MatterWithCache
+
+function cacheKey(content: string) {
+  return content.charCodeAt(0) === 0xfeff ? content.slice(1) : content
+}
+
 export function parse(content: string) {
   try {
     return matter(content)
   } catch {
-    return matter(sanitize(content))
+    const key = cacheKey(content)
+    delete matterWithCache.cache?.[key]
+    const parsed = matter(sanitize(content), {})
+    if (matterWithCache.cache) matterWithCache.cache[key] = parsed
+    return parsed
   }
 }
 

@@ -8,6 +8,7 @@ import type { Permission } from "../../src/permission"
 import type { Tool } from "@/tool/tool"
 import { SkillTool } from "../../src/tool/skill"
 import { ToolRegistry } from "@/tool/registry"
+import { ConfigMarkdown } from "@/config/markdown"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { testEffect } from "../lib/effect"
@@ -109,6 +110,8 @@ Use this skill.
 `,
         ),
       )
+
+      yield* Effect.promise(() => ConfigMarkdown.parse(path.join(skill, "SKILL.md")))
 
       const home = process.env.OPENCODE_TEST_HOME
       process.env.OPENCODE_TEST_HOME = dir

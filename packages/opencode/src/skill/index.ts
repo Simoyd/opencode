@@ -59,16 +59,6 @@ function isSkillFrontmatter(data: unknown): data is { name: string; description?
   )
 }
 
-function describeFrontmatterShape(data: unknown): unknown {
-  if (!isRecord(data)) return typeof data
-  return Object.fromEntries(
-    Object.entries(data).map(([key, value]) => [
-      key,
-      Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
-    ]),
-  )
-}
-
 export class InvalidError extends Schema.TaggedErrorClass<InvalidError>()("SkillInvalidError", {
   path: Schema.String,
   message: Schema.optional(Schema.String),
@@ -131,25 +121,7 @@ const add = Effect.fnUntraced(function* (state: State, match: string, events: Ev
 
   if (!md) return
 
-  if (!isSkillFrontmatter(md.data)) {
-    const retry = yield* Effect.tryPromise({
-      try: () => ConfigMarkdown.parseSanitized(match),
-      catch: (err) => err,
-    }).pipe(
-      Effect.catch(
-        Effect.fnUntraced(function* (err) {
-          log.warn("failed to parse skill with sanitized frontmatter", { skill: match, err })
-          return undefined
-        }),
-      ),
-    )
-    if (retry && isSkillFrontmatter(retry.data)) md = retry
-  }
-
-  if (!isSkillFrontmatter(md.data)) {
-    log.warn("skipping skill with invalid frontmatter", { skill: match, frontmatter: describeFrontmatterShape(md.data) })
-    return
-  }
+  if (!isSkillFrontmatter(md.data)) return
 
   if (state.skills[md.data.name]) {
     log.warn("duplicate skill name", {
