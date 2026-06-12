@@ -91,6 +91,55 @@ Use this skill.
     }),
   )
 
+  it.instance("execute loads skills whose frontmatter description contains an unquoted colon", () =>
+    Effect.gen(function* () {
+      const dir = (yield* TestInstance).directory
+      const skill = path.join(dir, ".opencode", "skill", "colon-skill")
+      yield* Effect.promise(() =>
+        Bun.write(
+          path.join(skill, "SKILL.md"),
+          `---
+name: colon-skill
+description: Build UI with MVVM: thin bindable view models.
+---
+
+# Colon Skill
+
+Use this skill.
+`,
+        ),
+      )
+
+      const home = process.env.OPENCODE_TEST_HOME
+      process.env.OPENCODE_TEST_HOME = dir
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          process.env.OPENCODE_TEST_HOME = home
+        }),
+      )
+
+      const registry = yield* ToolRegistry.Service
+      const agent = { name: "build", mode: "primary" as const, permission: [], options: {} }
+      const tool = (yield* registry.tools({
+        providerID: "opencode" as any,
+        modelID: "gpt-5" as any,
+        agent,
+      })).find((tool) => tool.id === SkillTool.id)
+      if (!tool) throw new Error("Skill tool not found")
+
+      const result = yield* tool.execute(
+        { name: "colon-skill" },
+        {
+          ...baseCtx,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(result.metadata.dir).toBe(skill)
+      expect(result.output).toContain(`<skill_content name="colon-skill">`)
+    }),
+  )
+
   it.instance("execute preserves not found message", () =>
     Effect.gen(function* () {
       const dir = (yield* TestInstance).directory

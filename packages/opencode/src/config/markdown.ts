@@ -17,9 +17,7 @@ export function shell(template: string) {
 // frontmatter, we need to fallback to a more permissive parser for those cases
 export const fallbackSanitization = ConfigMarkdownCore.sanitize
 
-export async function parse(filePath: string) {
-  const template = await Filesystem.readText(filePath)
-
+function parseTemplate(filePath: string, template: string) {
   try {
     return ConfigMarkdownCore.parse(template)
   } catch (err) {
@@ -31,6 +29,15 @@ export async function parse(filePath: string) {
       { cause: err },
     )
   }
+}
+
+export async function parse(filePath: string) {
+  return parseTemplate(filePath, await Filesystem.readText(filePath))
+}
+
+export async function parseSanitized(filePath: string) {
+  const template = await Filesystem.readText(filePath)
+  return parseTemplate(filePath, ConfigMarkdownCore.sanitize(template))
 }
 
 export * as ConfigMarkdown from "./markdown"
