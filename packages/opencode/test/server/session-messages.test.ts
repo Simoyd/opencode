@@ -79,6 +79,108 @@ const fill = Effect.fn("SessionMessagesTest.fill")(function* (
   )
 })
 
+const addUser = Effect.fn("SessionMessagesTest.addUser")(function* (
+  sessionID: SessionID,
+  text: string,
+  opts?: { replay?: boolean; replaySourceMessageID?: MessageID; syntheticContinue?: boolean },
+) {
+  const session = yield* SessionNs.Service
+  const id = MessageID.ascending()
+  const metadata = opts?.replay
+    ? { compaction_replay: true, compaction_replay_source_message_id: opts.replaySourceMessageID }
+    : opts?.syntheticContinue
+      ? { compaction_continue: true }
+      : undefined
+  yield* session.updateMessage({
+    id,
+    sessionID,
+    role: "user",
+    time: { created: Date.now() },
+    agent: "test",
+    model,
+    tools: {},
+    mode: "",
+  } as unknown as SessionV1.Info)
+  yield* session.updatePart({
+    id: PartID.ascending(),
+    sessionID,
+    messageID: id,
+    type: "text",
+    text,
+    synthetic: opts?.syntheticContinue ? true : undefined,
+    metadata,
+  } as any)
+  return id
+})
+
+type CompactedRangeBody = {
+  reference: { markerID: string; tailStartID?: string; messageID?: string }
+  messages: SessionV1.WithParts[]
+  complete: boolean
+  notice?: string
+}
+
+const addAssistant = Effect.fn("SessionMessagesTest.addAssistant")(function* (
+  sessionID: SessionID,
+  parentID: MessageID,
+  text: string,
+  opts?: { summary?: boolean; finish?: string },
+) {
+  const session = yield* SessionNs.Service
+  const id = MessageID.ascending()
+  yield* session.updateMessage({
+    id,
+    sessionID,
+    role: "assistant",
+    time: { created: Date.now() },
+    parentID,
+    modelID: ModelV2.ID.make("test"),
+    providerID: ProviderV2.ID.make("test"),
+    mode: "",
+    agent: "test",
+    path: { cwd: "/", root: "/" },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    summary: opts?.summary,
+    finish: opts?.finish,
+  } as unknown as SessionV1.Info)
+  yield* session.updatePart({
+    id: PartID.ascending(),
+    sessionID,
+    messageID: id,
+    type: "text",
+    text,
+  })
+  return id
+})
+
+const addCompaction = Effect.fn("SessionMessagesTest.addCompaction")(function* (
+  sessionID: SessionID,
+  tailStartID: MessageID,
+) {
+  const session = yield* SessionNs.Service
+  const id = MessageID.ascending()
+  yield* session.updateMessage({
+    id,
+    sessionID,
+    role: "user",
+    time: { created: Date.now() },
+    agent: "test",
+    model,
+    tools: {},
+    mode: "",
+  } as unknown as SessionV1.Info)
+  yield* session.updatePart({
+    id: PartID.ascending(),
+    sessionID,
+    messageID: id,
+    type: "compaction",
+    auto: true,
+    tail_start_id: tailStartID,
+  } as any)
+  return id
+})
+
 function request(path: string) {
   return TestInstance.pipe(Effect.flatMap((test) => requestInDirectory(path, test.directory)))
 }
@@ -175,6 +277,142 @@ describe("session messages endpoint", () => {
         const body = yield* json<unknown[]>(res)
         expect(Array.isArray(body)).toBe(true)
         expect(body).toHaveLength(1)
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
+    "returns row-local compacted range for latest compaction marker",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        const session = yield* sessionScoped
+
+        const start1 = yield* addUser(session.id, "first prompt")
+        yield* addAssistant(session.id, start1, "first raw work", { finish: "tool-calls" })
+        const compact1 = yield* addCompaction(session.id, start1)
+        yield* addAssistant(session.id, compact1, "first summary", { summary: true, finish: "end_turn" })
+        const replay1 = yield* addUser(session.id, "first replay", { replay: true, replaySourceMessageID: start1 })
+        yield* addAssistant(session.id, replay1, "first final", { finish: "end_turn" })
+
+        const start2 = yield* addUser(session.id, "second prompt")
+        yield* addAssistant(session.id, start2, "second raw work", { finish: "tool-calls" })
+        const compact2 = yield* addCompaction(session.id, start2)
+        const summary2 = yield* addAssistant(session.id, compact2, "second summary", { summary: true, finish: "end_turn" })
+        const replay2 = yield* addUser(session.id, "second replay", { replay: true, replaySourceMessageID: start2 })
+        yield* addAssistant(session.id, replay2, "second final", { finish: "end_turn" })
+
+        const start3 = yield* addUser(session.id, "third prompt")
+        const pre3 = yield* addAssistant(session.id, start3, "third raw work", { finish: "tool-calls" })
+        const compact3 = yield* addCompaction(session.id, start3)
+        yield* addAssistant(session.id, compact3, "third summary", { summary: true, finish: "end_turn" })
+        const replay3 = yield* addUser(session.id, "third replay", { replay: true, replaySourceMessageID: start3 })
+        yield* addAssistant(session.id, replay3, "third final", { finish: "end_turn" })
+
+        const res = yield* requestInDirectory(
+          `/session/${session.id}/compacted_range?marker=${encodeURIComponent(compact3)}&tail_start_id=${encodeURIComponent(start3)}&message_id=${encodeURIComponent(compact3)}`,
+          tmp.directory,
+        )
+        expect(res.status).toBe(200)
+        const body = (yield* res.json) as CompactedRangeBody
+        const ids = body.messages.map((message) => message.info.id)
+
+        expect(body.reference).toEqual({ markerID: compact3, tailStartID: start3, messageID: compact3 })
+        expect(body.complete).toBe(true)
+        expect(ids).toContain(summary2)
+        expect(ids).toContain(replay2)
+        expect(ids).toContain(start3)
+        expect(ids).toContain(pre3)
+        expect(ids).not.toContain(start1)
+        expect(ids).not.toContain(start2)
+        expect(ids).not.toContain(replay1)
+        expect(ids).not.toContain(replay3)
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
+    "fails closed for marker-present compacted ranges without a derivable turn",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        const session = yield* sessionScoped
+
+        const leakedPrefix = yield* addUser(session.id, "must not leak")
+        const nonCompactionMarker = yield* addUser(session.id, "not a compaction marker")
+
+        const nonCompaction = yield* requestInDirectory(
+          `/session/${session.id}/compacted_range?marker=${encodeURIComponent(nonCompactionMarker)}&tail_start_id=${encodeURIComponent(leakedPrefix)}&message_id=${encodeURIComponent(nonCompactionMarker)}`,
+          tmp.directory,
+        )
+        expect(nonCompaction.status).toBe(200)
+        const nonCompactionBody = (yield* nonCompaction.json) as CompactedRangeBody
+        expect(nonCompactionBody.reference).toEqual({
+          markerID: nonCompactionMarker,
+          tailStartID: leakedPrefix,
+          messageID: nonCompactionMarker,
+        })
+        expect(nonCompactionBody.messages.map((message) => message.info.id)).toEqual([])
+        expect(nonCompactionBody.complete).toBe(false)
+        expect(nonCompactionBody.notice).toBe("Requested marker is not a compaction message.")
+
+        const orphanCompaction = yield* addCompaction(session.id, leakedPrefix)
+        const orphan = yield* requestInDirectory(
+          `/session/${session.id}/compacted_range?marker=${encodeURIComponent(orphanCompaction)}&tail_start_id=${encodeURIComponent(leakedPrefix)}&message_id=${encodeURIComponent(orphanCompaction)}`,
+          tmp.directory,
+        )
+        expect(orphan.status).toBe(200)
+        const orphanBody = (yield* orphan.json) as CompactedRangeBody
+        expect(orphanBody.reference).toEqual({
+          markerID: orphanCompaction,
+          tailStartID: leakedPrefix,
+          messageID: orphanCompaction,
+        })
+        expect(orphanBody.messages.map((message) => message.info.id)).toEqual([])
+        expect(orphanBody.complete).toBe(false)
+        expect(orphanBody.notice).toBe("Compaction marker did not belong to a complete derived compaction turn.")
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
+    "excludes synthetic continue prompts from compacted range continuity",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        const session = yield* sessionScoped
+
+        const start1 = yield* addUser(session.id, "first prompt")
+        const compact1 = yield* addCompaction(session.id, start1)
+        const summary1 = yield* addAssistant(session.id, compact1, "first summary", { summary: true, finish: "end_turn" })
+        const synthetic1 = yield* addUser(session.id, "synthetic continue", { syntheticContinue: true })
+        const replay1 = yield* addUser(session.id, "first replay", { replay: true, replaySourceMessageID: start1 })
+        yield* addAssistant(session.id, replay1, "first final", { finish: "end_turn" })
+
+        const start2 = yield* addUser(session.id, "second prompt")
+        const compact2 = yield* addCompaction(session.id, start2)
+        yield* addAssistant(session.id, compact2, "second summary", { summary: true, finish: "end_turn" })
+        const replay2 = yield* addUser(session.id, "second replay", { replay: true, replaySourceMessageID: start2 })
+        yield* addAssistant(session.id, replay2, "second final", { finish: "end_turn" })
+
+        const res = yield* requestInDirectory(
+          `/session/${session.id}/compacted_range?marker=${encodeURIComponent(compact2)}&tail_start_id=${encodeURIComponent(start2)}&message_id=${encodeURIComponent(compact2)}`,
+          tmp.directory,
+        )
+        expect(res.status).toBe(200)
+        const body = (yield* res.json) as CompactedRangeBody
+        const ids = body.messages.map((message) => message.info.id)
+
+        expect(body.complete).toBe(true)
+        expect(ids).toContain(summary1)
+        expect(ids).toContain(replay1)
+        expect(ids).toContain(start2)
+        expect(ids).not.toContain(synthetic1)
+        expect(ids).not.toContain(start1)
+        expect(ids).not.toContain(replay2)
       }),
     ),
     { git: true },
