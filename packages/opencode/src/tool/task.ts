@@ -83,6 +83,7 @@ function childSessionMetadataWithTaskOrigin(input: {
   sourceMessageID: MessageID
   toolCallID: string
   childSessionID: SessionID
+  childTurnMessageID: MessageID
   agent: string
   model: { modelID: string; providerID: string }
   background: boolean
@@ -92,6 +93,7 @@ function childSessionMetadataWithTaskOrigin(input: {
     sourceMessageId: input.sourceMessageID,
     toolCallId: input.toolCallID,
     childSessionId: input.childSessionID,
+    childTurnMessageId: input.childTurnMessageID,
     agent: input.agent,
     model: input.model,
     ...(input.background ? { background: true } : {}),
@@ -180,12 +182,14 @@ export const TaskTool = Tool.define(
         modelID: msg.info.modelID,
         providerID: msg.info.providerID,
       }
+      const childTurnMessageID = MessageID.ascending()
       const childSessionMetadata = childSessionMetadataWithTaskOrigin({
         existing: nextSession.metadata,
         parentSessionID: ctx.sessionID,
         sourceMessageID: ctx.messageID,
         toolCallID: ctx.callID,
         childSessionID: nextSession.id,
+        childTurnMessageID,
         agent: next.name,
         model,
         background: runInBackground,
@@ -197,6 +201,7 @@ export const TaskTool = Tool.define(
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
+        childTurnMessageId: childTurnMessageID,
         model,
         ...(runInBackground ? { background: true } : {}),
       }
@@ -212,7 +217,7 @@ export const TaskTool = Tool.define(
       const runTask = Effect.fn("TaskTool.runTask")(function* () {
         const parts = yield* ops.resolvePromptParts(params.prompt)
         const result = yield* ops.prompt({
-          messageID: MessageID.ascending(),
+          messageID: childTurnMessageID,
           sessionID: nextSession.id,
           model: {
             modelID: model.modelID,

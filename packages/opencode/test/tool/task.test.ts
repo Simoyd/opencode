@@ -243,6 +243,11 @@ describe("tool.task", () => {
       expect(result.metadata.sessionId).toBe(child.id)
       expect(result.output).toContain(`<task id="${child.id}" state="completed">`)
       expect(seen?.sessionID).toBe(child.id)
+      expect(seen?.messageID).toBe(result.metadata.childTurnMessageId)
+      expect((yield* sessions.get(child.id)).metadata?.taskOrigin).toMatchObject({
+        childSessionId: child.id,
+        childTurnMessageId: seen?.messageID,
+      })
       expect(seen?.variant).toBe("xhigh")
     }),
   )
