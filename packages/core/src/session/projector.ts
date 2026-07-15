@@ -12,6 +12,8 @@ import { SessionMessageUpdater } from "./message-updater"
 import { SessionInput } from "./input"
 import { WorkspaceV2 } from "../workspace"
 import { SessionContextEpoch } from "./context-epoch"
+import { SessionMaintenance } from "./maintenance"
+import { TranscriptWindowProjection } from "./transcript-window"
 import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./sql"
 import type { DeepMutable } from "../schema"
 
@@ -230,6 +232,7 @@ export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const events = yield* EventV2.Service
     const { db } = yield* Database.Service
+    yield* events.beforeCommit((event) => SessionMaintenance.guardEvent(db, event))
     yield* events.beforeCommit((event) => SessionInput.guardReservedID(db, event))
     yield* events.project(SessionV1.Event.Created, (event) =>
       Effect.gen(function* () {
@@ -241,6 +244,10 @@ export const layer = Layer.effectDiscard(
           .get()
           .pipe(Effect.orDie)
         if (!stored) return yield* Effect.die(new SessionAlreadyProjected())
+        yield* TranscriptWindowProjection.create(db, {
+          sessionID: event.data.sessionID,
+          revision: event.seq ?? 0,
+        })
         if (event.data.info.workspaceID) {
           yield* db
             .update(WorkspaceTable)
@@ -290,6 +297,12 @@ export const layer = Layer.effectDiscard(
           .onConflictDoUpdate({ target: MessageTable.id, set: { data } })
           .run()
           .pipe(Effect.orDie)
+        yield* TranscriptWindowProjection.touch(db, {
+          sessionID,
+          messageID: id,
+          revision: event.seq ?? 0,
+        })
+        yield* TranscriptWindowProjection.refresh(db, { sessionID, revision: event.seq ?? 0 })
       }),
     )
     yield* events.project(SessionV1.Event.MessageRemoved, (event) =>
@@ -304,11 +317,21 @@ export const layer = Layer.effectDiscard(
           const previous = usage(row.data)
           if (previous) yield* applyUsage(db, event.data.sessionID, previous, -1)
         }
+        yield* TranscriptWindowProjection.touch(db, {
+          sessionID: event.data.sessionID,
+          messageID: event.data.messageID,
+          revision: event.seq ?? 0,
+          removed: true,
+        })
         yield* db
           .delete(MessageTable)
           .where(and(eq(MessageTable.id, event.data.messageID), eq(MessageTable.session_id, event.data.sessionID)))
           .run()
           .pipe(Effect.orDie)
+        yield* TranscriptWindowProjection.refresh(db, {
+          sessionID: event.data.sessionID,
+          revision: event.seq ?? 0,
+        })
       }),
     )
     yield* events.project(SessionV1.Event.PartRemoved, (event) =>
@@ -321,11 +344,21 @@ export const layer = Layer.effectDiscard(
           .pipe(Effect.orDie)
         const previous = row && usage(row.data)
         if (previous) yield* applyUsage(db, event.data.sessionID, previous, -1)
+        yield* TranscriptWindowProjection.touch(db, {
+          sessionID: event.data.sessionID,
+          messageID: event.data.messageID,
+          revision: event.seq ?? 0,
+          removed: true,
+        })
         yield* db
           .delete(PartTable)
           .where(and(eq(PartTable.id, event.data.partID), eq(PartTable.session_id, event.data.sessionID)))
           .run()
           .pipe(Effect.orDie)
+        yield* TranscriptWindowProjection.refresh(db, {
+          sessionID: event.data.sessionID,
+          revision: event.seq ?? 0,
+        })
       }),
     )
     yield* events.project(SessionV1.Event.PartUpdated, (event) =>
@@ -345,6 +378,12 @@ export const layer = Layer.effectDiscard(
         const next = usage(event.data.part)
         if (previous) yield* applyUsage(db, row.session_id, previous, -1)
         if (next) yield* applyUsage(db, sessionID, next)
+        yield* TranscriptWindowProjection.touch(db, {
+          sessionID,
+          messageID,
+          revision: event.seq ?? 0,
+        })
+        yield* TranscriptWindowProjection.refresh(db, { sessionID, revision: event.seq ?? 0 })
       }),
     )
     yield* events.project(SessionEvent.AgentSwitched, (event) => {

@@ -12,6 +12,7 @@ import { makeRuntime } from "@opencode-ai/core/effect/runtime"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionMaintenance } from "@opencode-ai/core/session/maintenance"
 
 import { NotFoundError } from "@/storage/storage"
 import { eq } from "drizzle-orm"
@@ -538,6 +539,8 @@ export const layer: Layer.Layer<
     const background = yield* BackgroundJob.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const admit = <A, E, R>(sessionID: SessionID, kind: string, effect: Effect.Effect<A, E, R>) =>
+      SessionMaintenance.withAdmission(db, { sessionID, kind }, effect)
 
     const createNext = Effect.fn("Session.createNext")(function* (input: {
       id?: SessionID
@@ -972,28 +975,28 @@ export const layer: Layer.Layer<
       list,
       listGlobal,
       create,
-      fork,
-      touch,
+      fork: (input) => admit(input.sessionID, "fork", fork(input)),
+      touch: (sessionID) => admit(sessionID, "touch", touch(sessionID)),
       get,
-      setTitle,
-      setArchived,
-      setMetadata,
-      setPermission,
-      setRevert,
-      clearRevert,
-      setSummary,
-      setShare,
-      setWorkspace,
+      setTitle: (input) => admit(input.sessionID, "set-title", setTitle(input)),
+      setArchived: (input) => admit(input.sessionID, "set-archived", setArchived(input)),
+      setMetadata: (input) => admit(input.sessionID, "set-metadata", setMetadata(input)),
+      setPermission: (input) => admit(input.sessionID, "set-permission", setPermission(input)),
+      setRevert: (input) => admit(input.sessionID, "set-revert", setRevert(input)),
+      clearRevert: (sessionID) => admit(sessionID, "clear-revert", clearRevert(sessionID)),
+      setSummary: (input) => admit(input.sessionID, "set-summary", setSummary(input)),
+      setShare: (input) => admit(input.sessionID, "set-share", setShare(input)),
+      setWorkspace: (input) => admit(input.sessionID, "set-workspace", setWorkspace(input)),
       diff,
       messages,
       children,
-      remove,
-      updateMessage,
-      removeMessage,
-      removePart,
-      updatePart,
+      remove: (sessionID) => admit(sessionID, "remove", remove(sessionID)),
+      updateMessage: (message) => admit(message.sessionID, "update-message", updateMessage(message)),
+      removeMessage: (input) => admit(input.sessionID, "remove-message", removeMessage(input)),
+      removePart: (input) => admit(input.sessionID, "remove-part", removePart(input)),
+      updatePart: (part) => admit(part.sessionID, "update-part", updatePart(part)),
       getPart,
-      updatePartDelta,
+      updatePartDelta: (input) => admit(input.sessionID, "update-part-delta", updatePartDelta(input)),
       findMessage,
     })
   }),

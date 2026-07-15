@@ -13,6 +13,7 @@ import { SessionRevert } from "@/session/revert"
 import { SessionRunState } from "@/session/run-state"
 import { SessionStagedContext } from "@/session/staged-context"
 import { SessionStatus } from "@/session/status"
+import { SessionTranscriptWindow } from "@/session/transcript-window"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
@@ -353,94 +354,68 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       query: typeof CompactedRangeQuery.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
-      const markerIndex = messages.findIndex((message) => message.info.id === ctx.query.marker)
-      if (markerIndex < 0) {
-        return {
-          reference: { markerID: ctx.query.marker, tailStartID: ctx.query.tail_start_id, messageID: ctx.query.message_id },
-          messages: [],
-          complete: false,
-          notice: "Compaction marker was not found in this session.",
-        }
-      }
-
-      const marker = messages[markerIndex]
-      const markerPart = marker.parts.find((part): part is SessionV1.CompactionPart => part.type === "compaction")
-      const requestedReference = {
+      const result = yield* SessionTranscriptWindow.loadArchive({
+        sessionID: ctx.params.sessionID,
         markerID: ctx.query.marker,
+        sourceGeneration: ctx.query.source_generation,
+        archiveID: ctx.query.archive_id,
+        archiveRevision: ctx.query.archive_revision,
         tailStartID: ctx.query.tail_start_id,
         messageID: ctx.query.message_id,
-      }
-      if (ctx.query.message_id && ctx.query.message_id !== marker.info.id) {
+        sourceMessageID: ctx.query.source_message_id,
+      }).pipe(
+        Effect.map((value) => ({ value })),
+        Effect.catch((error) => Effect.succeed({ error })),
+      )
+      if ("error" in result) {
+        const tooLarge = result.error instanceof SessionTranscriptWindow.TooLarge
         return {
-          reference: { markerID: marker.info.id, tailStartID: ctx.query.tail_start_id, messageID: marker.info.id },
+          reference: {
+            markerID: ctx.query.marker,
+            tailStartID: ctx.query.tail_start_id,
+            messageID: ctx.query.message_id,
+          },
           messages: [],
           complete: false,
-          notice: "Requested compaction message identity did not match the marker.",
+          notice: tooLarge
+            ? "Compacted transcript range exceeds the safe recall limit."
+            : "Compacted transcript range is stale or unavailable.",
+          status: tooLarge ? ("too_large" as const) : ("stale" as const),
+          sourceGeneration: ctx.query.source_generation,
+          archiveID: ctx.query.archive_id,
+          archiveRevision: ctx.query.archive_revision,
         }
       }
-      if (!markerPart) {
-        return {
-          reference: requestedReference,
-          messages: [],
-          complete: false,
-          notice: "Requested marker is not a compaction message.",
-        }
-      }
-
-      const tailStartID = ctx.query.tail_start_id ?? markerPart.tail_start_id
-      if (ctx.query.tail_start_id && ctx.query.tail_start_id !== markerPart.tail_start_id) {
-        return {
-          reference: { markerID: marker.info.id, tailStartID: markerPart.tail_start_id, messageID: marker.info.id },
-          messages: [],
-          complete: false,
-          notice: "Requested compaction tail-start identity did not match the marker.",
-        }
-      }
-
-      const tailStartIndex = tailStartID ? messages.findIndex((message) => message.info.id === tailStartID) : markerIndex
-      const turns = buildSessionTurns(ctx.params.sessionID, messages).turns.filter((turn) => turn.compaction)
-      const turnIndex = turns.findIndex((turn) => turn.compaction?.compactionMessageID === marker.info.id)
-      const turn = turnIndex >= 0 ? turns[turnIndex] : undefined
-      if (turnIndex < 0 || !turn) {
-        return {
-          reference: requestedReference,
-          messages: [],
-          complete: false,
-          notice: "Compaction marker did not belong to a complete derived compaction turn.",
-        }
-      }
-
-      const previousCompaction = turnIndex > 0 ? turns[turnIndex - 1]?.compaction : undefined
-      const rangeStartIndex = turnIndex > 0 && turn?.startMessageID
-        ? messages.findIndex((message) => message.info.id === turn.startMessageID)
-        : 0
-      const ownStartIndex = rangeStartIndex >= 0 && rangeStartIndex <= markerIndex ? rangeStartIndex : markerIndex
-      const continuityMessageIDs = previousCompaction
-        ? [
-            previousCompaction.summaryMessageID,
-            ...previousCompaction.replayPromptMessageIDs,
-          ]
-        : []
-      const seen = new Set<MessageID>()
-      const rowLocalMessages = [
-        ...continuityMessageIDs
-          .map((messageID) => messages.find((message) => message.info.id === messageID))
-          .filter((message): message is SessionV1.WithParts => !!message),
-        ...messages.slice(ownStartIndex, markerIndex),
-      ].filter((message) => {
-        if (seen.has(message.info.id)) return false
-        seen.add(message.info.id)
-        return true
-      })
       return {
-        reference: { markerID: ctx.query.marker, tailStartID, messageID: marker.info.id },
-        messages: rowLocalMessages,
-        complete: !tailStartID || tailStartIndex >= 0,
-        notice: tailStartID && tailStartIndex < 0
-          ? "Compaction tail start message was not found; returned the best available compacted range."
-          : undefined,
+        reference: {
+          markerID: result.value.markerID,
+          tailStartID: result.value.tailStartID,
+          messageID: result.value.markerID,
+        },
+        messages: result.value.messages,
+        complete: true,
+        status: "complete" as const,
+        sourceGeneration: result.value.sourceGeneration,
+        archiveID: result.value.archiveID,
+        archiveRevision: result.value.archiveRevision,
       }
+    })
+
+    const transcriptWindow = Effect.fn("SessionHttpApi.transcriptWindow")(function* (ctx: {
+      params: { sessionID: SessionID }
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      return yield* SessionTranscriptWindow.loadWindow(ctx.params.sessionID).pipe(
+        Effect.catch((error) =>
+          Effect.succeed({
+            status: error instanceof SessionTranscriptWindow.TooLarge ? ("too_large" as const) : ("stale" as const),
+            sessionID: ctx.params.sessionID,
+            archiveDescriptors: [],
+            tail: [],
+            counts: { descriptors: 0, messages: 0, parts: 0, textUnits: 0, decodedBytes: 0 },
+          }),
+        ),
+      )
     })
 
     const create = Effect.fn("SessionHttpApi.create")(function* (ctx: { payload?: Session.CreateInput }) {
@@ -762,6 +737,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("contextClearStaged", contextClearStaged)
       .handle("contextClearStagedItem", contextClearStaged)
       .handle("compactedRange", compactedRange)
+      .handle("transcriptWindow", transcriptWindow)
       .handleRaw("create", createRaw)
       .handle("remove", remove)
       .handle("update", update)

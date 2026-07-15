@@ -10,6 +10,8 @@ import { SessionEvent } from "../session/event"
 import { SessionSchema } from "../session/schema"
 import { AbsolutePath, RelativePath } from "../schema"
 import path from "path"
+import { Database } from "../database/database"
+import { SessionMaintenance } from "../session/maintenance"
 
 export const Destination = Schema.Struct({
   directory: AbsolutePath,
@@ -71,6 +73,7 @@ export const layer = Layer.effect(
     const events = yield* EventV2.Service
     const project = yield* ProjectV2.Service
     const session = yield* SessionV2.Service
+    const { db } = yield* Database.Service
 
     const moveSession = Effect.fn("MoveSession.moveSession")(function* (input: Input) {
       const current = yield* session.get(input.sessionID)
@@ -116,7 +119,10 @@ export const layer = Layer.effect(
       }
     })
 
-    return Service.of({ moveSession })
+    return Service.of({
+      moveSession: (input) =>
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "move" }, moveSession(input)),
+    })
   }),
 )
 
@@ -125,4 +131,5 @@ export const defaultLayer = layer.pipe(
   Layer.provide(EventV2.defaultLayer),
   Layer.provide(ProjectV2.defaultLayer),
   Layer.provide(SessionV2.defaultLayer),
+  Layer.provide(Database.defaultLayer),
 )

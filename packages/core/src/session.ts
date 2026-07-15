@@ -12,6 +12,7 @@ import { Prompt } from "./session/prompt"
 import { EventV2 } from "./event"
 import { Database } from "./database/database"
 import { SessionProjector } from "./session/projector"
+import { SessionMaintenance } from "./session/maintenance"
 import { SessionMessageTable, SessionTable } from "./session/sql"
 import { SessionSchema } from "./session/schema"
 import { AbsolutePath, PositiveInt, RelativePath } from "./schema"
@@ -347,32 +348,36 @@ export const layer = Layer.effect(
           ),
         ),
       prompt: Effect.fn("V2Session.prompt")((input) =>
-        Effect.uninterruptible(
-          Effect.gen(function* () {
-            yield* result.get(input.sessionID)
-            const returnPrompt = Effect.fnUntraced(function* (admitted: SessionInput.Admitted) {
-              if (input.resume !== false) yield* enqueueWake(input.sessionID)
-              return admitted
-            }, Effect.uninterruptible)
-            const messageID = input.id ?? SessionMessage.ID.create()
-            const delivery = input.delivery ?? "steer"
-            const expected = { sessionID: input.sessionID, messageID, prompt: input.prompt, delivery }
-            const admitted = yield* SessionInput.admit(db, events, {
-              id: messageID,
-              sessionID: input.sessionID,
-              prompt: input.prompt,
-              delivery,
-            }).pipe(
-              Effect.catchDefect((defect) =>
-                defect instanceof SessionInput.LifecycleConflict
-                  ? new PromptConflictError({ sessionID: input.sessionID, messageID })
-                  : Effect.die(defect),
-              ),
-            )
-            if (!SessionInput.equivalent(admitted, expected))
-              return yield* new PromptConflictError({ sessionID: input.sessionID, messageID })
-            return yield* returnPrompt(admitted)
-          }),
+        SessionMaintenance.withAdmission(
+          db,
+          { sessionID: input.sessionID, kind: "v2-prompt" },
+          Effect.uninterruptible(
+            Effect.gen(function* () {
+              yield* result.get(input.sessionID)
+              const returnPrompt = Effect.fnUntraced(function* (admitted: SessionInput.Admitted) {
+                if (input.resume !== false) yield* enqueueWake(input.sessionID)
+                return admitted
+              }, Effect.uninterruptible)
+              const messageID = input.id ?? SessionMessage.ID.create()
+              const delivery = input.delivery ?? "steer"
+              const expected = { sessionID: input.sessionID, messageID, prompt: input.prompt, delivery }
+              const admitted = yield* SessionInput.admit(db, events, {
+                id: messageID,
+                sessionID: input.sessionID,
+                prompt: input.prompt,
+                delivery,
+              }).pipe(
+                Effect.catchDefect((defect) =>
+                  defect instanceof SessionInput.LifecycleConflict
+                    ? new PromptConflictError({ sessionID: input.sessionID, messageID })
+                    : Effect.die(defect),
+                ),
+              )
+              if (!SessionInput.equivalent(admitted, expected))
+                return yield* new PromptConflictError({ sessionID: input.sessionID, messageID })
+              return yield* returnPrompt(admitted)
+            }),
+          ),
         ),
       ),
       shell: Effect.fn("V2Session.shell")(function* () {
@@ -397,7 +402,7 @@ export const layer = Layer.effect(
       }),
       resume: Effect.fn("V2Session.resume")(function* (sessionID) {
         yield* result.get(sessionID)
-        yield* execution.resume(sessionID)
+        yield* SessionMaintenance.withAdmission(db, { sessionID, kind: "v2-resume" }, execution.resume(sessionID))
       }),
     })
 

@@ -176,3 +176,113 @@ export const SessionContextEpochTable = sqliteTable("session_context_epoch", {
   replacement_seq: integer(),
   revision: integer().notNull().default(0),
 })
+
+export const SessionMaintenanceTable = sqliteTable("session_maintenance", {
+  session_id: text()
+    .$type<SessionSchema.ID>()
+    .primaryKey()
+    .references(() => SessionTable.id, { onDelete: "cascade" }),
+  owner_id: text().notNull(),
+  epoch: integer().notNull(),
+  kind: text().$type<"transcript_index">().notNull(),
+  time_started: integer().notNull(),
+  time_updated: integer().notNull(),
+})
+
+export const SessionAdmissionTable = sqliteTable(
+  "session_admission",
+  {
+    session_id: text()
+      .$type<SessionSchema.ID>()
+      .notNull()
+      .references(() => SessionTable.id, { onDelete: "cascade" }),
+    operation_id: text().notNull(),
+    kind: text().notNull(),
+    time_started: integer().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.session_id, table.operation_id] }),
+    index("session_admission_session_idx").on(table.session_id),
+  ],
+)
+
+export const TranscriptWindowStateTable = sqliteTable("transcript_window_state", {
+  session_id: text()
+    .$type<SessionSchema.ID>()
+    .primaryKey()
+    .references(() => SessionTable.id, { onDelete: "cascade" }),
+  source_generation: text().notNull(),
+  window_revision: integer().notNull(),
+  index_status: text()
+    .$type<"complete" | "index_required" | "indexing" | "index_failed" | "stale" | "revert_unrepresentable" | "too_large">()
+    .notNull(),
+  tail_start_id: text().$type<MessageID>(),
+  descriptor_count: integer().notNull().default(0),
+  message_count: integer().notNull().default(0),
+  part_count: integer().notNull().default(0),
+  text_units: integer().notNull().default(0),
+  decoded_bytes: integer().notNull().default(0),
+  index_owner_id: text(),
+  index_cursor_time: integer(),
+  index_cursor_id: text().$type<MessageID>(),
+  index_state: text({ mode: "json" }).$type<Record<string, unknown>>(),
+})
+
+export const CompactionArchiveManifestTable = sqliteTable(
+  "compaction_archive_manifest",
+  {
+    session_id: text()
+      .$type<SessionSchema.ID>()
+      .notNull()
+      .references(() => SessionTable.id, { onDelete: "cascade" }),
+    archive_id: text().notNull(),
+    archive_revision: integer().notNull(),
+    ordinal: integer().notNull(),
+    marker_id: text().$type<MessageID>().notNull(),
+    tail_start_id: text().$type<MessageID>(),
+    source_message_id: text().$type<MessageID>().notNull(),
+    summary_message_id: text().$type<MessageID>().notNull(),
+    range_start_id: text().$type<MessageID>().notNull(),
+    range_end_id: text().$type<MessageID>().notNull(),
+    summary_preview: text().notNull(),
+    continuity_message_ids: text({ mode: "json" }).$type<MessageID[]>().notNull(),
+    replay_message_ids: text({ mode: "json" }).$type<MessageID[]>().notNull(),
+    message_count: integer().notNull(),
+    part_count: integer().notNull(),
+    text_units: integer().notNull(),
+    decoded_bytes: integer().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.session_id, table.archive_id] }),
+    uniqueIndex("compaction_archive_session_ordinal_idx").on(table.session_id, table.ordinal),
+    index("compaction_archive_session_marker_idx").on(table.session_id, table.marker_id),
+  ],
+)
+
+export const CompactionArchiveStagingTable = sqliteTable(
+  "compaction_archive_staging",
+  {
+    session_id: text()
+      .$type<SessionSchema.ID>()
+      .notNull()
+      .references(() => SessionTable.id, { onDelete: "cascade" }),
+    owner_id: text().notNull(),
+    archive_id: text().notNull(),
+    archive_revision: integer().notNull(),
+    ordinal: integer().notNull(),
+    marker_id: text().$type<MessageID>().notNull(),
+    tail_start_id: text().$type<MessageID>(),
+    source_message_id: text().$type<MessageID>().notNull(),
+    summary_message_id: text().$type<MessageID>().notNull(),
+    range_start_id: text().$type<MessageID>().notNull(),
+    range_end_id: text().$type<MessageID>().notNull(),
+    summary_preview: text().notNull(),
+    continuity_message_ids: text({ mode: "json" }).$type<MessageID[]>().notNull(),
+    replay_message_ids: text({ mode: "json" }).$type<MessageID[]>().notNull(),
+    message_count: integer().notNull(),
+    part_count: integer().notNull(),
+    text_units: integer().notNull(),
+    decoded_bytes: integer().notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.session_id, table.owner_id, table.archive_id] })],
+)

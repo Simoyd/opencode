@@ -19,6 +19,8 @@ import { isOverflow as overflow, usable } from "./overflow"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { Database } from "@opencode-ai/core/database/database"
+import { SessionMaintenance } from "@opencode-ai/core/session/maintenance"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -224,6 +226,7 @@ export const layer = Layer.effect(
     const provider = yield* Provider.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const { db } = yield* Database.Service
 
     const isOverflow = Effect.fn("SessionCompaction.isOverflow")(function* (input: {
       tokens: SessionV1.Assistant["tokens"]
@@ -629,9 +632,16 @@ export const layer = Layer.effect(
 
     return Service.of({
       isOverflow,
-      prune,
-      process: processCompaction,
-      create,
+      prune: (input) =>
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "compaction-prune" }, prune(input)),
+      process: (input) =>
+        SessionMaintenance.withAdmission(
+          db,
+          { sessionID: input.sessionID, kind: "compaction-process" },
+          processCompaction(input),
+        ),
+      create: (input) =>
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "compaction-create" }, create(input)),
     })
   }),
 )
@@ -646,6 +656,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Config.defaultLayer),
     Layer.provide(RuntimeFlags.defaultLayer),
     Layer.provide(EventV2Bridge.defaultLayer),
+    Layer.provide(Database.defaultLayer),
   ),
 )
 

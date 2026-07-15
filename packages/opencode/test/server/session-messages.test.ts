@@ -12,10 +12,17 @@ import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { httpApiLayer, requestInDirectory } from "./httpapi-layer"
+import { Database } from "@opencode-ai/core/database/database"
+import {
+  CompactionArchiveManifestTable,
+  TranscriptWindowStateTable,
+} from "@opencode-ai/core/session/sql"
+import { SessionTranscriptIndex } from "@/session/transcript-index"
+import { eq } from "drizzle-orm"
 
 void Log.init({ print: false })
 
-const it = testEffect(Layer.mergeAll(SessionNs.defaultLayer, httpApiLayer))
+const it = testEffect(Layer.mergeAll(Database.defaultLayer, SessionNs.defaultLayer, httpApiLayer))
 
 const model = {
   providerID: ProviderV2.ID.make("test"),
@@ -118,6 +125,7 @@ type CompactedRangeBody = {
   messages: SessionV1.WithParts[]
   complete: boolean
   notice?: string
+  status: "complete" | "stale" | "unavailable" | "too_large"
 }
 
 const addAssistant = Effect.fn("SessionMessagesTest.addAssistant")(function* (
@@ -283,6 +291,47 @@ describe("session messages endpoint", () => {
   )
 
   it.instance(
+    "resumes bounded legacy transcript indexing without publishing a partial window",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        const session = yield* sessionScoped
+        yield* fill(session.id, 257)
+        const { db } = yield* Database.Service
+        yield* db
+          .delete(CompactionArchiveManifestTable)
+          .where(eq(CompactionArchiveManifestTable.session_id, session.id))
+          .run()
+          .pipe(Effect.orDie)
+        yield* db
+          .delete(TranscriptWindowStateTable)
+          .where(eq(TranscriptWindowStateTable.session_id, session.id))
+          .run()
+          .pipe(Effect.orDie)
+
+        const ownerID = crypto.randomUUID()
+        const interrupted = yield* SessionTranscriptIndex.run({ sessionID: session.id, ownerID, maxBatches: 1 })
+        expect(interrupted.complete).toBe(false)
+
+        const during = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
+        const duringBody = (yield* during.json) as { status: string; tail: unknown[] }
+        expect(duringBody.status).toBe("indexing")
+        expect(duringBody.tail).toEqual([])
+
+        const resumed = yield* SessionTranscriptIndex.run({ sessionID: session.id, ownerID })
+        expect(resumed.resumed).toBe(true)
+        expect(resumed.complete).toBe(true)
+
+        const complete = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
+        const completeBody = (yield* complete.json) as { status: string; tail: SessionV1.WithParts[] }
+        expect(completeBody.status).toBe("complete")
+        expect(completeBody.tail).toHaveLength(257)
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
     "returns row-local compacted range for latest compaction marker",
     withoutWatcher(
       Effect.gen(function* () {
@@ -328,6 +377,33 @@ describe("session messages endpoint", () => {
         expect(ids).not.toContain(start2)
         expect(ids).not.toContain(replay1)
         expect(ids).not.toContain(replay3)
+
+        const windowResponse = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
+        expect(windowResponse.status).toBe(200)
+        const window = (yield* windowResponse.json) as {
+          status: string
+          sourceGeneration: string
+          archiveDescriptors: Array<{
+            archiveID: string
+            archiveRevision: string
+            markerID: string
+            sourceMessageID: string
+          }>
+          tail: SessionV1.WithParts[]
+        }
+        expect(window.status).toBe("complete")
+        expect(window.archiveDescriptors).toHaveLength(3)
+        expect(window.tail.map((message) => message.info.id)).toContain(start3)
+        expect(window.tail.map((message) => message.info.id)).not.toContain(start2)
+
+        const descriptor = window.archiveDescriptors[2]!
+        const strong = yield* requestInDirectory(
+          `/session/${session.id}/compacted_range?marker=${encodeURIComponent(compact3)}&tail_start_id=${encodeURIComponent(start3)}&message_id=${encodeURIComponent(compact3)}&source_generation=${encodeURIComponent(window.sourceGeneration)}&archive_id=${encodeURIComponent(descriptor.archiveID)}&archive_revision=${encodeURIComponent(descriptor.archiveRevision)}&source_message_id=${encodeURIComponent(start3)}`,
+          tmp.directory,
+        )
+        const strongBody = (yield* strong.json) as CompactedRangeBody
+        expect(strongBody.status).toBe("complete")
+        expect(strongBody.messages.map((message) => message.info.id)).toEqual(ids)
       }),
     ),
     { git: true },
@@ -356,7 +432,8 @@ describe("session messages endpoint", () => {
         })
         expect(nonCompactionBody.messages.map((message) => message.info.id)).toEqual([])
         expect(nonCompactionBody.complete).toBe(false)
-        expect(nonCompactionBody.notice).toBe("Requested marker is not a compaction message.")
+        expect(nonCompactionBody.notice).toBe("Compacted transcript range is stale or unavailable.")
+        expect(nonCompactionBody.status).toBe("stale")
 
         const orphanCompaction = yield* addCompaction(session.id, leakedPrefix)
         const orphan = yield* requestInDirectory(
@@ -372,7 +449,8 @@ describe("session messages endpoint", () => {
         })
         expect(orphanBody.messages.map((message) => message.info.id)).toEqual([])
         expect(orphanBody.complete).toBe(false)
-        expect(orphanBody.notice).toBe("Compaction marker did not belong to a complete derived compaction turn.")
+        expect(orphanBody.notice).toBe("Compacted transcript range is stale or unavailable.")
+        expect(orphanBody.status).toBe("stale")
       }),
     ),
     { git: true },

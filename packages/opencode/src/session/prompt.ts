@@ -51,6 +51,7 @@ import { SessionRunState } from "./run-state"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
+import { SessionMaintenance } from "@opencode-ai/core/session/maintenance"
 import { Environment } from "@opencode-ai/core/environment"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionMessage } from "@opencode-ai/core/session/message"
@@ -1605,11 +1606,16 @@ export const layer = Layer.effect(
     })
 
     return Service.of({
-      cancel,
-      prompt,
-      loop,
-      shell,
-      command,
+      cancel: (sessionID) =>
+        SessionMaintenance.withAdmission(db, { sessionID, kind: "cancel" }, cancel(sessionID)),
+      prompt: (input) =>
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "prompt" }, prompt(input)),
+      loop: (input) =>
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "loop" }, loop(input)),
+      shell: (input) =>
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "shell" }, shell(input)),
+      command: (input) =>
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "command" }, command(input)),
       resolvePromptParts,
     })
   }),

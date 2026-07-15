@@ -25,6 +25,7 @@ import { described } from "./metadata"
 import { QueryBoolean } from "./query"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { NonNegativeInt } from "@opencode-ai/core/schema"
 
 const root = "/session"
 export const ListQuery = Schema.Struct({
@@ -50,7 +51,49 @@ export const CompactedRangeQuery = Schema.Struct({
   marker: MessageID,
   tail_start_id: Schema.optional(MessageID),
   message_id: Schema.optional(MessageID),
+  source_generation: Schema.optional(Schema.String),
+  archive_id: Schema.optional(Schema.String),
+  archive_revision: Schema.optional(Schema.String),
+  source_message_id: Schema.optional(MessageID),
 })
+export const TranscriptWindowStatus = Schema.Literals([
+  "complete",
+  "index_required",
+  "indexing",
+  "index_failed",
+  "stale",
+  "revert_unrepresentable",
+  "too_large",
+])
+export const TranscriptWindowCounts = Schema.Struct({
+  descriptors: NonNegativeInt,
+  messages: NonNegativeInt,
+  parts: NonNegativeInt,
+  textUnits: NonNegativeInt,
+  decodedBytes: NonNegativeInt,
+})
+export const TranscriptArchiveDescriptor = Schema.Struct({
+  archiveID: Schema.String,
+  archiveRevision: Schema.String,
+  markerID: MessageID,
+  tailStartID: Schema.optional(MessageID),
+  sourceMessageID: MessageID,
+  summaryPreview: Schema.String,
+  messageCount: NonNegativeInt,
+  partCount: NonNegativeInt,
+  textUnits: NonNegativeInt,
+  decodedBytes: NonNegativeInt,
+}).annotate({ identifier: "TranscriptArchiveDescriptor" })
+export const TranscriptWindowResponse = Schema.Struct({
+  status: TranscriptWindowStatus,
+  sessionID: SessionID,
+  sourceGeneration: Schema.optional(Schema.String),
+  windowRevision: Schema.optional(Schema.String),
+  tailStartID: Schema.optional(MessageID),
+  archiveDescriptors: Schema.Array(TranscriptArchiveDescriptor),
+  tail: Schema.Array(SessionV1.WithParts),
+  counts: TranscriptWindowCounts,
+}).annotate({ identifier: "TranscriptWindowResponse" })
 export const StatusMap = Schema.Record(Schema.String, SessionStatus.Info)
 export const SessionTurnCompaction = Schema.Struct({
   compactionMessageID: MessageID,
@@ -87,6 +130,10 @@ export const CompactedRangeResponse = Schema.Struct({
   messages: Schema.Array(SessionV1.WithParts),
   complete: Schema.Boolean,
   notice: Schema.optional(Schema.String),
+  status: Schema.Literals(["complete", "stale", "unavailable", "too_large"]),
+  sourceGeneration: Schema.optional(Schema.String),
+  archiveID: Schema.optional(Schema.String),
+  archiveRevision: Schema.optional(Schema.String),
 }).annotate({ identifier: "CompactedRangeResponse" })
 export const UpdatePayload = Schema.Struct({
   title: Schema.optional(Schema.String),
@@ -131,6 +178,7 @@ export const SessionPaths = {
   contextStage: `${root}/:sessionID/context/stage`,
   contextStageItem: `${root}/:sessionID/context/stage/:contextID`,
   compactedRange: `${root}/:sessionID/compacted_range`,
+  transcriptWindow: `${root}/:sessionID/transcript_window`,
   create: root,
   remove: `${root}/:sessionID`,
   update: `${root}/:sessionID`,
@@ -320,6 +368,19 @@ export const SessionApi = HttpApi.make("session")
             summary: "Recall compacted transcript range",
             description:
               "Return the transcript messages summarized by a completed compaction marker without changing session state.",
+          }),
+        ),
+        HttpApiEndpoint.get("transcriptWindow", SessionPaths.transcriptWindow, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(TranscriptWindowResponse, "Bounded transcript window"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.transcriptWindow",
+            summary: "Get bounded transcript window",
+            description:
+              "Return body-free compacted archive descriptors and the bounded current transcript tail without hydrating full history.",
           }),
         ),
         HttpApiEndpoint.post("create", SessionPaths.create, {

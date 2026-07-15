@@ -4,7 +4,8 @@ import { Session } from "@/session/session"
 import { MessageV2 } from "../../session/message-v2"
 import { CliError, effectCmd } from "../effect-cmd"
 import { Database } from "@opencode-ai/core/database/database"
-import { SessionTable, MessageTable, PartTable } from "@opencode-ai/core/session/sql"
+import { SessionTable, MessageTable, PartTable, TranscriptWindowStateTable } from "@opencode-ai/core/session/sql"
+import { SessionMaintenance } from "@opencode-ai/core/session/maintenance"
 import { InstanceRef } from "@/effect/instance-ref"
 import { ShareNext } from "@/share/share-next"
 import { EOL } from "os"
@@ -12,6 +13,7 @@ import path from "path"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Effect, Schema } from "effect"
 import type { InstanceContext } from "@/project/instance-context"
+import { eq } from "drizzle-orm"
 
 const decodeMessageInfo = Schema.decodeUnknownSync(SessionV1.Info)
 const decodePart = Schema.decodeUnknownSync(SessionV1.Part)
@@ -177,47 +179,72 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
     path: path.relative(path.resolve(ctx.worktree), ctx.directory).replaceAll("\\", "/"),
   }) as Session.Info
   const row = Session.toRow(info)
-  yield* db
-    .insert(SessionTable)
-    .values(row)
-    .onConflictDoUpdate({
-      target: SessionTable.id,
-      set: { project_id: row.project_id, directory: row.directory, path: row.path },
-    })
-    .run()
-    .pipe(Effect.orDie)
-
-  for (const msg of exportData.messages) {
-    const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
-    const { id, sessionID: _, ...msgData } = msgInfo
+  const persist = Effect.gen(function* () {
     yield* db
-      .insert(MessageTable)
-      .values({
-        id,
-        session_id: row.id,
-        time_created: msgInfo.time?.created ?? Date.now(),
-        data: msgData as never,
+      .insert(SessionTable)
+      .values(row)
+      .onConflictDoUpdate({
+        target: SessionTable.id,
+        set: { project_id: row.project_id, directory: row.directory, path: row.path },
       })
-      .onConflictDoNothing()
       .run()
       .pipe(Effect.orDie)
 
-    for (const part of msg.parts) {
-      const partInfo = decodePart(part) as SessionV1.Part
-      const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
+    for (const msg of exportData.messages) {
+      const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
+      const { id, sessionID: _, ...msgData } = msgInfo
       yield* db
-        .insert(PartTable)
+        .insert(MessageTable)
         .values({
-          id: partId,
-          message_id: messageID,
+          id,
           session_id: row.id,
-          data: partData,
+          time_created: msgInfo.time?.created ?? Date.now(),
+          data: msgData as never,
         })
         .onConflictDoNothing()
         .run()
         .pipe(Effect.orDie)
+
+      for (const part of msg.parts) {
+        const partInfo = decodePart(part) as SessionV1.Part
+        const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
+        yield* db
+          .insert(PartTable)
+          .values({
+            id: partId,
+            message_id: messageID,
+            session_id: row.id,
+            data: partData,
+          })
+          .onConflictDoNothing()
+          .run()
+          .pipe(Effect.orDie)
+      }
     }
-  }
+    yield* db
+      .insert(TranscriptWindowStateTable)
+      .values({
+        session_id: row.id,
+        source_generation: crypto.randomUUID(),
+        window_revision: 0,
+        index_status: "index_required",
+      })
+      .onConflictDoUpdate({
+        target: TranscriptWindowStateTable.session_id,
+        set: { index_status: "index_required" },
+      })
+      .run()
+      .pipe(Effect.orDie)
+  })
+  const existing = yield* db
+    .select({ id: SessionTable.id })
+    .from(SessionTable)
+    .where(eq(SessionTable.id, row.id))
+    .get()
+    .pipe(Effect.orDie)
+  yield* (existing
+    ? SessionMaintenance.withAdmission(db, { sessionID: row.id, kind: "import" }, persist)
+    : persist)
 
   process.stdout.write(`Imported session: ${exportData.info.id}`)
   process.stdout.write(EOL)

@@ -4,6 +4,8 @@ import { Effect, Layer, Scope, Context } from "effect"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ShareNext } from "./share-next"
+import { Database } from "@opencode-ai/core/database/database"
+import { SessionMaintenance } from "@opencode-ai/core/session/maintenance"
 
 export interface Interface {
   readonly create: (input?: Session.CreateInput) => Effect.Effect<Session.Info>
@@ -21,6 +23,7 @@ export const layer = Layer.effect(
     const shareNext = yield* ShareNext.Service
     const scope = yield* Scope.Scope
     const flags = yield* RuntimeFlags.Service
+    const { db } = yield* Database.Service
 
     const share = Effect.fn("SessionShare.share")(function* (sessionID: SessionID) {
       const conf = yield* cfg.get()
@@ -40,11 +43,19 @@ export const layer = Layer.effect(
       if (result.parentID) return result
       const conf = yield* cfg.get()
       if (!(flags.autoShare || conf.share === "auto")) return result
-      yield* share(result.id).pipe(Effect.ignore, Effect.forkIn(scope))
+      yield* SessionMaintenance.withAdmission(db, { sessionID: result.id, kind: "share" }, share(result.id)).pipe(
+        Effect.ignore,
+        Effect.forkIn(scope),
+      )
       return result
     })
 
-    return Service.of({ create, share, unshare })
+    return Service.of({
+      create,
+      share: (sessionID) => SessionMaintenance.withAdmission(db, { sessionID, kind: "share" }, share(sessionID)),
+      unshare: (sessionID) =>
+        SessionMaintenance.withAdmission(db, { sessionID, kind: "unshare" }, unshare(sessionID)),
+    })
   }),
 )
 
@@ -53,6 +64,7 @@ export const defaultLayer = layer.pipe(
   Layer.provide(Session.defaultLayer),
   Layer.provide(Config.defaultLayer),
   Layer.provide(RuntimeFlags.defaultLayer),
+  Layer.provide(Database.defaultLayer),
 )
 
 export * as SessionShare from "./session"

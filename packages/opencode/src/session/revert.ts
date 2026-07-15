@@ -9,6 +9,8 @@ import { MessageV2 } from "./message-v2"
 import { SessionID, MessageID, PartID } from "./schema"
 import { SessionRunState } from "./run-state"
 import { SessionSummary } from "./summary"
+import { Database } from "@opencode-ai/core/database/database"
+import { SessionMaintenance } from "@opencode-ai/core/session/maintenance"
 
 const log = Log.create({ service: "session.revert" })
 
@@ -36,6 +38,7 @@ export const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const summary = yield* SessionSummary.Service
     const state = yield* SessionRunState.Service
+    const { db } = yield* Database.Service
 
     const revert = Effect.fn("SessionRevert.revert")(function* (input: RevertInput) {
       yield* state.assertNotBusy(input.sessionID)
@@ -135,7 +138,14 @@ export const layer = Layer.effect(
       yield* sessions.clearRevert(sessionID)
     })
 
-    return Service.of({ revert, unrevert, cleanup })
+    return Service.of({
+      revert: (input) =>
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "revert" }, revert(input)),
+      unrevert: (input) =>
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "unrevert" }, unrevert(input)),
+      cleanup: (session) =>
+        SessionMaintenance.withAdmission(db, { sessionID: session.id, kind: "revert-cleanup" }, cleanup(session)),
+    })
   }),
 )
 
@@ -147,6 +157,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Storage.defaultLayer),
     Layer.provide(EventV2Bridge.defaultLayer),
     Layer.provide(SessionSummary.defaultLayer),
+    Layer.provide(Database.defaultLayer),
   ),
 )
 
