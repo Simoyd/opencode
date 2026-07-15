@@ -49,6 +49,7 @@ export const CompactedRangeQuery = Schema.Struct({
   ...WorkspaceRoutingQueryFields,
   marker: MessageID,
   tail_start_id: Schema.optional(MessageID),
+  message_id: Schema.optional(MessageID),
 })
 export const StatusMap = Schema.Record(Schema.String, SessionStatus.Info)
 export const SessionTurnCompaction = Schema.Struct({

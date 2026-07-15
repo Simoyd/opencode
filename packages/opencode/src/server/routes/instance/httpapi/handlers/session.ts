@@ -357,7 +357,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       const markerIndex = messages.findIndex((message) => message.info.id === ctx.query.marker)
       if (markerIndex < 0) {
         return {
-          reference: { markerID: ctx.query.marker, tailStartID: ctx.query.tail_start_id },
+          reference: { markerID: ctx.query.marker, tailStartID: ctx.query.tail_start_id, messageID: ctx.query.message_id },
           messages: [],
           complete: false,
           notice: "Compaction marker was not found in this session.",
@@ -366,17 +366,80 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
 
       const marker = messages[markerIndex]
       const markerPart = marker.parts.find((part): part is SessionV1.CompactionPart => part.type === "compaction")
-      const tailStartID = ctx.query.tail_start_id ?? markerPart?.tail_start_id
+      const requestedReference = {
+        markerID: ctx.query.marker,
+        tailStartID: ctx.query.tail_start_id,
+        messageID: ctx.query.message_id,
+      }
+      if (ctx.query.message_id && ctx.query.message_id !== marker.info.id) {
+        return {
+          reference: { markerID: marker.info.id, tailStartID: ctx.query.tail_start_id, messageID: marker.info.id },
+          messages: [],
+          complete: false,
+          notice: "Requested compaction message identity did not match the marker.",
+        }
+      }
+      if (!markerPart) {
+        return {
+          reference: requestedReference,
+          messages: [],
+          complete: false,
+          notice: "Requested marker is not a compaction message.",
+        }
+      }
+
+      const tailStartID = ctx.query.tail_start_id ?? markerPart.tail_start_id
+      if (ctx.query.tail_start_id && ctx.query.tail_start_id !== markerPart.tail_start_id) {
+        return {
+          reference: { markerID: marker.info.id, tailStartID: markerPart.tail_start_id, messageID: marker.info.id },
+          messages: [],
+          complete: false,
+          notice: "Requested compaction tail-start identity did not match the marker.",
+        }
+      }
+
       const tailStartIndex = tailStartID ? messages.findIndex((message) => message.info.id === tailStartID) : markerIndex
+      const turns = buildSessionTurns(ctx.params.sessionID, messages).turns.filter((turn) => turn.compaction)
+      const turnIndex = turns.findIndex((turn) => turn.compaction?.compactionMessageID === marker.info.id)
+      const turn = turnIndex >= 0 ? turns[turnIndex] : undefined
+      if (turnIndex < 0 || !turn) {
+        return {
+          reference: requestedReference,
+          messages: [],
+          complete: false,
+          notice: "Compaction marker did not belong to a complete derived compaction turn.",
+        }
+      }
+
+      const previousCompaction = turnIndex > 0 ? turns[turnIndex - 1]?.compaction : undefined
+      const rangeStartIndex = turnIndex > 0 && turn?.startMessageID
+        ? messages.findIndex((message) => message.info.id === turn.startMessageID)
+        : 0
+      const ownStartIndex = rangeStartIndex >= 0 && rangeStartIndex <= markerIndex ? rangeStartIndex : markerIndex
+      const continuityMessageIDs = previousCompaction
+        ? [
+            previousCompaction.summaryMessageID,
+            ...previousCompaction.replayPromptMessageIDs,
+          ]
+        : []
+      const seen = new Set<MessageID>()
+      const rowLocalMessages = [
+        ...continuityMessageIDs
+          .map((messageID) => messages.find((message) => message.info.id === messageID))
+          .filter((message): message is SessionV1.WithParts => !!message),
+        ...messages.slice(ownStartIndex, markerIndex),
+      ].filter((message) => {
+        if (seen.has(message.info.id)) return false
+        seen.add(message.info.id)
+        return true
+      })
       return {
         reference: { markerID: ctx.query.marker, tailStartID, messageID: marker.info.id },
-        messages: messages.slice(0, Math.max(0, tailStartIndex >= 0 ? tailStartIndex : markerIndex)),
-        complete: !!markerPart && (!tailStartID || tailStartIndex >= 0),
-        notice: markerPart
-          ? tailStartID && tailStartIndex < 0
-            ? "Compaction tail start message was not found; returned the best available compacted range."
-            : undefined
-          : "Requested marker is not a compaction message.",
+        messages: rowLocalMessages,
+        complete: !tailStartID || tailStartIndex >= 0,
+        notice: tailStartID && tailStartIndex < 0
+          ? "Compaction tail start message was not found; returned the best available compacted range."
+          : undefined,
       }
     })
 
