@@ -125,8 +125,14 @@ const runIndex = Effect.fn("SessionTranscriptIndex.runIndex")(function* (input: 
         isFinalAssistant(message)
       ) {
         const continuity = state.previous ? [state.previous.summaryMessageID, ...state.previous.replayMessageIDs] : []
+        const rangeCounts = yield* countRangeMessages(
+          db,
+          input.sessionID,
+          current.sourceMessageID,
+          current.markerID,
+        )
         const continuityCounts = yield* countMessages(db, input.sessionID, continuity)
-        const counts = finalizeCounts(sum(current.counts, continuityCounts))
+        const counts = finalizeCounts(sum(rangeCounts, continuityCounts))
         if (
           counts.messages > TranscriptWindowProjection.Limits.messages ||
           counts.parts > TranscriptWindowProjection.Limits.parts ||
@@ -363,7 +369,15 @@ function markIndexFailed(db: Database.Interface["db"], input: { sessionID: Sessi
 
 function loadBatch(
   db: Database.Interface["db"],
-  input: { sessionID: SessionID; cursorTime?: number; cursorID?: MessageID },
+  input: {
+    sessionID: SessionID
+    startTime?: number
+    startID?: MessageID
+    endTime?: number
+    endID?: MessageID
+    cursorTime?: number
+    cursorID?: MessageID
+  },
 ) {
   return Effect.gen(function* () {
     const after =
@@ -373,6 +387,14 @@ function loadBatch(
             and(eq(MessageTable.time_created, input.cursorTime), gt(MessageTable.id, input.cursorID)),
           )
         : undefined
+    const range =
+      input.startTime !== undefined && input.startID
+        ? TranscriptWindowProjection.orderedRange(
+            input.sessionID,
+            { id: input.startID, time: input.startTime },
+            input.endTime !== undefined && input.endID ? { id: input.endID, time: input.endTime } : undefined,
+          )
+        : eq(MessageTable.session_id, input.sessionID)
     const identities = yield* db
       .select({
         id: MessageTable.id,
@@ -380,9 +402,7 @@ function loadBatch(
         bytes: sql<number>`length(cast(${MessageTable.data} as blob))`,
       })
       .from(MessageTable)
-      .where(
-        after ? and(eq(MessageTable.session_id, input.sessionID), after) : eq(MessageTable.session_id, input.sessionID),
-      )
+      .where(after ? and(range, after) : range)
       .orderBy(asc(MessageTable.time_created), asc(MessageTable.id))
       .limit(BatchMessages + 1)
       .all()
@@ -474,6 +494,48 @@ function countMessages(db: Database.Interface["db"], sessionID: SessionID, ids: 
         info: { ...row.data, id: row.id, sessionID: row.session_id } as SessionV1.Info,
         parts: partsByMessage.get(row.id) ?? [],
       })
+    }
+    return counts
+  })
+}
+
+function countRangeMessages(
+  db: Database.Interface["db"],
+  sessionID: SessionID,
+  startID: MessageID,
+  endID: MessageID,
+) {
+  return Effect.gen(function* () {
+    const orders = yield* TranscriptWindowProjection.loadMessageOrders(db, sessionID, [startID, endID])
+    const start = orders.get(startID)
+    const end = orders.get(endID)
+    if (!start || !end) return yield* Effect.die("Transcript archive boundary is missing")
+
+    const counts = emptyCounts()
+    let cursorTime: number | undefined
+    let cursorID: MessageID | undefined
+    while (true) {
+      const page = yield* loadBatch(db, {
+        sessionID,
+        startTime: start.time,
+        startID,
+        endTime: end.time,
+        endID,
+        cursorTime,
+        cursorID,
+      })
+      if (page.messages.length === 0) break
+      for (const message of page.messages) add(counts, message)
+      if (
+        counts.messages > TranscriptWindowProjection.Limits.messages ||
+        counts.parts > TranscriptWindowProjection.Limits.parts ||
+        counts.textUnits > TranscriptWindowProjection.Limits.textCodeUnits ||
+        counts.decodedBytes > TranscriptWindowProjection.Limits.decodedBytes
+      )
+        return yield* Effect.die("Transcript archive exceeds the safe index limit")
+      const last = page.identities.at(-1)!
+      cursorTime = last.time
+      cursorID = last.id
     }
     return counts
   })

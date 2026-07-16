@@ -404,22 +404,34 @@ describe("session messages endpoint", () => {
           created: created + 1,
           finish: "tool-calls",
         })
-        const marker = yield* addCompaction(session.id, start, { id: id("x"), created: created + 2 })
-        yield* addAssistant(session.id, marker, "legacy summary", {
+        const firstMarker = yield* addCompaction(session.id, start, { id: id("x"), created: created + 2 })
+        const firstSummary = yield* addAssistant(session.id, firstMarker, "first legacy summary", {
           id: id("w"),
           created: created + 3,
           summary: true,
           finish: "end_turn",
         })
-        const replay = yield* addUser(session.id, "legacy replay", {
+        const laterWork = yield* addAssistant(session.id, start, "later legacy work", {
           id: id("v"),
           created: created + 4,
+          finish: "tool-calls",
+        })
+        const marker = yield* addCompaction(session.id, start, { id: id("u"), created: created + 5 })
+        yield* addAssistant(session.id, marker, "final legacy summary", {
+          id: id("t"),
+          created: created + 6,
+          summary: true,
+          finish: "end_turn",
+        })
+        const replay = yield* addUser(session.id, "legacy replay", {
+          id: id("s"),
+          created: created + 7,
           replay: true,
           replaySourceMessageID: start,
         })
         yield* addAssistant(session.id, replay, "legacy final", {
-          id: id("u"),
-          created: created + 5,
+          id: id("r"),
+          created: created + 8,
           finish: "end_turn",
         })
 
@@ -460,7 +472,13 @@ describe("session messages endpoint", () => {
         const body = (yield* recall.json) as CompactedRangeBody
         expect(body.status).toBe("complete")
         expect(body.complete).toBe(true)
-        expect(body.messages.map((message) => message.info.id)).toEqual([start, work])
+        expect(body.messages.map((message) => message.info.id)).toEqual([
+          start,
+          work,
+          firstMarker,
+          firstSummary,
+          laterWork,
+        ])
       }),
     ),
     { git: true },
