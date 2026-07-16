@@ -13,10 +13,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { httpApiLayer, requestInDirectory } from "./httpapi-layer"
 import { Database } from "@opencode-ai/core/database/database"
-import {
-  CompactionArchiveManifestTable,
-  TranscriptWindowStateTable,
-} from "@opencode-ai/core/session/sql"
+import { CompactionArchiveManifestTable, TranscriptWindowStateTable } from "@opencode-ai/core/session/sql"
 import { SessionTranscriptIndex } from "@/session/transcript-index"
 import { eq } from "drizzle-orm"
 
@@ -339,7 +336,7 @@ describe("session messages endpoint", () => {
         const session = yield* sessionScoped
 
         const start1 = yield* addUser(session.id, "first prompt")
-        yield* addAssistant(session.id, start1, "first raw work", { finish: "tool-calls" })
+        const pre1 = yield* addAssistant(session.id, start1, "first raw work", { finish: "tool-calls" })
         const compact1 = yield* addCompaction(session.id, start1)
         yield* addAssistant(session.id, compact1, "first summary", { summary: true, finish: "end_turn" })
         const replay1 = yield* addUser(session.id, "first replay", { replay: true, replaySourceMessageID: start1 })
@@ -348,7 +345,10 @@ describe("session messages endpoint", () => {
         const start2 = yield* addUser(session.id, "second prompt")
         yield* addAssistant(session.id, start2, "second raw work", { finish: "tool-calls" })
         const compact2 = yield* addCompaction(session.id, start2)
-        const summary2 = yield* addAssistant(session.id, compact2, "second summary", { summary: true, finish: "end_turn" })
+        const summary2 = yield* addAssistant(session.id, compact2, "second summary", {
+          summary: true,
+          finish: "end_turn",
+        })
         const replay2 = yield* addUser(session.id, "second replay", { replay: true, replaySourceMessageID: start2 })
         yield* addAssistant(session.id, replay2, "second final", { finish: "end_turn" })
 
@@ -358,6 +358,20 @@ describe("session messages endpoint", () => {
         yield* addAssistant(session.id, compact3, "third summary", { summary: true, finish: "end_turn" })
         const replay3 = yield* addUser(session.id, "third replay", { replay: true, replaySourceMessageID: start3 })
         yield* addAssistant(session.id, replay3, "third final", { finish: "end_turn" })
+
+        const { db } = yield* Database.Service
+        yield* db
+          .delete(CompactionArchiveManifestTable)
+          .where(eq(CompactionArchiveManifestTable.session_id, session.id))
+          .run()
+          .pipe(Effect.orDie)
+        yield* db
+          .delete(TranscriptWindowStateTable)
+          .where(eq(TranscriptWindowStateTable.session_id, session.id))
+          .run()
+          .pipe(Effect.orDie)
+        const indexed = yield* SessionTranscriptIndex.run({ sessionID: session.id, ownerID: crypto.randomUUID() })
+        expect(indexed.complete).toBe(true)
 
         const res = yield* requestInDirectory(
           `/session/${session.id}/compacted_range?marker=${encodeURIComponent(compact3)}&tail_start_id=${encodeURIComponent(start3)}&message_id=${encodeURIComponent(compact3)}`,
@@ -385,16 +399,79 @@ describe("session messages endpoint", () => {
           sourceGeneration: string
           archiveDescriptors: Array<{
             archiveID: string
-            archiveRevision: string
-            markerID: string
-            sourceMessageID: string
+          archiveRevision: string
+          markerID: string
+          sourceMessageID: string
+          messageCount: number
+          partCount: number
+          textUnits: number
           }>
           tail: SessionV1.WithParts[]
+          turns: Array<{ startMessageID: string; finalOutputMessageID?: string }>
         }
         expect(window.status).toBe("complete")
         expect(window.archiveDescriptors).toHaveLength(3)
         expect(window.tail.map((message) => message.info.id)).toContain(start3)
         expect(window.tail.map((message) => message.info.id)).not.toContain(start2)
+        expect(window.turns).toEqual([
+          expect.objectContaining({ startMessageID: start3 }),
+        ])
+
+        const firstBeforeMutation = window.archiveDescriptors[0]!
+        const sessionService = yield* SessionNs.Service
+        const mutationPartID = PartID.ascending()
+        yield* sessionService.updatePart({
+          id: mutationPartID,
+          sessionID: session.id,
+          messageID: pre1,
+          type: "text",
+          text: "first archived mutation",
+        })
+        const changedWindowResponse = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
+        const changedWindow = (yield* changedWindowResponse.json) as typeof window
+        const firstAfterMutation = changedWindow.archiveDescriptors[0]!
+        expect(changedWindow.status).toBe("complete")
+        expect(firstAfterMutation.archiveRevision).not.toBe(firstBeforeMutation.archiveRevision)
+        expect(firstAfterMutation.messageCount).toBe(firstBeforeMutation.messageCount)
+        expect(firstAfterMutation.partCount).toBe(firstBeforeMutation.partCount + 1)
+        expect(firstAfterMutation.textUnits).toBeGreaterThan(firstBeforeMutation.textUnits)
+
+        const staleRecall = yield* requestInDirectory(
+          `/session/${session.id}/compacted_range?marker=${encodeURIComponent(compact1)}&source_generation=${encodeURIComponent(window.sourceGeneration)}&archive_id=${encodeURIComponent(firstBeforeMutation.archiveID)}&archive_revision=${encodeURIComponent(firstBeforeMutation.archiveRevision)}&source_message_id=${encodeURIComponent(start1)}`,
+          tmp.directory,
+        )
+        expect(((yield* staleRecall.json) as CompactedRangeBody).status).toBe("stale")
+
+        window.archiveDescriptors = changedWindow.archiveDescriptors
+
+        yield* sessionService.removePart({ sessionID: session.id, messageID: pre1, partID: mutationPartID })
+        const removedPartResponse = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
+        const removedPartWindow = (yield* removedPartResponse.json) as typeof window
+        const firstAfterPartRemoval = removedPartWindow.archiveDescriptors[0]!
+        expect(firstAfterPartRemoval.archiveRevision).not.toBe(firstAfterMutation.archiveRevision)
+        expect(firstAfterPartRemoval.messageCount).toBe(firstAfterMutation.messageCount)
+        expect(firstAfterPartRemoval.partCount).toBe(firstBeforeMutation.partCount)
+
+        yield* sessionService.removeMessage({ sessionID: session.id, messageID: pre1 })
+        const removedMessageResponse = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
+        const removedMessageWindow = (yield* removedMessageResponse.json) as typeof window
+        const firstAfterMessageRemoval = removedMessageWindow.archiveDescriptors[0]!
+        expect(firstAfterMessageRemoval.archiveRevision).not.toBe(firstAfterPartRemoval.archiveRevision)
+        expect(firstAfterMessageRemoval.messageCount).toBe(firstAfterPartRemoval.messageCount - 1)
+        expect(firstAfterMessageRemoval.partCount).toBe(firstAfterPartRemoval.partCount - 1)
+        window.archiveDescriptors = removedMessageWindow.archiveDescriptors
+
+        for (const [index, marker] of [compact1, compact2, compact3].entries()) {
+          const indexedDescriptor = window.archiveDescriptors[index]!
+          const indexedRecall = yield* requestInDirectory(
+            `/session/${session.id}/compacted_range?marker=${encodeURIComponent(marker)}&source_generation=${encodeURIComponent(window.sourceGeneration)}&archive_id=${encodeURIComponent(indexedDescriptor.archiveID)}&archive_revision=${encodeURIComponent(indexedDescriptor.archiveRevision)}&source_message_id=${encodeURIComponent([start1, start2, start3][index]!)}`,
+            tmp.directory,
+          )
+          const indexedBody = (yield* indexedRecall.json) as CompactedRangeBody
+          expect(indexedBody.status).toBe("complete")
+          expect(indexedBody.complete).toBe(true)
+          expect(indexedBody.messages.length).toBeGreaterThan(0)
+        }
 
         const descriptor = window.archiveDescriptors[2]!
         const strong = yield* requestInDirectory(
@@ -404,6 +481,28 @@ describe("session messages endpoint", () => {
         const strongBody = (yield* strong.json) as CompactedRangeBody
         expect(strongBody.status).toBe("complete")
         expect(strongBody.messages.map((message) => message.info.id)).toEqual(ids)
+
+        yield* sessionService.updatePart({
+          id: PartID.ascending(),
+          sessionID: session.id,
+          messageID: compact3,
+          type: "text",
+          text: "structural mutation",
+        })
+        const invalidatedState = yield* db
+          .select({ status: TranscriptWindowStateTable.index_status })
+          .from(TranscriptWindowStateTable)
+          .where(eq(TranscriptWindowStateTable.session_id, session.id))
+          .get()
+          .pipe(Effect.orDie)
+        const invalidatedDescriptor = yield* db
+          .select({ revision: CompactionArchiveManifestTable.archive_revision })
+          .from(CompactionArchiveManifestTable)
+          .where(eq(CompactionArchiveManifestTable.archive_id, descriptor.archiveID))
+          .get()
+          .pipe(Effect.orDie)
+        expect(invalidatedState?.status).toBe("index_required")
+        expect(String(invalidatedDescriptor?.revision)).not.toBe(descriptor.archiveRevision)
       }),
     ),
     { git: true },
@@ -465,7 +564,10 @@ describe("session messages endpoint", () => {
 
         const start1 = yield* addUser(session.id, "first prompt")
         const compact1 = yield* addCompaction(session.id, start1)
-        const summary1 = yield* addAssistant(session.id, compact1, "first summary", { summary: true, finish: "end_turn" })
+        const summary1 = yield* addAssistant(session.id, compact1, "first summary", {
+          summary: true,
+          finish: "end_turn",
+        })
         const synthetic1 = yield* addUser(session.id, "synthetic continue", { syntheticContinue: true })
         const replay1 = yield* addUser(session.id, "first replay", { replay: true, replaySourceMessageID: start1 })
         yield* addAssistant(session.id, replay1, "first final", { finish: "end_turn" })

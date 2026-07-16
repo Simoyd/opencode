@@ -20,85 +20,111 @@ export class Stale extends Error {}
 
 export const loadWindow = Effect.fn("SessionTranscriptWindow.loadWindow")(function* (sessionID: SessionID) {
   const { db } = yield* Database.Service
-  const state = yield* db
-    .select()
-    .from(TranscriptWindowStateTable)
-    .where(eq(TranscriptWindowStateTable.session_id, sessionID))
-    .get()
-    .pipe(Effect.orDie)
-  if (!state) {
-    return {
-      status: "index_required" as const,
-      sessionID,
-      archiveDescriptors: [],
-      tail: [],
-      counts: { descriptors: 0, messages: 0, parts: 0, textUnits: 0, decodedBytes: 0 },
-    }
-  }
-  if (state.index_status !== "complete") {
-    return {
-      status: state.index_status,
-      sessionID,
-      sourceGeneration: state.source_generation,
-      windowRevision: state.window_revision.toString(),
-      archiveDescriptors: [],
-      tail: [],
-      counts: { descriptors: 0, messages: 0, parts: 0, textUnits: 0, decodedBytes: 0 },
-    }
-  }
+  return yield* db.transaction(() =>
+    Effect.gen(function* () {
+      const state = yield* db
+        .select()
+        .from(TranscriptWindowStateTable)
+        .where(eq(TranscriptWindowStateTable.session_id, sessionID))
+        .get()
+        .pipe(Effect.orDie)
+      if (!state) {
+        return {
+          status: "index_required" as const,
+          sessionID,
+          archiveDescriptors: [],
+          tail: [],
+          counts: { descriptors: 0, messages: 0, parts: 0, textUnits: 0, decodedBytes: 0 },
+        }
+      }
+      if (state.index_status !== "complete") {
+        return {
+          status: state.index_status,
+          sessionID,
+          sourceGeneration: state.source_generation,
+          windowRevision: state.window_revision.toString(),
+          archiveDescriptors: [],
+          tail: [],
+          counts: { descriptors: 0, messages: 0, parts: 0, textUnits: 0, decodedBytes: 0 },
+        }
+      }
 
-  const manifests = yield* db
-    .select()
-    .from(CompactionArchiveManifestTable)
-    .where(eq(CompactionArchiveManifestTable.session_id, sessionID))
-    .orderBy(CompactionArchiveManifestTable.ordinal)
-    .limit(TranscriptWindowProjection.Limits.descriptors + 1)
-    .all()
-    .pipe(Effect.orDie)
-  if (manifests.length > TranscriptWindowProjection.Limits.descriptors) return yield* Effect.fail(new TooLarge())
+      const manifestSizes = yield* db
+        .select({
+          bytes: sql<number>`length(cast(${CompactionArchiveManifestTable.archive_id} as blob)) + length(cast(${CompactionArchiveManifestTable.marker_id} as blob)) + length(cast(coalesce(${CompactionArchiveManifestTable.tail_start_id}, '') as blob)) + length(cast(${CompactionArchiveManifestTable.source_message_id} as blob)) + length(cast(${CompactionArchiveManifestTable.summary_preview} as blob)) + length(cast(${CompactionArchiveManifestTable.continuity_message_ids} as blob)) + length(cast(${CompactionArchiveManifestTable.replay_message_ids} as blob))`,
+        })
+        .from(CompactionArchiveManifestTable)
+        .where(eq(CompactionArchiveManifestTable.session_id, sessionID))
+        .limit(TranscriptWindowProjection.Limits.descriptors + 1)
+        .all()
+        .pipe(Effect.orDie)
+      if (
+        manifestSizes.length > TranscriptWindowProjection.Limits.descriptors ||
+        manifestSizes.reduce((count, row) => count + row.bytes, 0) > TranscriptWindowProjection.Limits.descriptorBytes
+      )
+        return yield* Effect.fail(new TooLarge())
 
-  const tail = yield* loadRange(db, {
-    sessionID,
-    startID: state.tail_start_id ?? undefined,
-  })
-  const encoded = JSON.stringify(tail)
-  const counts = {
-    descriptors: manifests.length,
-    messages: tail.length,
-    parts: tail.reduce((count, message) => count + message.parts.length, 0),
-    textUnits: encoded.length,
-    decodedBytes: Buffer.byteLength(encoded, "utf8"),
-  }
-  if (
-    counts.messages !== state.message_count ||
-    counts.parts !== state.part_count ||
-    counts.textUnits !== state.text_units ||
-    counts.decodedBytes !== state.decoded_bytes ||
-    counts.descriptors !== state.descriptor_count
+      const manifests = yield* db
+        .select()
+        .from(CompactionArchiveManifestTable)
+        .where(eq(CompactionArchiveManifestTable.session_id, sessionID))
+        .orderBy(CompactionArchiveManifestTable.ordinal)
+        .limit(TranscriptWindowProjection.Limits.descriptors + 1)
+        .all()
+        .pipe(Effect.orDie)
+      if (manifests.length > TranscriptWindowProjection.Limits.descriptors) return yield* Effect.fail(new TooLarge())
+
+      const tail = yield* loadRange(db, {
+        sessionID,
+        startID: state.tail_start_id ?? undefined,
+      })
+      const encoded = JSON.stringify(tail)
+      const counts = {
+        descriptors: manifests.length,
+        messages: tail.length,
+        parts: tail.reduce((count, message) => count + message.parts.length, 0),
+        textUnits: encoded.length,
+        decodedBytes: Buffer.byteLength(encoded, "utf8"),
+      }
+      if (
+        counts.messages !== state.message_count ||
+        counts.parts !== state.part_count ||
+        counts.textUnits !== state.text_units ||
+        counts.decodedBytes !== state.decoded_bytes ||
+        counts.descriptors !== state.descriptor_count
+      )
+        return yield* Effect.fail(new Stale())
+
+      const archiveDescriptors = manifests.map((row) => ({
+        archiveID: row.archive_id,
+        archiveRevision: row.archive_revision.toString(),
+        markerID: row.marker_id,
+        tailStartID: row.tail_start_id ?? undefined,
+        sourceMessageID: row.source_message_id,
+        summaryPreview: row.summary_preview,
+        messageCount: row.message_count,
+        partCount: row.part_count,
+        textUnits: row.text_units,
+        decodedBytes: row.decoded_bytes,
+      }))
+      if (
+        Buffer.byteLength(JSON.stringify(archiveDescriptors), "utf8") >
+        TranscriptWindowProjection.Limits.descriptorBytes
+      )
+        return yield* Effect.fail(new TooLarge())
+
+      return {
+        status: "complete" as const,
+        sessionID,
+        sourceGeneration: state.source_generation,
+        windowRevision: state.window_revision.toString(),
+        tailStartID: state.tail_start_id ?? undefined,
+        archiveDescriptors,
+        tail,
+        counts,
+      }
+    }),
   )
-    return yield* Effect.fail(new Stale())
-
-  return {
-    status: "complete" as const,
-    sessionID,
-    sourceGeneration: state.source_generation,
-    windowRevision: state.window_revision.toString(),
-    tailStartID: state.tail_start_id ?? undefined,
-    archiveDescriptors: manifests.map((row) => ({
-      archiveID: row.archive_id,
-      archiveRevision: row.archive_revision.toString(),
-      markerID: row.marker_id,
-      tailStartID: row.tail_start_id ?? undefined,
-      sourceMessageID: row.source_message_id,
-      summaryPreview: row.summary_preview,
-      messageCount: row.message_count,
-      partCount: row.part_count,
-      textUnits: row.text_units,
-      decodedBytes: row.decoded_bytes,
-    })),
-    tail,
-    counts,
-  }
 })
 
 export const loadArchive = Effect.fn("SessionTranscriptWindow.loadArchive")(function* (input: {
@@ -112,62 +138,82 @@ export const loadArchive = Effect.fn("SessionTranscriptWindow.loadArchive")(func
   sourceMessageID?: MessageID
 }) {
   const { db } = yield* Database.Service
-  const state = yield* db
-    .select()
-    .from(TranscriptWindowStateTable)
-    .where(eq(TranscriptWindowStateTable.session_id, input.sessionID))
-    .get()
-    .pipe(Effect.orDie)
-  if (!state || state.index_status !== "complete") return yield* Effect.fail(new Stale())
-  if (input.sourceGeneration && input.sourceGeneration !== state.source_generation)
-    return yield* Effect.fail(new Stale())
+  return yield* db.transaction(() =>
+    Effect.gen(function* () {
+      const state = yield* db
+        .select()
+        .from(TranscriptWindowStateTable)
+        .where(eq(TranscriptWindowStateTable.session_id, input.sessionID))
+        .get()
+        .pipe(Effect.orDie)
+      if (!state || state.index_status !== "complete") return yield* Effect.fail(new Stale())
+      if (input.sourceGeneration && input.sourceGeneration !== state.source_generation)
+        return yield* Effect.fail(new Stale())
 
-  const row = yield* db
-    .select()
-    .from(CompactionArchiveManifestTable)
-    .where(
-      and(
-        eq(CompactionArchiveManifestTable.session_id, input.sessionID),
-        eq(CompactionArchiveManifestTable.marker_id, input.markerID),
-      ),
-    )
-    .get()
-    .pipe(Effect.orDie)
-  if (
-    !row ||
-    (input.archiveID && input.archiveID !== row.archive_id) ||
-    (input.archiveRevision && input.archiveRevision !== row.archive_revision.toString()) ||
-    (input.tailStartID && input.tailStartID !== row.tail_start_id) ||
-    (input.messageID && input.messageID !== row.marker_id) ||
-    (input.sourceMessageID && input.sourceMessageID !== row.source_message_id)
+      const rowSize = yield* db
+        .select({
+          bytes: sql<number>`length(cast(${CompactionArchiveManifestTable.continuity_message_ids} as blob)) + length(cast(${CompactionArchiveManifestTable.replay_message_ids} as blob)) + length(cast(${CompactionArchiveManifestTable.summary_preview} as blob))`,
+        })
+        .from(CompactionArchiveManifestTable)
+        .where(
+          and(
+            eq(CompactionArchiveManifestTable.session_id, input.sessionID),
+            eq(CompactionArchiveManifestTable.marker_id, input.markerID),
+          ),
+        )
+        .get()
+        .pipe(Effect.orDie)
+      if (rowSize && rowSize.bytes > TranscriptWindowProjection.Limits.descriptorBytes)
+        return yield* Effect.fail(new TooLarge())
+
+      const row = yield* db
+        .select()
+        .from(CompactionArchiveManifestTable)
+        .where(
+          and(
+            eq(CompactionArchiveManifestTable.session_id, input.sessionID),
+            eq(CompactionArchiveManifestTable.marker_id, input.markerID),
+          ),
+        )
+        .get()
+        .pipe(Effect.orDie)
+      if (
+        !row ||
+        (input.archiveID && input.archiveID !== row.archive_id) ||
+        (input.archiveRevision && input.archiveRevision !== row.archive_revision.toString()) ||
+        (input.tailStartID && input.tailStartID !== row.tail_start_id) ||
+        (input.messageID && input.messageID !== row.marker_id) ||
+        (input.sourceMessageID && input.sourceMessageID !== row.source_message_id)
+      )
+        return yield* Effect.fail(new Stale())
+
+      const messages = yield* loadRange(db, {
+        sessionID: input.sessionID,
+        startID: row.range_start_id,
+        endID: row.range_end_id,
+        continuityIDs: row.continuity_message_ids,
+      })
+      const encoded = JSON.stringify(messages)
+      const partCount = messages.reduce((count, message) => count + message.parts.length, 0)
+      if (
+        messages.length !== row.message_count ||
+        partCount !== row.part_count ||
+        encoded.length !== row.text_units ||
+        Buffer.byteLength(encoded, "utf8") !== row.decoded_bytes
+      )
+        return yield* Effect.fail(new Stale())
+
+      return {
+        sourceGeneration: state.source_generation,
+        archiveID: row.archive_id,
+        archiveRevision: row.archive_revision.toString(),
+        markerID: row.marker_id,
+        tailStartID: row.tail_start_id ?? undefined,
+        sourceMessageID: row.source_message_id,
+        messages,
+      }
+    }),
   )
-    return yield* Effect.fail(new Stale())
-
-  const messages = yield* loadRange(db, {
-    sessionID: input.sessionID,
-    startID: row.range_start_id,
-    endID: row.range_end_id,
-    continuityIDs: row.continuity_message_ids,
-  })
-  const encoded = JSON.stringify(messages)
-  const partCount = messages.reduce((count, message) => count + message.parts.length, 0)
-  if (
-    messages.length !== row.message_count ||
-    partCount !== row.part_count ||
-    encoded.length !== row.text_units ||
-    Buffer.byteLength(encoded, "utf8") !== row.decoded_bytes
-  )
-    return yield* Effect.fail(new Stale())
-
-  return {
-    sourceGeneration: state.source_generation,
-    archiveID: row.archive_id,
-    archiveRevision: row.archive_revision.toString(),
-    markerID: row.marker_id,
-    tailStartID: row.tail_start_id ?? undefined,
-    sourceMessageID: row.source_message_id,
-    messages,
-  }
 })
 
 function loadRange(
@@ -196,7 +242,7 @@ function loadRange(
       .select({
         id: MessageTable.id,
         time: MessageTable.time_created,
-        bytes: sql<number>`length(${MessageTable.data})`,
+        bytes: sql<number>`length(cast(${MessageTable.data} as blob))`,
       })
       .from(MessageTable)
       .where(continuity ? or(range, continuity) : range)
@@ -217,7 +263,7 @@ function loadRange(
       .select({
         id: PartTable.id,
         messageID: PartTable.message_id,
-        bytes: sql<number>`length(${PartTable.data})`,
+        bytes: sql<number>`length(cast(${PartTable.data} as blob))`,
       })
       .from(PartTable)
       .where(and(eq(PartTable.session_id, input.sessionID), inArray(PartTable.message_id, ids)))
@@ -233,7 +279,7 @@ function loadRange(
           row.messageID.length > TranscriptWindowProjection.Limits.identityCodeUnits,
       ) ||
       identities.reduce((count, row) => count + row.bytes, 0) +
-          partIdentities.reduce((count, row) => count + row.bytes, 0) >
+        partIdentities.reduce((count, row) => count + row.bytes, 0) >
         TranscriptWindowProjection.Limits.decodedBytes
     )
       return yield* Effect.fail(new TooLarge())

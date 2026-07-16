@@ -89,6 +89,25 @@ function partData(part: (typeof SessionV1.Event.PartUpdated.Type)["data"]["part"
   return rest as DeepMutable<typeof rest>
 }
 
+function messageStructure(data: typeof MessageTable.$inferInsert.data) {
+  const value = data as Record<string, unknown>
+  return JSON.stringify({
+    role: value.role,
+    parentID: value.parentID,
+    summary: value.summary,
+    finish: value.finish,
+  })
+}
+
+function partIsStructural(data: typeof PartTable.$inferInsert.data | undefined) {
+  if (!data) return false
+  const value = data as Record<string, unknown>
+  if (value.type === "compaction") return true
+  if (value.type !== "text") return false
+  const metadata = value.metadata as Record<string, unknown> | undefined
+  return value.synthetic === true || metadata?.compaction_replay === true || metadata?.compaction_continue === true
+}
+
 function applyUsage(
   db: DatabaseService,
   sessionID: (typeof SessionV1.Event.MessageUpdated.Type)["data"]["sessionID"],
@@ -291,6 +310,7 @@ export const layer = Layer.effectDiscard(
         const id = event.data.info.id
         const sessionID = event.data.info.sessionID
         const data = messageData(event.data.info)
+        const prior = yield* db.select({ data: MessageTable.data }).from(MessageTable).where(eq(MessageTable.id, id)).get().pipe(Effect.orDie)
         yield* db
           .insert(MessageTable)
           .values({ id, session_id: sessionID, time_created, data })
@@ -301,6 +321,7 @@ export const layer = Layer.effectDiscard(
           sessionID,
           messageID: id,
           revision: event.seq ?? 0,
+          structural: prior ? messageStructure(prior.data) !== messageStructure(data) : false,
         })
         yield* TranscriptWindowProjection.refresh(db, { sessionID, revision: event.seq ?? 0 })
       }),
@@ -317,17 +338,16 @@ export const layer = Layer.effectDiscard(
           const previous = usage(row.data)
           if (previous) yield* applyUsage(db, event.data.sessionID, previous, -1)
         }
-        yield* TranscriptWindowProjection.touch(db, {
-          sessionID: event.data.sessionID,
-          messageID: event.data.messageID,
-          revision: event.seq ?? 0,
-          removed: true,
-        })
         yield* db
           .delete(MessageTable)
           .where(and(eq(MessageTable.id, event.data.messageID), eq(MessageTable.session_id, event.data.sessionID)))
           .run()
           .pipe(Effect.orDie)
+        yield* TranscriptWindowProjection.touch(db, {
+          sessionID: event.data.sessionID,
+          messageID: event.data.messageID,
+          revision: event.seq ?? 0,
+        })
         yield* TranscriptWindowProjection.refresh(db, {
           sessionID: event.data.sessionID,
           revision: event.seq ?? 0,
@@ -344,17 +364,17 @@ export const layer = Layer.effectDiscard(
           .pipe(Effect.orDie)
         const previous = row && usage(row.data)
         if (previous) yield* applyUsage(db, event.data.sessionID, previous, -1)
-        yield* TranscriptWindowProjection.touch(db, {
-          sessionID: event.data.sessionID,
-          messageID: event.data.messageID,
-          revision: event.seq ?? 0,
-          removed: true,
-        })
         yield* db
           .delete(PartTable)
           .where(and(eq(PartTable.id, event.data.partID), eq(PartTable.session_id, event.data.sessionID)))
           .run()
           .pipe(Effect.orDie)
+        yield* TranscriptWindowProjection.touch(db, {
+          sessionID: event.data.sessionID,
+          messageID: event.data.messageID,
+          revision: event.seq ?? 0,
+          structural: partIsStructural(row?.data),
+        })
         yield* TranscriptWindowProjection.refresh(db, {
           sessionID: event.data.sessionID,
           revision: event.seq ?? 0,
@@ -382,6 +402,7 @@ export const layer = Layer.effectDiscard(
           sessionID,
           messageID,
           revision: event.seq ?? 0,
+          structural: partIsStructural(row?.data) || partIsStructural(data),
         })
         yield* TranscriptWindowProjection.refresh(db, { sessionID, revision: event.seq ?? 0 })
       }),

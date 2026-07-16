@@ -1,7 +1,7 @@
 export * as TranscriptWindowProjection from "./transcript-window"
 
 import { Effect } from "effect"
-import { and, desc, eq, gte, inArray } from "drizzle-orm"
+import { and, asc, desc, eq, gte, inArray, lt, or, sql } from "drizzle-orm"
 import type { Database } from "../database/database"
 import { SessionV1, type MessageID } from "../v1/session"
 import type { SessionSchema } from "./schema"
@@ -35,7 +35,7 @@ export function create(db: DatabaseService, input: { sessionID: SessionSchema.ID
 
 export function touch(
   db: DatabaseService,
-  input: { sessionID: SessionSchema.ID; messageID: MessageID; revision: number; removed?: boolean },
+  input: { sessionID: SessionSchema.ID; messageID: MessageID; revision: number; structural?: boolean },
 ) {
   return Effect.gen(function* () {
     const state = yield* db
@@ -71,10 +71,11 @@ export function touch(
       return
     }
 
+    let requiresIndex = false
     for (const row of rows) {
       const inRange = input.messageID >= row.range_start_id && input.messageID < row.range_end_id
       const continuity = row.continuity_message_ids.includes(input.messageID)
-      const structural =
+      const structuralIdentity =
         input.messageID === row.marker_id ||
         input.messageID === row.tail_start_id ||
         input.messageID === row.source_message_id ||
@@ -82,18 +83,37 @@ export function touch(
         input.messageID === row.range_start_id ||
         input.messageID === row.range_end_id ||
         row.replay_message_ids.includes(input.messageID)
-      if (input.removed && structural) {
+      const structural = structuralIdentity || (input.structural === true && (inRange || continuity))
+      if (structural) {
         yield* db
-          .update(TranscriptWindowStateTable)
-          .set({ index_status: "stale" })
-          .where(eq(TranscriptWindowStateTable.session_id, input.sessionID))
+          .update(CompactionArchiveManifestTable)
+          .set({ archive_revision: input.revision })
+          .where(
+            and(
+              eq(CompactionArchiveManifestTable.session_id, input.sessionID),
+              eq(CompactionArchiveManifestTable.archive_id, row.archive_id),
+            ),
+          )
           .run()
           .pipe(Effect.orDie)
+        requiresIndex = true
+        continue
       }
       if (!inRange && !continuity) continue
+      const recomputed = yield* recomputeArchive(db, row)
+      if (!recomputed) {
+        yield* failTooLarge(db, input.sessionID, input.revision)
+        return
+      }
       yield* db
         .update(CompactionArchiveManifestTable)
-        .set({ archive_revision: input.revision })
+        .set({
+          archive_revision: input.revision,
+          message_count: recomputed.messageCount,
+          part_count: recomputed.partCount,
+          text_units: recomputed.textUnits,
+          decoded_bytes: recomputed.decodedBytes,
+        })
         .where(
           and(
             eq(CompactionArchiveManifestTable.session_id, input.sessionID),
@@ -102,6 +122,113 @@ export function touch(
         )
         .run()
         .pipe(Effect.orDie)
+    }
+    if (requiresIndex) {
+      yield* db
+        .update(TranscriptWindowStateTable)
+        .set({ index_status: "index_required" })
+        .where(eq(TranscriptWindowStateTable.session_id, input.sessionID))
+        .run()
+        .pipe(Effect.orDie)
+    }
+  })
+}
+
+function recomputeArchive(db: DatabaseService, row: typeof CompactionArchiveManifestTable.$inferSelect) {
+  return Effect.gen(function* () {
+    const range = and(
+      eq(MessageTable.session_id, row.session_id),
+      gte(MessageTable.id, row.range_start_id),
+      lt(MessageTable.id, row.range_end_id),
+    )
+    const continuity = row.continuity_message_ids.length
+      ? and(eq(MessageTable.session_id, row.session_id), inArray(MessageTable.id, row.continuity_message_ids))
+      : undefined
+    const identities = yield* db
+      .select({
+        id: MessageTable.id,
+        bytes: sql<number>`length(cast(${MessageTable.data} as blob))`,
+      })
+      .from(MessageTable)
+      .where(continuity ? or(range, continuity) : range)
+      .orderBy(asc(MessageTable.time_created), asc(MessageTable.id))
+      .limit(Limits.messages + 1)
+      .all()
+      .pipe(Effect.orDie)
+    if (
+      identities.length > Limits.messages ||
+      identities.some((identity) => identity.id.length > Limits.identityCodeUnits) ||
+      identities.reduce((total, identity) => total + identity.bytes, 0) > Limits.decodedBytes
+    )
+      return undefined
+    if (identities.length === 0) return { messageCount: 0, partCount: 0, textUnits: 2, decodedBytes: 2 }
+
+    const ids = identities.map((identity) => identity.id)
+    const partIdentities = yield* db
+      .select({
+        id: PartTable.id,
+        messageID: PartTable.message_id,
+        bytes: sql<number>`length(cast(${PartTable.data} as blob))`,
+      })
+      .from(PartTable)
+      .where(and(eq(PartTable.session_id, row.session_id), inArray(PartTable.message_id, ids)))
+      .limit(Limits.parts + 1)
+      .all()
+      .pipe(Effect.orDie)
+    if (
+      partIdentities.length > Limits.parts ||
+      partIdentities.some(
+        (part) =>
+          part.id.length > Limits.identityCodeUnits ||
+          part.messageID.length > Limits.identityCodeUnits,
+      ) ||
+      identities.reduce((total, identity) => total + identity.bytes, 0) +
+          partIdentities.reduce((total, part) => total + part.bytes, 0) >
+        Limits.decodedBytes
+    )
+      return undefined
+
+    const messages = yield* db
+      .select()
+      .from(MessageTable)
+      .where(and(eq(MessageTable.session_id, row.session_id), inArray(MessageTable.id, ids)))
+      .orderBy(asc(MessageTable.time_created), asc(MessageTable.id))
+      .all()
+      .pipe(Effect.orDie)
+    const partRows = yield* db
+      .select()
+      .from(PartTable)
+      .where(and(eq(PartTable.session_id, row.session_id), inArray(PartTable.message_id, ids)))
+      .orderBy(PartTable.message_id, PartTable.id)
+      .all()
+      .pipe(Effect.orDie)
+    const parts = new Map<MessageID, SessionV1.Part[]>()
+    for (const partRow of partRows) {
+      const part = {
+        ...partRow.data,
+        id: partRow.id,
+        sessionID: partRow.session_id,
+        messageID: partRow.message_id,
+      } as SessionV1.Part
+      const list = parts.get(partRow.message_id)
+      if (list) list.push(part)
+      else parts.set(partRow.message_id, [part])
+    }
+    const archive = messages.map(
+      (message) =>
+        ({
+          info: { ...message.data, id: message.id, sessionID: message.session_id } as SessionV1.Info,
+          parts: parts.get(message.id) ?? [],
+        }) satisfies SessionV1.WithParts,
+    )
+    const encoded = JSON.stringify(archive)
+    const decodedBytes = Buffer.byteLength(encoded, "utf8")
+    if (encoded.length > Limits.textCodeUnits || decodedBytes > Limits.decodedBytes) return undefined
+    return {
+      messageCount: archive.length,
+      partCount: archive.reduce((total, message) => total + message.parts.length, 0),
+      textUnits: encoded.length,
+      decodedBytes,
     }
   })
 }
@@ -116,8 +243,8 @@ export function refresh(db: DatabaseService, input: { sessionID: SessionSchema.I
       .pipe(Effect.orDie)
     if (!state || state.index_status !== "complete") return
 
-    const rows = yield* db
-      .select()
+    const identities = yield* db
+      .select({ id: MessageTable.id, bytes: sql<number>`length(cast(${MessageTable.data} as blob))` })
       .from(MessageTable)
       .where(
         state.tail_start_id
@@ -128,9 +255,53 @@ export function refresh(db: DatabaseService, input: { sessionID: SessionSchema.I
       .limit(Limits.messages + 1)
       .all()
       .pipe(Effect.orDie)
-    if (rows.length > Limits.messages) return yield* failTooLarge(db, input.sessionID, input.revision)
+    if (
+      identities.length > Limits.messages ||
+      identities.some((row) => row.id.length > Limits.identityCodeUnits || row.bytes > Limits.decodedBytes) ||
+      identities.reduce((count, row) => count + row.bytes, 0) > Limits.decodedBytes
+    )
+      return yield* failTooLarge(db, input.sessionID, input.revision)
 
-    const ids = rows.map((row) => row.id)
+    const ids = identities.map((row) => row.id)
+    const partIdentities =
+      ids.length === 0
+        ? []
+        : yield* db
+            .select({
+              id: PartTable.id,
+              messageID: PartTable.message_id,
+              bytes: sql<number>`length(cast(${PartTable.data} as blob))`,
+            })
+            .from(PartTable)
+            .where(and(eq(PartTable.session_id, input.sessionID), inArray(PartTable.message_id, ids)))
+            .orderBy(PartTable.message_id, PartTable.id)
+            .limit(Limits.parts + 1)
+            .all()
+            .pipe(Effect.orDie)
+    if (
+      partIdentities.length > Limits.parts ||
+      partIdentities.some(
+        (row) =>
+          row.id.length > Limits.identityCodeUnits ||
+          row.messageID.length > Limits.identityCodeUnits ||
+          row.bytes > Limits.decodedBytes,
+      ) ||
+      identities.reduce((count, row) => count + row.bytes, 0) +
+        partIdentities.reduce((count, row) => count + row.bytes, 0) >
+        Limits.decodedBytes
+    )
+      return yield* failTooLarge(db, input.sessionID, input.revision)
+
+    const rows =
+      ids.length === 0
+        ? []
+        : yield* db
+            .select()
+            .from(MessageTable)
+            .where(and(eq(MessageTable.session_id, input.sessionID), inArray(MessageTable.id, ids)))
+            .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+            .all()
+            .pipe(Effect.orDie)
     const partRows =
       ids.length === 0
         ? []
@@ -139,10 +310,8 @@ export function refresh(db: DatabaseService, input: { sessionID: SessionSchema.I
             .from(PartTable)
             .where(and(eq(PartTable.session_id, input.sessionID), inArray(PartTable.message_id, ids)))
             .orderBy(PartTable.message_id, PartTable.id)
-            .limit(Limits.parts + 1)
             .all()
             .pipe(Effect.orDie)
-    if (partRows.length > Limits.parts) return yield* failTooLarge(db, input.sessionID, input.revision)
 
     const parts = new Map<MessageID, SessionV1.Part[]>()
     for (const row of partRows) {
@@ -151,15 +320,13 @@ export function refresh(db: DatabaseService, input: { sessionID: SessionSchema.I
       if (list) list.push(value)
       else parts.set(row.message_id, [value])
     }
-    const messages = rows
-      .toReversed()
-      .map(
-        (row) =>
-          ({
-            info: { ...row.data, id: row.id, sessionID: row.session_id } as SessionV1.Info,
-            parts: parts.get(row.id) ?? [],
-          }) satisfies SessionV1.WithParts,
-      )
+    const messages = rows.toReversed().map(
+      (row) =>
+        ({
+          info: { ...row.data, id: row.id, sessionID: row.session_id } as SessionV1.Info,
+          parts: parts.get(row.id) ?? [],
+        }) satisfies SessionV1.WithParts,
+    )
     const encoded = JSON.stringify(messages)
     const textUnits = encoded.length
     const decodedBytes = Buffer.byteLength(encoded, "utf8")
@@ -185,12 +352,11 @@ export function refresh(db: DatabaseService, input: { sessionID: SessionSchema.I
         .sort((a, b) => a!.ordinal - b!.ordinal)
         .at(-1)
       const continuity = prior ? [prior.summary_message_id, ...prior.replay_message_ids] : []
-      const own = messages.filter(
-        (message) => message.info.id >= item.rangeStartID && message.info.id < item.markerID,
-      )
+      const own = messages.filter((message) => message.info.id >= item.rangeStartID && message.info.id < item.markerID)
       const continuityMessages = continuity
         .map((id) => messages.find((message) => message.info.id === id))
         .filter((message): message is SessionV1.WithParts => !!message)
+      if (continuityMessages.length !== continuity.length) continue
       const archive = [...continuityMessages, ...own].filter(
         (message, index, values) => values.findIndex((candidate) => candidate.info.id === message.info.id) === index,
       )
@@ -272,7 +438,8 @@ export function refresh(db: DatabaseService, input: { sessionID: SessionSchema.I
     const latest = derived.filter((item) => item.tailStartID).at(-1)
     const tail = latest?.tailStartID ? messages.filter((message) => message.info.id >= latest.tailStartID!) : messages
     const tailEncoded = JSON.stringify(tail)
-    const descriptorCount = new Set([...existing.map((row) => row.marker_id), ...derived.map((item) => item.markerID)]).size
+    const descriptorCount = new Set([...existing.map((row) => row.marker_id), ...derived.map((item) => item.markerID)])
+      .size
     if (descriptorCount > Limits.descriptors) return yield* failTooLarge(db, input.sessionID, input.revision)
     yield* db
       .update(TranscriptWindowStateTable)
@@ -330,9 +497,7 @@ function deriveCompactions(messages: SessionV1.WithParts[]) {
       .filter(
         (message) =>
           message.info.role === "user" &&
-          message.parts.some(
-            (part) => part.type === "text" && part.metadata?.compaction_replay === true,
-          ),
+          message.parts.some((part) => part.type === "text" && part.metadata?.compaction_replay === true),
       )
       .map((message) => message.info.id)
     const synthetic = segment.filter(

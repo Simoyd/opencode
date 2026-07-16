@@ -1,4 +1,5 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { TranscriptWindowProjection } from "@opencode-ai/core/session/transcript-window"
 import { Agent } from "@/agent/agent"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -157,7 +158,6 @@ function buildTurnCompaction(
     compactionMessageID: compaction.message.info.id,
     summaryMessageID: summary.message.info.id,
     summaryPreview: createSummaryPreview(fullSummary),
-    fullSummary,
     preCompactionMessageIDs: segment
       .slice(0, compaction.index)
       .filter(isCollapsibleOperationalMessage)
@@ -405,7 +405,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
     }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* SessionTranscriptWindow.loadWindow(ctx.params.sessionID).pipe(
+      const window = yield* SessionTranscriptWindow.loadWindow(ctx.params.sessionID).pipe(
         Effect.catch((error) =>
           Effect.succeed({
             status: error instanceof SessionTranscriptWindow.TooLarge ? ("too_large" as const) : ("stale" as const),
@@ -416,6 +416,62 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
           }),
         ),
       )
+      const turns = window.status === "complete" ? buildSessionTurns(ctx.params.sessionID, window.tail).turns : []
+      const turnEncoded = JSON.stringify(turns)
+      const turnIdentities = turns.reduce(
+        (count, turn) =>
+          count +
+          2 +
+          turn.messageIDs.length +
+          turn.intermediateMessageIDs.length +
+          turn.compactionBoundaryMessageIDs.length +
+          (turn.finalOutputMessageID ? 1 : 0) +
+          (turn.compaction
+            ? 2 +
+              turn.compaction.preCompactionMessageIDs.length +
+              turn.compaction.postCompactionMessageIDs.length +
+              turn.compaction.syntheticPromptMessageIDs.length +
+              turn.compaction.replayPromptMessageIDs.length +
+              (turn.compaction.recallMarkerID ? 1 : 0) +
+              (turn.compaction.recallTailStartMessageID ? 1 : 0)
+            : 0),
+        0,
+      )
+      const turnDecodedBytes = Buffer.byteLength(turnEncoded, "utf8")
+      if (
+        turnIdentities > TranscriptWindowProjection.Limits.parts ||
+        turnEncoded.length > TranscriptWindowProjection.Limits.textCodeUnits ||
+        turnDecodedBytes > TranscriptWindowProjection.Limits.decodedBytes
+      )
+        return {
+          status: "too_large" as const,
+          sessionID: ctx.params.sessionID,
+          archiveDescriptors: [],
+          tail: [],
+          turns: [],
+          counts: {
+            descriptors: 0,
+            messages: 0,
+            parts: 0,
+            textUnits: 0,
+            decodedBytes: 0,
+            turns: 0,
+            turnIdentities: 0,
+            turnTextUnits: 0,
+            turnDecodedBytes: 0,
+          },
+        }
+      return {
+        ...window,
+        turns,
+        counts: {
+          ...window.counts,
+          turns: turns.length,
+          turnIdentities,
+          turnTextUnits: turnEncoded.length,
+          turnDecodedBytes,
+        },
+      }
     })
 
     const create = Effect.fn("SessionHttpApi.create")(function* (ctx: { payload?: Session.CreateInput }) {

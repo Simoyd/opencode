@@ -71,6 +71,10 @@ export const TranscriptWindowCounts = Schema.Struct({
   parts: NonNegativeInt,
   textUnits: NonNegativeInt,
   decodedBytes: NonNegativeInt,
+  turns: NonNegativeInt,
+  turnIdentities: NonNegativeInt,
+  turnTextUnits: NonNegativeInt,
+  turnDecodedBytes: NonNegativeInt,
 })
 export const TranscriptArchiveDescriptor = Schema.Struct({
   archiveID: Schema.String,
@@ -84,22 +88,11 @@ export const TranscriptArchiveDescriptor = Schema.Struct({
   textUnits: NonNegativeInt,
   decodedBytes: NonNegativeInt,
 }).annotate({ identifier: "TranscriptArchiveDescriptor" })
-export const TranscriptWindowResponse = Schema.Struct({
-  status: TranscriptWindowStatus,
-  sessionID: SessionID,
-  sourceGeneration: Schema.optional(Schema.String),
-  windowRevision: Schema.optional(Schema.String),
-  tailStartID: Schema.optional(MessageID),
-  archiveDescriptors: Schema.Array(TranscriptArchiveDescriptor),
-  tail: Schema.Array(SessionV1.WithParts),
-  counts: TranscriptWindowCounts,
-}).annotate({ identifier: "TranscriptWindowResponse" })
 export const StatusMap = Schema.Record(Schema.String, SessionStatus.Info)
 export const SessionTurnCompaction = Schema.Struct({
   compactionMessageID: MessageID,
   summaryMessageID: MessageID,
   summaryPreview: Schema.String,
-  fullSummary: Schema.String,
   preCompactionMessageIDs: Schema.Array(MessageID),
   postCompactionMessageIDs: Schema.Array(MessageID),
   syntheticPromptMessageIDs: Schema.Array(MessageID),
@@ -121,6 +114,17 @@ export const SessionTurnsResponse = Schema.Struct({
   sessionID: SessionID,
   turns: Schema.Array(SessionTurn),
 }).annotate({ identifier: "SessionTurnsResponse" })
+export const TranscriptWindowResponse = Schema.Struct({
+  status: TranscriptWindowStatus,
+  sessionID: SessionID,
+  sourceGeneration: Schema.optional(Schema.String),
+  windowRevision: Schema.optional(Schema.String),
+  tailStartID: Schema.optional(MessageID),
+  archiveDescriptors: Schema.Array(TranscriptArchiveDescriptor),
+  tail: Schema.Array(SessionV1.WithParts),
+  turns: Schema.Array(SessionTurn),
+  counts: TranscriptWindowCounts,
+}).annotate({ identifier: "TranscriptWindowResponse" })
 export const CompactedRangeResponse = Schema.Struct({
   reference: Schema.Struct({
     markerID: Schema.String,

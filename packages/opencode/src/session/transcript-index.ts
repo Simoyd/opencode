@@ -14,7 +14,7 @@ import {
 import { TranscriptWindowProjection } from "@opencode-ai/core/session/transcript-window"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { and, asc, eq, gt, inArray, or, sql } from "drizzle-orm"
-import { Effect } from "effect"
+import { Cause, Effect, Exit } from "effect"
 import { MessageID, SessionID } from "./schema"
 
 const BatchMessages = 256
@@ -41,7 +41,7 @@ type State = {
   }
 }
 
-export const run = Effect.fn("SessionTranscriptIndex.run")(function* (input: {
+const runIndex = Effect.fn("SessionTranscriptIndex.runIndex")(function* (input: {
   sessionID: SessionID
   ownerID: string
   maxBatches?: number
@@ -124,11 +124,9 @@ export const run = Effect.fn("SessionTranscriptIndex.run")(function* (input: {
         (!current.overflow || current.replayMessageIDs.length > 0) &&
         isFinalAssistant(message)
       ) {
-        const continuity = state.previous
-          ? [state.previous.summaryMessageID, ...state.previous.replayMessageIDs]
-          : []
+        const continuity = state.previous ? [state.previous.summaryMessageID, ...state.previous.replayMessageIDs] : []
         const continuityCounts = yield* countMessages(db, input.sessionID, continuity)
-        const counts = sum(current.counts, continuityCounts)
+        const counts = finalizeCounts(sum(current.counts, continuityCounts))
         if (
           counts.messages > TranscriptWindowProjection.Limits.messages ||
           counts.parts > TranscriptWindowProjection.Limits.parts ||
@@ -310,6 +308,59 @@ export const run = Effect.fn("SessionTranscriptIndex.run")(function* (input: {
   return { ownerID: input.ownerID, resumed: lease.resumed, descriptors: state.ordinal, complete: true as const }
 })
 
+export const run = Effect.fn("SessionTranscriptIndex.run")(function* (input: {
+  sessionID: SessionID
+  ownerID: string
+  maxBatches?: number
+}) {
+  const { db } = yield* Database.Service
+  return yield* runIndex(input).pipe(
+    Effect.onExit((exit) =>
+      Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause) ? markIndexFailed(db, input) : Effect.void,
+    ),
+  )
+})
+
+function markIndexFailed(db: Database.Interface["db"], input: { sessionID: SessionID; ownerID: string }) {
+  return db.transaction(
+    () =>
+      Effect.gen(function* () {
+        yield* db
+          .update(TranscriptWindowStateTable)
+          .set({ index_status: "index_failed", index_owner_id: null })
+          .where(
+            and(
+              eq(TranscriptWindowStateTable.session_id, input.sessionID),
+              eq(TranscriptWindowStateTable.index_owner_id, input.ownerID),
+            ),
+          )
+          .run()
+          .pipe(Effect.orDie)
+        yield* db
+          .delete(CompactionArchiveStagingTable)
+          .where(
+            and(
+              eq(CompactionArchiveStagingTable.session_id, input.sessionID),
+              eq(CompactionArchiveStagingTable.owner_id, input.ownerID),
+            ),
+          )
+          .run()
+          .pipe(Effect.orDie)
+        yield* db
+          .delete(SessionMaintenanceTable)
+          .where(
+            and(
+              eq(SessionMaintenanceTable.session_id, input.sessionID),
+              eq(SessionMaintenanceTable.owner_id, input.ownerID),
+            ),
+          )
+          .run()
+          .pipe(Effect.orDie)
+      }),
+    { behavior: "immediate" },
+  )
+}
+
 function loadBatch(
   db: Database.Interface["db"],
   input: { sessionID: SessionID; cursorTime?: number; cursorID?: MessageID },
@@ -323,9 +374,15 @@ function loadBatch(
           )
         : undefined
     const identities = yield* db
-      .select({ id: MessageTable.id, time: MessageTable.time_created, bytes: sql<number>`length(${MessageTable.data})` })
+      .select({
+        id: MessageTable.id,
+        time: MessageTable.time_created,
+        bytes: sql<number>`length(cast(${MessageTable.data} as blob))`,
+      })
       .from(MessageTable)
-      .where(after ? and(eq(MessageTable.session_id, input.sessionID), after) : eq(MessageTable.session_id, input.sessionID))
+      .where(
+        after ? and(eq(MessageTable.session_id, input.sessionID), after) : eq(MessageTable.session_id, input.sessionID),
+      )
       .orderBy(asc(MessageTable.time_created), asc(MessageTable.id))
       .limit(BatchMessages + 1)
       .all()
@@ -339,13 +396,14 @@ function loadBatch(
     if (page.length === 0) return { identities: page, messages: [] as SessionV1.WithParts[] }
     const ids = page.map((row) => row.id)
     const partIdentities = yield* db
-      .select({ id: PartTable.id, bytes: sql<number>`length(${PartTable.data})` })
+      .select({ id: PartTable.id, bytes: sql<number>`length(cast(${PartTable.data} as blob))` })
       .from(PartTable)
       .where(and(eq(PartTable.session_id, input.sessionID), inArray(PartTable.message_id, ids)))
       .limit(TranscriptWindowProjection.Limits.parts + 1)
       .all()
       .pipe(Effect.orDie)
-    const bytes = page.reduce((count, row) => count + row.bytes, 0) + partIdentities.reduce((count, row) => count + row.bytes, 0)
+    const bytes =
+      page.reduce((count, row) => count + row.bytes, 0) + partIdentities.reduce((count, row) => count + row.bytes, 0)
     if (
       partIdentities.length > TranscriptWindowProjection.Limits.parts ||
       partIdentities.some((row) => row.bytes > MaxSingleRowBytes) ||
@@ -393,21 +451,31 @@ function countMessages(db: Database.Interface["db"], sessionID: SessionID, ids: 
       .select()
       .from(MessageTable)
       .where(and(eq(MessageTable.session_id, sessionID), inArray(MessageTable.id, ids)))
+      .orderBy(asc(MessageTable.time_created), asc(MessageTable.id))
       .all()
       .pipe(Effect.orDie)
     const parts = yield* db
       .select()
       .from(PartTable)
       .where(and(eq(PartTable.session_id, sessionID), inArray(PartTable.message_id, ids)))
+      .orderBy(PartTable.message_id, PartTable.id)
       .all()
       .pipe(Effect.orDie)
-    const encoded = JSON.stringify([rows, parts])
-    return {
-      messages: rows.length,
-      parts: parts.length,
-      textUnits: encoded.length,
-      decodedBytes: Buffer.byteLength(encoded, "utf8"),
+    const partsByMessage = new Map<MessageID, SessionV1.Part[]>()
+    for (const row of parts) {
+      const part = { ...row.data, id: row.id, sessionID: row.session_id, messageID: row.message_id } as SessionV1.Part
+      const list = partsByMessage.get(row.message_id)
+      if (list) list.push(part)
+      else partsByMessage.set(row.message_id, [part])
     }
+    const counts = emptyCounts()
+    for (const row of rows) {
+      add(counts, {
+        info: { ...row.data, id: row.id, sessionID: row.session_id } as SessionV1.Info,
+        parts: partsByMessage.get(row.id) ?? [],
+      })
+    }
+    return counts
   })
 }
 
@@ -436,6 +504,15 @@ function sum(left: Counts, right: Counts): Counts {
     parts: left.parts + right.parts,
     textUnits: left.textUnits + right.textUnits,
     decodedBytes: left.decodedBytes + right.decodedBytes,
+  }
+}
+
+function finalizeCounts(counts: Counts): Counts {
+  const separators = Math.max(0, counts.messages - 1)
+  return {
+    ...counts,
+    textUnits: counts.textUnits + separators + 2,
+    decodedBytes: counts.decodedBytes + separators + 2,
   }
 }
 

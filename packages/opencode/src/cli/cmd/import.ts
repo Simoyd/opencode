@@ -4,7 +4,13 @@ import { Session } from "@/session/session"
 import { MessageV2 } from "../../session/message-v2"
 import { CliError, effectCmd } from "../effect-cmd"
 import { Database } from "@opencode-ai/core/database/database"
-import { SessionTable, MessageTable, PartTable, TranscriptWindowStateTable } from "@opencode-ai/core/session/sql"
+import {
+  SessionAdmissionTable,
+  SessionTable,
+  MessageTable,
+  PartTable,
+  TranscriptWindowStateTable,
+} from "@opencode-ai/core/session/sql"
 import { SessionMaintenance } from "@opencode-ai/core/session/maintenance"
 import { InstanceRef } from "@/effect/instance-ref"
 import { ShareNext } from "@/share/share-next"
@@ -13,7 +19,7 @@ import path from "path"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Effect, Schema } from "effect"
 import type { InstanceContext } from "@/project/instance-context"
-import { eq } from "drizzle-orm"
+import { and, eq } from "drizzle-orm"
 
 const decodeMessageInfo = Schema.decodeUnknownSync(SessionV1.Info)
 const decodePart = Schema.decodeUnknownSync(SessionV1.Part)
@@ -179,17 +185,7 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
     path: path.relative(path.resolve(ctx.worktree), ctx.directory).replaceAll("\\", "/"),
   }) as Session.Info
   const row = Session.toRow(info)
-  const persist = Effect.gen(function* () {
-    yield* db
-      .insert(SessionTable)
-      .values(row)
-      .onConflictDoUpdate({
-        target: SessionTable.id,
-        set: { project_id: row.project_id, directory: row.directory, path: row.path },
-      })
-      .run()
-      .pipe(Effect.orDie)
-
+  const writeImportedRows = Effect.gen(function* () {
     for (const msg of exportData.messages) {
       const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
       const { id, sessionID: _, ...msgData } = msgInfo
@@ -236,15 +232,54 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
       .run()
       .pipe(Effect.orDie)
   })
+  const upsertSession = db
+    .insert(SessionTable)
+    .values(row)
+    .onConflictDoUpdate({
+      target: SessionTable.id,
+      set: { project_id: row.project_id, directory: row.directory, path: row.path },
+    })
+    .run()
+    .pipe(Effect.orDie)
+  const persistExisting = upsertSession.pipe(Effect.andThen(writeImportedRows))
   const existing = yield* db
     .select({ id: SessionTable.id })
     .from(SessionTable)
     .where(eq(SessionTable.id, row.id))
     .get()
     .pipe(Effect.orDie)
-  yield* (existing
-    ? SessionMaintenance.withAdmission(db, { sessionID: row.id, kind: "import" }, persist)
-    : persist)
+  if (existing) {
+    yield* SessionMaintenance.withAdmission(db, { sessionID: row.id, kind: "import" }, persistExisting)
+  } else {
+    const operationID = crypto.randomUUID()
+    yield* db
+      .transaction(
+        () =>
+          Effect.gen(function* () {
+            yield* db.insert(SessionTable).values(row).run().pipe(Effect.orDie)
+            yield* db
+              .insert(SessionAdmissionTable)
+              .values({
+                session_id: row.id,
+                operation_id: operationID,
+                kind: "import",
+                time_started: Date.now(),
+              })
+              .run()
+              .pipe(Effect.orDie)
+            yield* writeImportedRows
+            yield* db
+              .delete(SessionAdmissionTable)
+              .where(
+                and(eq(SessionAdmissionTable.session_id, row.id), eq(SessionAdmissionTable.operation_id, operationID)),
+              )
+              .run()
+              .pipe(Effect.orDie)
+          }),
+        { behavior: "immediate" },
+      )
+      .pipe(Effect.orDie)
+  }
 
   process.stdout.write(`Imported session: ${exportData.info.id}`)
   process.stdout.write(EOL)
