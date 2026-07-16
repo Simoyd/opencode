@@ -405,9 +405,16 @@ describe("session messages endpoint", () => {
           messageCount: number
           partCount: number
           textUnits: number
+          decodedBytes: number
           }>
           tail: SessionV1.WithParts[]
           turns: Array<{ startMessageID: string; finalOutputMessageID?: string }>
+          counts: {
+            textUnits: number
+            decodedBytes: number
+            turnTextUnits: number
+            turnDecodedBytes: number
+          }
         }
         expect(window.status).toBe("complete")
         expect(window.archiveDescriptors).toHaveLength(3)
@@ -416,6 +423,12 @@ describe("session messages endpoint", () => {
         expect(window.turns).toEqual([
           expect.objectContaining({ startMessageID: start3 }),
         ])
+        const encodedTail = JSON.stringify(window.tail)
+        const encodedTurns = JSON.stringify(window.turns)
+        expect(window.counts.textUnits).toBe(encodedTail.length)
+        expect(window.counts.decodedBytes).toBe(Buffer.byteLength(encodedTail, "utf8"))
+        expect(window.counts.turnTextUnits).toBe(encodedTurns.length)
+        expect(window.counts.turnDecodedBytes).toBe(Buffer.byteLength(encodedTurns, "utf8"))
 
         const firstBeforeMutation = window.archiveDescriptors[0]!
         const sessionService = yield* SessionNs.Service
@@ -471,6 +484,9 @@ describe("session messages endpoint", () => {
           expect(indexedBody.status).toBe("complete")
           expect(indexedBody.complete).toBe(true)
           expect(indexedBody.messages.length).toBeGreaterThan(0)
+          const indexedBodyEncoded = JSON.stringify(indexedBody.messages)
+          expect(indexedDescriptor.textUnits).toBe(indexedBodyEncoded.length)
+          expect(indexedDescriptor.decodedBytes).toBe(Buffer.byteLength(indexedBodyEncoded, "utf8"))
         }
 
         const descriptor = window.archiveDescriptors[2]!

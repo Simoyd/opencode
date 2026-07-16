@@ -305,12 +305,14 @@ function loadRange(
       if (list) list.push(value)
       else parts.set(row.message_id, [value])
     }
-    const messages = rows.map(
-      (row) =>
-        ({
-          info: { ...row.data, id: row.id, sessionID: row.session_id } as SessionV1.Info,
-          parts: parts.get(row.id) ?? [],
-        }) satisfies SessionV1.WithParts,
+    const messages = TranscriptWindowProjection.encodeMessagesForTransport(
+      rows.map(
+        (row) =>
+          ({
+            info: { ...row.data, id: row.id, sessionID: row.session_id } as SessionV1.Info,
+            parts: parts.get(row.id) ?? [],
+          }) satisfies SessionV1.WithParts,
+      ),
     )
     const encoded = JSON.stringify(messages)
     if (

@@ -1,6 +1,6 @@
 export * as TranscriptWindowProjection from "./transcript-window"
 
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { and, asc, desc, eq, gte, inArray, lt, or, sql } from "drizzle-orm"
 import type { Database } from "../database/database"
 import { SessionV1, type MessageID } from "../v1/session"
@@ -19,6 +19,12 @@ export const Limits = {
   textCodeUnits: 8_000_000,
   decodedBytes: 32 * 1024 * 1024,
 } as const
+
+const encodeMessages = Schema.encodeSync(Schema.Array(SessionV1.WithParts))
+
+export function encodeMessagesForTransport(messages: SessionV1.WithParts[]) {
+  return encodeMessages(messages) as SessionV1.WithParts[]
+}
 
 export function create(db: DatabaseService, input: { sessionID: SessionSchema.ID; revision: number }) {
   return db
@@ -214,12 +220,14 @@ function recomputeArchive(db: DatabaseService, row: typeof CompactionArchiveMani
       if (list) list.push(part)
       else parts.set(partRow.message_id, [part])
     }
-    const archive = messages.map(
-      (message) =>
-        ({
-          info: { ...message.data, id: message.id, sessionID: message.session_id } as SessionV1.Info,
-          parts: parts.get(message.id) ?? [],
-        }) satisfies SessionV1.WithParts,
+    const archive = encodeMessagesForTransport(
+      messages.map(
+        (message) =>
+          ({
+            info: { ...message.data, id: message.id, sessionID: message.session_id } as SessionV1.Info,
+            parts: parts.get(message.id) ?? [],
+          }) satisfies SessionV1.WithParts,
+      ),
     )
     const encoded = JSON.stringify(archive)
     const decodedBytes = Buffer.byteLength(encoded, "utf8")
@@ -320,12 +328,14 @@ export function refresh(db: DatabaseService, input: { sessionID: SessionSchema.I
       if (list) list.push(value)
       else parts.set(row.message_id, [value])
     }
-    const messages = rows.toReversed().map(
-      (row) =>
-        ({
-          info: { ...row.data, id: row.id, sessionID: row.session_id } as SessionV1.Info,
-          parts: parts.get(row.id) ?? [],
-        }) satisfies SessionV1.WithParts,
+    const messages = encodeMessagesForTransport(
+      rows.toReversed().map(
+        (row) =>
+          ({
+            info: { ...row.data, id: row.id, sessionID: row.session_id } as SessionV1.Info,
+            parts: parts.get(row.id) ?? [],
+          }) satisfies SessionV1.WithParts,
+      ),
     )
     const encoded = JSON.stringify(messages)
     const textUnits = encoded.length

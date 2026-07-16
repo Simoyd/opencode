@@ -491,9 +491,10 @@ function emptyCounts(): Counts {
 }
 
 function add(counts: Counts, message: SessionV1.WithParts) {
-  const encoded = JSON.stringify(message)
+  const wireMessage = TranscriptWindowProjection.encodeMessagesForTransport([message])[0]!
+  const encoded = JSON.stringify(wireMessage)
   counts.messages++
-  counts.parts += message.parts.length
+  counts.parts += wireMessage.parts.length
   counts.textUnits += encoded.length
   counts.decodedBytes += Buffer.byteLength(encoded, "utf8")
 }
