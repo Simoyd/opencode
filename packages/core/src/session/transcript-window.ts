@@ -16,8 +16,8 @@ export const Limits = {
   summaryCodeUnits: 512,
   messages: 4096,
   parts: 32768,
-  textCodeUnits: 32_000_000,
-  decodedBytes: 64 * 1024 * 1024,
+  textCodeUnits: 80_000_000,
+  decodedBytes: 80 * 1024 * 1024,
 } as const
 
 const encodeMessages = Schema.encodeSync(Schema.Array(SessionV1.WithParts))
