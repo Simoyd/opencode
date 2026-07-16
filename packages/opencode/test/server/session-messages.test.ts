@@ -196,6 +196,49 @@ function json<T>(response: HttpClientResponse.HttpClientResponse) {
 
 describe("session messages endpoint", () => {
   it.instance(
+    "declares exact empty transcript window body counts",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        const session = yield* sessionScoped
+
+        const complete = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
+        const completeBody = (yield* complete.json) as {
+          status: string
+          tail: unknown[]
+          turns: unknown[]
+          counts: { textUnits: number; decodedBytes: number; turnTextUnits: number; turnDecodedBytes: number }
+        }
+        expect(completeBody.status).toBe("complete")
+        expect(completeBody.tail).toEqual([])
+        expect(completeBody.turns).toEqual([])
+        expect(completeBody.counts.textUnits).toBe(JSON.stringify(completeBody.tail).length)
+        expect(completeBody.counts.decodedBytes).toBe(Buffer.byteLength(JSON.stringify(completeBody.tail), "utf8"))
+        expect(completeBody.counts.turnTextUnits).toBe(JSON.stringify(completeBody.turns).length)
+        expect(completeBody.counts.turnDecodedBytes).toBe(Buffer.byteLength(JSON.stringify(completeBody.turns), "utf8"))
+
+        const { db } = yield* Database.Service
+        yield* db
+          .update(TranscriptWindowStateTable)
+          .set({ text_units: 3 })
+          .where(eq(TranscriptWindowStateTable.session_id, session.id))
+          .run()
+          .pipe(Effect.orDie)
+        const stale = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
+        const staleBody = (yield* stale.json) as typeof completeBody
+        expect(staleBody.status).toBe("stale")
+        expect(staleBody.tail).toEqual([])
+        expect(staleBody.turns).toEqual([])
+        expect(staleBody.counts.textUnits).toBe(2)
+        expect(staleBody.counts.decodedBytes).toBe(2)
+        expect(staleBody.counts.turnTextUnits).toBe(2)
+        expect(staleBody.counts.turnDecodedBytes).toBe(2)
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
     "returns cursor headers for older pages",
     withoutWatcher(
       Effect.gen(function* () {
@@ -311,9 +354,19 @@ describe("session messages endpoint", () => {
         expect(interrupted.complete).toBe(false)
 
         const during = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
-        const duringBody = (yield* during.json) as { status: string; tail: unknown[] }
+        const duringBody = (yield* during.json) as {
+          status: string
+          tail: unknown[]
+          turns: unknown[]
+          counts: { textUnits: number; decodedBytes: number; turnTextUnits: number; turnDecodedBytes: number }
+        }
         expect(duringBody.status).toBe("indexing")
         expect(duringBody.tail).toEqual([])
+        expect(duringBody.turns).toEqual([])
+        expect(duringBody.counts.textUnits).toBe(2)
+        expect(duringBody.counts.decodedBytes).toBe(2)
+        expect(duringBody.counts.turnTextUnits).toBe(2)
+        expect(duringBody.counts.turnDecodedBytes).toBe(2)
 
         const resumed = yield* SessionTranscriptIndex.run({ sessionID: session.id, ownerID })
         expect(resumed.resumed).toBe(true)

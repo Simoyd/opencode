@@ -34,6 +34,8 @@ export function create(db: DatabaseService, input: { sessionID: SessionSchema.ID
       source_generation: crypto.randomUUID(),
       window_revision: input.revision,
       index_status: "complete",
+      text_units: 2,
+      decoded_bytes: 2,
     })
     .run()
     .pipe(Effect.orDie)

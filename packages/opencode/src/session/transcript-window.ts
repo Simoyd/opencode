@@ -34,7 +34,7 @@ export const loadWindow = Effect.fn("SessionTranscriptWindow.loadWindow")(functi
           sessionID,
           archiveDescriptors: [],
           tail: [],
-          counts: { descriptors: 0, messages: 0, parts: 0, textUnits: 0, decodedBytes: 0 },
+          counts: { descriptors: 0, messages: 0, parts: 0, textUnits: 2, decodedBytes: 2 },
         }
       }
       if (state.index_status !== "complete") {
@@ -45,7 +45,7 @@ export const loadWindow = Effect.fn("SessionTranscriptWindow.loadWindow")(functi
           windowRevision: state.window_revision.toString(),
           archiveDescriptors: [],
           tail: [],
-          counts: { descriptors: 0, messages: 0, parts: 0, textUnits: 0, decodedBytes: 0 },
+          counts: { descriptors: 0, messages: 0, parts: 0, textUnits: 2, decodedBytes: 2 },
         }
       }
 
