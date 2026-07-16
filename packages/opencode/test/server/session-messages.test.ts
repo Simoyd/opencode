@@ -359,6 +359,9 @@ describe("session messages endpoint", () => {
         const replay3 = yield* addUser(session.id, "third replay", { replay: true, replaySourceMessageID: start3 })
         yield* addAssistant(session.id, replay3, "third final", { finish: "end_turn" })
 
+        const start4 = yield* addUser(session.id, "fourth prompt")
+        yield* addAssistant(session.id, start4, "fourth final", { finish: "end_turn" })
+
         const { db } = yield* Database.Service
         yield* db
           .delete(CompactionArchiveManifestTable)
@@ -422,6 +425,7 @@ describe("session messages endpoint", () => {
         expect(window.tail.map((message) => message.info.id)).not.toContain(start2)
         expect(window.turns).toEqual([
           expect.objectContaining({ startMessageID: start3 }),
+          expect.objectContaining({ startMessageID: start4 }),
         ])
         const encodedTail = JSON.stringify(window.tail)
         const encodedTurns = JSON.stringify(window.turns)

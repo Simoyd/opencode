@@ -36,6 +36,7 @@ import {
   PermissionResponsePayload,
   PromptPayload,
   RevertPayload,
+  SessionTurn,
   ShellPayload,
   SummarizePayload,
   StagedContextPayload,
@@ -169,7 +170,7 @@ function buildTurnCompaction(
     syntheticPromptMessageIDs,
     replayPromptMessageIDs,
     recallMarkerID: compaction.message.info.id,
-    recallTailStartMessageID: compactionPart.tail_start_id,
+    ...(compactionPart.tail_start_id ? { recallTailStartMessageID: compactionPart.tail_start_id } : {}),
   }
 }
 
@@ -199,9 +200,9 @@ function buildSessionTurns(sessionID: SessionID, messages: SessionV1.WithParts[]
             ? [...compaction.preCompactionMessageIDs, ...compaction.postCompactionMessageIDs]
             : intermediateMessageIDs,
           compactionBoundaryMessageIDs: compaction ? [compaction.compactionMessageID] : [],
-          finalOutputMessageID,
+          ...(finalOutputMessageID ? { finalOutputMessageID } : {}),
           status: finalOutputMessageID ? ("complete" as const) : ("incomplete" as const),
-          compaction,
+          ...(compaction ? { compaction } : {}),
         },
       ]
     }),
@@ -417,8 +418,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         ),
       )
       const turns = window.status === "complete" ? buildSessionTurns(ctx.params.sessionID, window.tail).turns : []
-      const turnEncoded = JSON.stringify(turns)
-      const turnIdentities = turns.reduce(
+      const transportTurns = Schema.encodeSync(Schema.Array(SessionTurn))(turns)
+      const turnEncoded = JSON.stringify(transportTurns)
+      const turnIdentities = transportTurns.reduce(
         (count, turn) =>
           count +
           2 +
