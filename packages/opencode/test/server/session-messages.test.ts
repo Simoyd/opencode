@@ -86,10 +86,16 @@ const fill = Effect.fn("SessionMessagesTest.fill")(function* (
 const addUser = Effect.fn("SessionMessagesTest.addUser")(function* (
   sessionID: SessionID,
   text: string,
-  opts?: { replay?: boolean; replaySourceMessageID?: MessageID; syntheticContinue?: boolean },
+  opts?: {
+    replay?: boolean
+    replaySourceMessageID?: MessageID
+    syntheticContinue?: boolean
+    id?: MessageID
+    created?: number
+  },
 ) {
   const session = yield* SessionNs.Service
-  const id = MessageID.ascending()
+  const id = opts?.id ?? MessageID.ascending()
   const metadata = opts?.replay
     ? { compaction_replay: true, compaction_replay_source_message_id: opts.replaySourceMessageID }
     : opts?.syntheticContinue
@@ -99,7 +105,7 @@ const addUser = Effect.fn("SessionMessagesTest.addUser")(function* (
     id,
     sessionID,
     role: "user",
-    time: { created: Date.now() },
+    time: { created: opts?.created ?? Date.now() },
     agent: "test",
     model,
     tools: {},
@@ -129,15 +135,15 @@ const addAssistant = Effect.fn("SessionMessagesTest.addAssistant")(function* (
   sessionID: SessionID,
   parentID: MessageID,
   text: string,
-  opts?: { summary?: boolean; finish?: string },
+  opts?: { summary?: boolean; finish?: string; id?: MessageID; created?: number },
 ) {
   const session = yield* SessionNs.Service
-  const id = MessageID.ascending()
+  const id = opts?.id ?? MessageID.ascending()
   yield* session.updateMessage({
     id,
     sessionID,
     role: "assistant",
-    time: { created: Date.now() },
+    time: { created: opts?.created ?? Date.now() },
     parentID,
     modelID: ModelV2.ID.make("test"),
     providerID: ProviderV2.ID.make("test"),
@@ -162,14 +168,15 @@ const addAssistant = Effect.fn("SessionMessagesTest.addAssistant")(function* (
 const addCompaction = Effect.fn("SessionMessagesTest.addCompaction")(function* (
   sessionID: SessionID,
   tailStartID: MessageID,
+  opts?: { id?: MessageID; created?: number },
 ) {
   const session = yield* SessionNs.Service
-  const id = MessageID.ascending()
+  const id = opts?.id ?? MessageID.ascending()
   yield* session.updateMessage({
     id,
     sessionID,
     role: "user",
-    time: { created: Date.now() },
+    time: { created: opts?.created ?? Date.now() },
     agent: "test",
     model,
     tools: {},
@@ -376,6 +383,84 @@ describe("session messages endpoint", () => {
         const completeBody = (yield* complete.json) as { status: string; tail: SessionV1.WithParts[] }
         expect(completeBody.status).toBe("complete")
         expect(completeBody.tail).toHaveLength(257)
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
+    "indexes and recalls legacy transcript ranges by created order instead of lexical message id",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        const session = yield* sessionScoped
+        const suffix = crypto.randomUUID().replaceAll("-", "")
+        const id = (prefix: string) => MessageID.make(`msg_${prefix}_${suffix}`)
+        const created = Date.now() - 10_000
+
+        const start = yield* addUser(session.id, "legacy prompt", { id: id("z"), created })
+        const work = yield* addAssistant(session.id, start, "legacy work", {
+          id: id("y"),
+          created: created + 1,
+          finish: "tool-calls",
+        })
+        const marker = yield* addCompaction(session.id, start, { id: id("x"), created: created + 2 })
+        yield* addAssistant(session.id, marker, "legacy summary", {
+          id: id("w"),
+          created: created + 3,
+          summary: true,
+          finish: "end_turn",
+        })
+        const replay = yield* addUser(session.id, "legacy replay", {
+          id: id("v"),
+          created: created + 4,
+          replay: true,
+          replaySourceMessageID: start,
+        })
+        yield* addAssistant(session.id, replay, "legacy final", {
+          id: id("u"),
+          created: created + 5,
+          finish: "end_turn",
+        })
+
+        const { db } = yield* Database.Service
+        yield* db
+          .delete(CompactionArchiveManifestTable)
+          .where(eq(CompactionArchiveManifestTable.session_id, session.id))
+          .run()
+          .pipe(Effect.orDie)
+        yield* db
+          .delete(TranscriptWindowStateTable)
+          .where(eq(TranscriptWindowStateTable.session_id, session.id))
+          .run()
+          .pipe(Effect.orDie)
+
+        const indexed = yield* SessionTranscriptIndex.run({ sessionID: session.id, ownerID: crypto.randomUUID() })
+        expect(indexed.complete).toBe(true)
+
+        const windowResponse = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
+        const window = (yield* windowResponse.json) as {
+          status: string
+          sourceGeneration: string
+          archiveDescriptors: Array<{
+            archiveID: string
+            archiveRevision: string
+            markerID: string
+            sourceMessageID: string
+          }>
+        }
+        expect(window.status).toBe("complete")
+        expect(window.archiveDescriptors).toHaveLength(1)
+        const descriptor = window.archiveDescriptors[0]!
+
+        const recall = yield* requestInDirectory(
+          `/session/${session.id}/compacted_range?marker=${encodeURIComponent(marker)}&tail_start_id=${encodeURIComponent(start)}&message_id=${encodeURIComponent(marker)}&source_generation=${encodeURIComponent(window.sourceGeneration)}&archive_id=${encodeURIComponent(descriptor.archiveID)}&archive_revision=${encodeURIComponent(descriptor.archiveRevision)}&source_message_id=${encodeURIComponent(start)}`,
+          tmp.directory,
+        )
+        const body = (yield* recall.json) as CompactedRangeBody
+        expect(body.status).toBe("complete")
+        expect(body.complete).toBe(true)
+        expect(body.messages.map((message) => message.info.id)).toEqual([start, work])
       }),
     ),
     { git: true },

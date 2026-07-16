@@ -9,7 +9,7 @@ import {
 } from "@opencode-ai/core/session/sql"
 import { TranscriptWindowProjection } from "@opencode-ai/core/session/transcript-window"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { and, asc, eq, gte, inArray, lt, or, sql } from "drizzle-orm"
+import { and, asc, eq, inArray, or, sql } from "drizzle-orm"
 import { Effect } from "effect"
 import { MessageID, SessionID } from "./schema"
 
@@ -226,14 +226,16 @@ function loadRange(
   },
 ) {
   return Effect.gen(function* () {
-    const range = input.startID
-      ? input.endID
-        ? and(
-            eq(MessageTable.session_id, input.sessionID),
-            gte(MessageTable.id, input.startID),
-            lt(MessageTable.id, input.endID),
-          )
-        : and(eq(MessageTable.session_id, input.sessionID), gte(MessageTable.id, input.startID))
+    const orders = yield* TranscriptWindowProjection.loadMessageOrders(
+      db,
+      input.sessionID,
+      [input.startID, input.endID].filter((id): id is MessageID => !!id),
+    )
+    const start = input.startID ? orders.get(input.startID) : undefined
+    const end = input.endID ? orders.get(input.endID) : undefined
+    if ((input.startID && !start) || (input.endID && !end)) return yield* Effect.fail(new Stale())
+    const range = start
+      ? TranscriptWindowProjection.orderedRange(input.sessionID, start, end)
       : eq(MessageTable.session_id, input.sessionID)
     const continuity = input.continuityIDs?.length
       ? and(eq(MessageTable.session_id, input.sessionID), inArray(MessageTable.id, input.continuityIDs))

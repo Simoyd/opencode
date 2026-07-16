@@ -310,7 +310,12 @@ export const layer = Layer.effectDiscard(
         const id = event.data.info.id
         const sessionID = event.data.info.sessionID
         const data = messageData(event.data.info)
-        const prior = yield* db.select({ data: MessageTable.data }).from(MessageTable).where(eq(MessageTable.id, id)).get().pipe(Effect.orDie)
+        const prior = yield* db
+          .select({ data: MessageTable.data })
+          .from(MessageTable)
+          .where(eq(MessageTable.id, id))
+          .get()
+          .pipe(Effect.orDie)
         yield* db
           .insert(MessageTable)
           .values({ id, session_id: sessionID, time_created, data })
@@ -328,6 +333,12 @@ export const layer = Layer.effectDiscard(
     )
     yield* events.project(SessionV1.Event.MessageRemoved, (event) =>
       Effect.gen(function* () {
+        const message = yield* db
+          .select({ time: MessageTable.time_created })
+          .from(MessageTable)
+          .where(and(eq(MessageTable.id, event.data.messageID), eq(MessageTable.session_id, event.data.sessionID)))
+          .get()
+          .pipe(Effect.orDie)
         const rows = yield* db
           .select()
           .from(PartTable)
@@ -346,6 +357,7 @@ export const layer = Layer.effectDiscard(
         yield* TranscriptWindowProjection.touch(db, {
           sessionID: event.data.sessionID,
           messageID: event.data.messageID,
+          messageTime: message?.time,
           revision: event.seq ?? 0,
         })
         yield* TranscriptWindowProjection.refresh(db, {

@@ -1,13 +1,46 @@
 export * as TranscriptWindowProjection from "./transcript-window"
 
 import { Effect, Schema } from "effect"
-import { and, asc, desc, eq, gte, inArray, lt, or, sql } from "drizzle-orm"
+import { and, asc, desc, eq, gt, gte, inArray, lt, or, sql } from "drizzle-orm"
 import type { Database } from "../database/database"
 import { SessionV1, type MessageID } from "../v1/session"
 import type { SessionSchema } from "./schema"
 import { CompactionArchiveManifestTable, MessageTable, PartTable, TranscriptWindowStateTable } from "./sql"
 
 type DatabaseService = Database.Interface["db"]
+export type MessageOrder = { id: MessageID; time: number }
+
+function compareMessageOrder(left: MessageOrder, right: MessageOrder) {
+  if (left.time !== right.time) return left.time - right.time
+  return left.id === right.id ? 0 : left.id < right.id ? -1 : 1
+}
+
+export function orderedRange(sessionID: SessionSchema.ID, start: MessageOrder, end?: MessageOrder) {
+  const atOrAfterStart = or(
+    gt(MessageTable.time_created, start.time),
+    and(eq(MessageTable.time_created, start.time), gte(MessageTable.id, start.id)),
+  )
+  const beforeEnd = end
+    ? or(
+        lt(MessageTable.time_created, end.time),
+        and(eq(MessageTable.time_created, end.time), lt(MessageTable.id, end.id)),
+      )
+    : undefined
+  return and(eq(MessageTable.session_id, sessionID), atOrAfterStart, beforeEnd)
+}
+
+export function loadMessageOrders(db: DatabaseService, sessionID: SessionSchema.ID, ids: MessageID[]) {
+  if (ids.length === 0) return Effect.succeed(new Map<MessageID, MessageOrder>())
+  return db
+    .select({ id: MessageTable.id, time: MessageTable.time_created })
+    .from(MessageTable)
+    .where(and(eq(MessageTable.session_id, sessionID), inArray(MessageTable.id, [...new Set(ids)])))
+    .all()
+    .pipe(
+      Effect.orDie,
+      Effect.map((rows) => new Map(rows.map((row) => [row.id, row]))),
+    )
+}
 
 export const Limits = {
   descriptors: 512,
@@ -43,7 +76,13 @@ export function create(db: DatabaseService, input: { sessionID: SessionSchema.ID
 
 export function touch(
   db: DatabaseService,
-  input: { sessionID: SessionSchema.ID; messageID: MessageID; revision: number; structural?: boolean },
+  input: {
+    sessionID: SessionSchema.ID
+    messageID: MessageID
+    messageTime?: number
+    revision: number
+    structural?: boolean
+  },
 ) {
   return Effect.gen(function* () {
     const state = yield* db
@@ -79,9 +118,22 @@ export function touch(
       return
     }
 
+    const orders = yield* loadMessageOrders(db, input.sessionID, [
+      input.messageID,
+      ...rows.flatMap((row) => [row.range_start_id, row.range_end_id]),
+    ])
+    const inputOrder =
+      input.messageTime === undefined ? orders.get(input.messageID) : { id: input.messageID, time: input.messageTime }
     let requiresIndex = false
     for (const row of rows) {
-      const inRange = input.messageID >= row.range_start_id && input.messageID < row.range_end_id
+      const rangeStart = orders.get(row.range_start_id)
+      const rangeEnd = orders.get(row.range_end_id)
+      const inRange =
+        !!inputOrder &&
+        !!rangeStart &&
+        !!rangeEnd &&
+        compareMessageOrder(inputOrder, rangeStart) >= 0 &&
+        compareMessageOrder(inputOrder, rangeEnd) < 0
       const continuity = row.continuity_message_ids.includes(input.messageID)
       const structuralIdentity =
         input.messageID === row.marker_id ||
@@ -144,11 +196,11 @@ export function touch(
 
 function recomputeArchive(db: DatabaseService, row: typeof CompactionArchiveManifestTable.$inferSelect) {
   return Effect.gen(function* () {
-    const range = and(
-      eq(MessageTable.session_id, row.session_id),
-      gte(MessageTable.id, row.range_start_id),
-      lt(MessageTable.id, row.range_end_id),
-    )
+    const orders = yield* loadMessageOrders(db, row.session_id, [row.range_start_id, row.range_end_id])
+    const start = orders.get(row.range_start_id)
+    const end = orders.get(row.range_end_id)
+    if (!start || !end) return undefined
+    const range = orderedRange(row.session_id, start, end)
     const continuity = row.continuity_message_ids.length
       ? and(eq(MessageTable.session_id, row.session_id), inArray(MessageTable.id, row.continuity_message_ids))
       : undefined
@@ -253,14 +305,23 @@ export function refresh(db: DatabaseService, input: { sessionID: SessionSchema.I
       .pipe(Effect.orDie)
     if (!state || state.index_status !== "complete") return
 
+    const tailStart = state.tail_start_id
+      ? (yield* loadMessageOrders(db, input.sessionID, [state.tail_start_id])).get(state.tail_start_id)
+      : undefined
+    if (state.tail_start_id && !tailStart) {
+      yield* db
+        .update(TranscriptWindowStateTable)
+        .set({ index_status: "index_required", window_revision: input.revision })
+        .where(eq(TranscriptWindowStateTable.session_id, input.sessionID))
+        .run()
+        .pipe(Effect.orDie)
+      return
+    }
+
     const identities = yield* db
       .select({ id: MessageTable.id, bytes: sql<number>`length(cast(${MessageTable.data} as blob))` })
       .from(MessageTable)
-      .where(
-        state.tail_start_id
-          ? and(eq(MessageTable.session_id, input.sessionID), gte(MessageTable.id, state.tail_start_id))
-          : eq(MessageTable.session_id, input.sessionID),
-      )
+      .where(tailStart ? orderedRange(input.sessionID, tailStart) : eq(MessageTable.session_id, input.sessionID))
       .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
       .limit(Limits.messages + 1)
       .all()
@@ -359,12 +420,16 @@ export function refresh(db: DatabaseService, input: { sessionID: SessionSchema.I
     const byMarker = new Map(existing.map((row) => [row.marker_id, row]))
     let nextOrdinal = (existing.at(-1)?.ordinal ?? -1) + 1
     for (const item of derived) {
-      const prior = [...existing, ...derived.map((candidate) => byMarker.get(candidate.markerID)).filter(Boolean)]
-        .filter((candidate) => candidate && candidate.marker_id < item.markerID)
-        .sort((a, b) => a!.ordinal - b!.ordinal)
+      const markerIndex = messages.findIndex((message) => message.info.id === item.markerID)
+      const current = byMarker.get(item.markerID)
+      const prior = [...byMarker.values()]
+        .filter((candidate) => candidate.marker_id !== item.markerID && (!current || candidate.ordinal < current.ordinal))
+        .sort((a, b) => a.ordinal - b.ordinal)
         .at(-1)
       const continuity = prior ? [prior.summary_message_id, ...prior.replay_message_ids] : []
-      const own = messages.filter((message) => message.info.id >= item.rangeStartID && message.info.id < item.markerID)
+      const rangeStartIndex = messages.findIndex((message) => message.info.id === item.rangeStartID)
+      if (rangeStartIndex < 0 || markerIndex <= rangeStartIndex) continue
+      const own = messages.slice(rangeStartIndex, markerIndex)
       const continuityMessages = continuity
         .map((id) => messages.find((message) => message.info.id === id))
         .filter((message): message is SessionV1.WithParts => !!message)
@@ -382,7 +447,6 @@ export function refresh(db: DatabaseService, input: { sessionID: SessionSchema.I
       )
         return yield* failTooLarge(db, input.sessionID, input.revision)
 
-      const current = byMarker.get(item.markerID)
       const ordinal = current?.ordinal ?? nextOrdinal++
       yield* db
         .insert(CompactionArchiveManifestTable)
@@ -448,7 +512,10 @@ export function refresh(db: DatabaseService, input: { sessionID: SessionSchema.I
     }
 
     const latest = derived.filter((item) => item.tailStartID).at(-1)
-    const tail = latest?.tailStartID ? messages.filter((message) => message.info.id >= latest.tailStartID!) : messages
+    const tailStartIndex = latest?.tailStartID
+      ? messages.findIndex((message) => message.info.id === latest.tailStartID)
+      : -1
+    const tail = tailStartIndex >= 0 ? messages.slice(tailStartIndex) : messages
     const tailEncoded = JSON.stringify(tail)
     const descriptorCount = new Set([...existing.map((row) => row.marker_id), ...derived.map((item) => item.markerID)])
       .size
