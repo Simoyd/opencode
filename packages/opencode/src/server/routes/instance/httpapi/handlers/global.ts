@@ -43,49 +43,51 @@ function parseBody(body: string) {
   }
 }
 
-function eventResponse() {
-  log.info("global event connected")
-  StreamDiagnostics.record({
-    stage: "route.global",
-    action: "connect",
-    routeMode: "global",
-    readiness: "connected",
-  })
-  const events = Stream.callback<GlobalBusEvent>((queue) => {
+export function globalEventStream(beforeConnected: Effect.Effect<void> = Effect.void) {
+  return Effect.gen(function* () {
+    // Register eagerly so an event published after request admission cannot be
+    // lost while the response body starts or emits server.connected.
+    const queue = yield* Queue.unbounded<GlobalBusEvent>()
     const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
-    return Effect.acquireRelease(
-      Effect.sync(() => GlobalBus.on("event", handler)),
-      () => Effect.sync(() => GlobalBus.off("event", handler)),
-    )
-  })
-  const heartbeat = Stream.tick("10 seconds").pipe(
-    Stream.drop(1),
-    Stream.map(() => ({ payload: { id: EventV2.ID.create(), type: "server.heartbeat", properties: {} } })),
-    Stream.tap((event) =>
-      Effect.sync(() =>
-        StreamDiagnostics.record({
-          stage: "route.global",
-          action: "queue",
-          eventType: "server.heartbeat",
-          length: JSON.stringify(event).length,
-          routeMode: "global",
-          shape: "global-envelope",
-        }),
+    GlobalBus.on("event", handler)
+    yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", handler)))
+    const events = Stream.fromQueue(queue)
+    const heartbeat = Stream.tick("10 seconds").pipe(
+      Stream.drop(1),
+      Stream.map(() => ({ payload: { id: EventV2.ID.create(), type: "server.heartbeat", properties: {} } })),
+      Stream.tap((event) =>
+        Effect.sync(() =>
+          StreamDiagnostics.record({
+            stage: "route.global",
+            action: "queue",
+            eventType: "server.heartbeat",
+            length: JSON.stringify(event).length,
+            routeMode: "global",
+            shape: "global-envelope",
+          }),
+        ),
       ),
-    ),
-  )
-  const connected = { payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }
-  StreamDiagnostics.record({
-    stage: "route.global",
-    action: "queue",
-    eventType: "server.connected",
-    length: JSON.stringify(connected).length,
-    routeMode: "global",
-    shape: "global-envelope",
-  })
+    )
+    yield* beforeConnected
 
-  return HttpServerResponse.stream(
-    Stream.make(connected).pipe(
+    log.info("global event connected")
+    StreamDiagnostics.record({
+      stage: "route.global",
+      action: "connect",
+      routeMode: "global",
+      readiness: "connected",
+    })
+    const connected = { payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }
+    StreamDiagnostics.record({
+      stage: "route.global",
+      action: "queue",
+      eventType: "server.connected",
+      length: JSON.stringify(connected).length,
+      routeMode: "global",
+      shape: "global-envelope",
+    })
+
+    return Stream.make(connected).pipe(
       Stream.concat(
         events.pipe(
           Stream.tap((event) =>
@@ -104,25 +106,35 @@ function eventResponse() {
           Stream.merge(heartbeat, { haltStrategy: "left" }),
         ),
       ),
-      Stream.map(eventData),
-      Stream.pipeThroughChannel(Sse.encode()),
-      Stream.encodeText,
-      Stream.ensuring(
-        Effect.sync(() => {
-          log.info("global event disconnected")
-          StreamDiagnostics.record({ stage: "route.global", action: "disconnect", routeMode: "global" })
-        }),
+    )
+  })
+}
+
+function eventResponse() {
+  return Effect.gen(function* () {
+    const events = yield* globalEventStream()
+    return HttpServerResponse.stream(
+      events.pipe(
+        Stream.map(eventData),
+        Stream.pipeThroughChannel(Sse.encode()),
+        Stream.encodeText,
+        Stream.ensuring(
+          Effect.sync(() => {
+            log.info("global event disconnected")
+            StreamDiagnostics.record({ stage: "route.global", action: "disconnect", routeMode: "global" })
+          }),
+        ),
       ),
-    ),
-    {
-      contentType: "text/event-stream",
-      headers: {
-        "Cache-Control": "no-cache, no-transform",
-        "X-Accel-Buffering": "no",
-        "X-Content-Type-Options": "nosniff",
+      {
+        contentType: "text/event-stream",
+        headers: {
+          "Cache-Control": "no-cache, no-transform",
+          "X-Accel-Buffering": "no",
+          "X-Content-Type-Options": "nosniff",
+        },
       },
-    },
-  )
+    )
+  })
 }
 
 export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handlers) =>
@@ -136,7 +148,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
     })
 
     const event = Effect.fn("GlobalHttpApi.event")(function* () {
-      return eventResponse()
+      return yield* eventResponse()
     })
 
     const configGet = Effect.fn("GlobalHttpApi.configGet")(function* () {

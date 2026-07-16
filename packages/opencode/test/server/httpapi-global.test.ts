@@ -1,18 +1,19 @@
 import { NodeHttpServer } from "@effect/platform-node"
 import { describe, expect } from "bun:test"
-import { Context, Effect, Layer, Option } from "effect"
+import { Context, Deferred, Effect, Fiber, Layer, Option, Stream } from "effect"
 import { HttpBody, HttpClient, HttpClientRequest, HttpRouter } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { Auth } from "../../src/auth"
 import { Config } from "../../src/config/config"
 import { Installation } from "../../src/installation"
+import { GlobalBus } from "../../src/bus/global"
 import { MoveSession } from "@opencode-ai/core/control-plane/move-session"
 import { ServerAuth } from "../../src/server/auth"
 import { RootHttpApi } from "../../src/server/routes/instance/httpapi/api"
 import { GlobalPaths } from "../../src/server/routes/instance/httpapi/groups/global"
 import { controlHandlers } from "../../src/server/routes/instance/httpapi/handlers/control"
 import { controlPlaneHandlers } from "../../src/server/routes/instance/httpapi/handlers/control-plane"
-import { globalHandlers } from "../../src/server/routes/instance/httpapi/handlers/global"
+import { globalEventStream, globalHandlers } from "../../src/server/routes/instance/httpapi/handlers/global"
 import { authorizationLayer } from "../../src/server/routes/instance/httpapi/middleware/authorization"
 import { schemaErrorLayer } from "../../src/server/routes/instance/httpapi/middleware/schema-error"
 import { testEffect } from "../lib/effect"
@@ -43,6 +44,41 @@ const apiLayer = HttpRouter.serve(
 const it = testEffect(apiLayer)
 
 describe("global HttpApi", () => {
+  it.live("registers before connected and preserves acquisition events across reconnect", () =>
+    Effect.gen(function* () {
+      const baselineListeners = GlobalBus.listenerCount("event")
+
+      const connect = (eventType: string) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const barrierReached = yield* Deferred.make<void>()
+            const releaseConnected = yield* Deferred.make<void>()
+            const streamFiber = yield* globalEventStream(
+              Deferred.succeed(barrierReached, undefined).pipe(Effect.andThen(Deferred.await(releaseConnected))),
+            ).pipe(Effect.forkScoped)
+
+            yield* Deferred.await(barrierReached)
+            expect(GlobalBus.listenerCount("event")).toBe(baselineListeners + 1)
+
+            GlobalBus.emit("event", {
+              directory: "/workspace",
+              payload: { type: eventType, properties: { sequence: 1 } },
+            })
+            yield* Deferred.succeed(releaseConnected, undefined)
+
+            const stream = yield* Fiber.join(streamFiber)
+            const events = yield* stream.pipe(Stream.take(2), Stream.runCollect)
+            expect(Array.from(events).map((event) => event.payload.type)).toEqual(["server.connected", eventType])
+          }),
+        )
+
+      yield* connect("test.acquisition.first")
+      expect(GlobalBus.listenerCount("event")).toBe(baselineListeners)
+      yield* connect("test.acquisition.reconnect")
+      expect(GlobalBus.listenerCount("event")).toBe(baselineListeners)
+    }),
+  )
+
   it.live("upgrades to latest when the request body is omitted", () =>
     Effect.gen(function* () {
       const response = yield* HttpClient.post(GlobalPaths.upgrade)
