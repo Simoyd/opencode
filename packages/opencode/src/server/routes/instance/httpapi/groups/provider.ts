@@ -11,6 +11,31 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 
 const root = "/provider"
 
+const RuntimeProviderModel = Schema.Struct({
+  id: Schema.String,
+  providerID: Schema.String,
+  name: Schema.String,
+  capabilities: Schema.Struct({
+    reasoning: Schema.Boolean,
+  }),
+  limit: Schema.Struct({
+    context: Schema.Finite,
+  }),
+  variants: Schema.optional(Schema.Record(Schema.String, Schema.Null)),
+})
+
+const RuntimeProviderInfo = Schema.Struct({
+  id: Schema.String,
+  name: Schema.String,
+  models: Schema.Record(Schema.String, RuntimeProviderModel),
+})
+
+export const ProviderRuntimeListResult = Schema.Struct({
+  all: Schema.Array(RuntimeProviderInfo),
+  default: Schema.Record(Schema.String, Schema.String),
+  connected: Schema.Array(Schema.String),
+})
+
 const ProviderAuthErrorName = Schema.Union([
   Schema.Literal("BadRequest"),
   Schema.Literal("ProviderAuthOauthMissing"),
@@ -43,6 +68,16 @@ export const ProviderApi = HttpApi.make("provider")
             identifier: "provider.list",
             summary: "List providers",
             description: "Get a list of all available AI providers, including both available and connected ones.",
+          }),
+        ),
+        HttpApiEndpoint.get("runtimeList", `${root}/runtime`, {
+          query: WorkspaceRoutingQuery,
+          success: described(ProviderRuntimeListResult, "Connected provider model-selection facts"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "provider.runtimeList",
+            summary: "List connected provider models",
+            description: "Get the compact connected-provider model facts used by embedded runtimes.",
           }),
         ),
         HttpApiEndpoint.get("auth", `${root}/auth`, {

@@ -58,6 +58,35 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
       }
     })
 
+    const runtimeList = Effect.fn("ProviderHttpApi.runtimeList")(function* () {
+      const connected = yield* provider.list()
+      return {
+        all: Object.values(connected).map((item) => ({
+          id: item.id,
+          name: item.name,
+          models: Object.fromEntries(
+            Object.entries(item.models)
+              .filter(([, model]) => model.status !== "deprecated")
+              .map(([modelID, model]) => [
+                modelID,
+                {
+                  id: model.id,
+                  providerID: model.providerID,
+                  name: model.name,
+                  capabilities: { reasoning: model.capabilities.reasoning },
+                  limit: { context: model.limit.context },
+                  ...(model.variants
+                    ? { variants: Object.fromEntries(Object.keys(model.variants).map((variant) => [variant, null])) }
+                    : {}),
+                },
+              ]),
+          ),
+        })),
+        default: Provider.defaultModelIDs(connected),
+        connected: Object.keys(connected),
+      }
+    })
+
     const auth = Effect.fn("ProviderHttpApi.auth")(function* () {
       return yield* svc.methods()
     })
@@ -106,6 +135,7 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
 
     return handlers
       .handle("list", list)
+      .handle("runtimeList", runtimeList)
       .handle("auth", auth)
       .handleRaw("authorize", authorizeRaw)
       .handle("callback", callback)

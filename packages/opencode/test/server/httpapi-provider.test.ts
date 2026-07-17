@@ -54,6 +54,10 @@ function providerByID(input: unknown, key: "all" | "providers", id: string) {
   return providerList(input, key).find((provider) => isRecord(provider) && provider.id === id)
 }
 
+function hasOnlyKeys(input: Record<string, unknown>, keys: string[]) {
+  return Object.keys(input).sort().join("\0") === keys.sort().join("\0")
+}
+
 function hasNonZeroModelCost(input: unknown, key: "all" | "providers", id: string) {
   const provider = providerByID(input, key, id)
   if (!isRecord(provider) || !isRecord(provider.models)) return false
@@ -376,6 +380,53 @@ describe("provider HttpApi", () => {
       expect(hasProviderWithFetch(configBody, "providers")).toBe(false)
       expect(hasNonZeroModelCost(providerBody, "all", "google")).toBe(true)
       expect(hasNonZeroModelCost(configBody, "providers", "google")).toBe(true)
+    }),
+    { ...projectOptions, init: writeFunctionOptionsPlugin },
+  )
+
+  it.instance(
+    "serves compact connected provider facts for embedded runtimes",
+    Effect.gen(function* () {
+      const directory = (yield* TestInstance).directory
+      yield* setEnvScoped(
+        "OPENCODE_AUTH_CONTENT",
+        JSON.stringify({
+          google: { type: "oauth", refresh: "dummy", access: "dummy", expires: 9999999999999 },
+        }),
+      )
+
+      const response = yield* request("/provider/runtime", { headers: { "x-opencode-directory": directory } })
+      expect(response.status).toBe(200)
+      const body = yield* response.json
+      expect(isRecord(body)).toBe(true)
+      if (!isRecord(body)) return
+      expect(hasOnlyKeys(body, ["all", "connected", "default"])).toBe(true)
+      expect(Array.isArray(body.connected)).toBe(true)
+      expect(Array.isArray(body.all)).toBe(true)
+
+      const connected = new Set(Array.isArray(body.connected) ? body.connected : [])
+      const providers = Array.isArray(body.all) ? body.all : []
+      expect(connected.has("google")).toBe(true)
+      expect(providers.length).toBe(connected.size)
+      for (const value of providers) {
+        expect(isRecord(value)).toBe(true)
+        if (!isRecord(value)) continue
+        expect(connected.has(value.id)).toBe(true)
+        expect(hasOnlyKeys(value, ["id", "models", "name"])).toBe(true)
+        expect(isRecord(value.models)).toBe(true)
+        if (!isRecord(value.models)) continue
+        for (const model of Object.values(value.models)) {
+          expect(isRecord(model)).toBe(true)
+          if (!isRecord(model)) continue
+          expect(
+            hasOnlyKeys(model, ["capabilities", "id", "limit", "name", "providerID", "variants"]) ||
+              hasOnlyKeys(model, ["capabilities", "id", "limit", "name", "providerID"]),
+          ).toBe(true)
+          expect("options" in model).toBe(false)
+          expect("headers" in model).toBe(false)
+          expect("cost" in model).toBe(false)
+        }
+      }
     }),
     { ...projectOptions, init: writeFunctionOptionsPlugin },
   )
