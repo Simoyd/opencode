@@ -60,30 +60,45 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
 
     const runtimeList = Effect.fn("ProviderHttpApi.runtimeList")(function* () {
       const connected = yield* provider.list()
-      return {
-        all: Object.values(connected).map((item) => ({
-          id: item.id,
-          name: item.name,
-          models: Object.fromEntries(
-            Object.entries(item.models)
-              .filter(([, model]) => model.status !== "deprecated")
-              .map(([modelID, model]) => [
-                modelID,
+      const providers = Object.fromEntries(
+        Object.entries(connected)
+          .map(
+            ([providerID, item]) =>
+              [
+                providerID,
                 {
-                  id: model.id,
-                  providerID: model.providerID,
-                  name: model.name,
-                  capabilities: { reasoning: model.capabilities.reasoning },
-                  limit: { context: model.limit.context },
-                  ...(model.variants
-                    ? { variants: Object.fromEntries(Object.keys(model.variants).map((variant) => [variant, null])) }
-                    : {}),
+                  id: item.id,
+                  name: item.name,
+                  models: Object.fromEntries(
+                    Object.entries(item.models)
+                      .filter(([, model]) => model.status !== "deprecated")
+                      .map(([modelID, model]) => [
+                        modelID,
+                        {
+                          id: model.id,
+                          providerID: model.providerID,
+                          name: model.name,
+                          capabilities: { reasoning: model.capabilities.reasoning },
+                          limit: { context: model.limit.context },
+                          ...(model.variants
+                            ? {
+                                variants: Object.fromEntries(
+                                  Object.keys(model.variants).map((variant) => [variant, null]),
+                                ),
+                              }
+                            : {}),
+                        },
+                      ]),
+                  ),
                 },
-              ]),
-          ),
-        })),
-        default: Provider.defaultModelIDs(connected),
-        connected: Object.keys(connected),
+              ] as const,
+          )
+          .filter(([, item]) => Object.keys(item.models).length > 0),
+      )
+      return {
+        all: Object.values(providers),
+        default: Provider.defaultModelIDs(providers),
+        connected: Object.keys(providers),
       }
     })
 
