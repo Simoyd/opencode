@@ -148,6 +148,8 @@ import type {
   ProviderOauthAuthorizeResponses,
   ProviderOauthCallbackErrors,
   ProviderOauthCallbackResponses,
+  ProviderRuntimeListErrors,
+  ProviderRuntimeListResponses,
   PtyConnectErrors,
   PtyConnectResponses,
   PtyConnectTokenErrors,
@@ -178,6 +180,16 @@ import type {
   SessionChildrenResponses,
   SessionCommandErrors,
   SessionCommandResponses,
+  SessionCompactedRangeErrors,
+  SessionCompactedRangeResponses,
+  SessionContextClearStagedErrors,
+  SessionContextClearStagedItemErrors,
+  SessionContextClearStagedItemResponses,
+  SessionContextClearStagedResponses,
+  SessionContextListStagedErrors,
+  SessionContextListStagedResponses,
+  SessionContextStageErrors,
+  SessionContextStageResponses,
   SessionCreateErrors,
   SessionCreateResponses,
   SessionDeleteErrors,
@@ -214,12 +226,17 @@ import type {
   SessionSummarizeResponses,
   SessionTodoErrors,
   SessionTodoResponses,
+  SessionTranscriptWindowErrors,
+  SessionTranscriptWindowResponses,
+  SessionTurnsErrors,
+  SessionTurnsResponses,
   SessionUnrevertErrors,
   SessionUnrevertResponses,
   SessionUnshareErrors,
   SessionUnshareResponses,
   SessionUpdateErrors,
   SessionUpdateResponses,
+  StagedContextTextPartInput,
   SubtaskPartInput,
   SyncHistoryListErrors,
   SyncHistoryListResponses,
@@ -1365,6 +1382,8 @@ export class Event extends HeyApiClient {
     parameters?: {
       directory?: string
       workspace?: string
+      sessionID?: string
+      type?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -1375,6 +1394,8 @@ export class Event extends HeyApiClient {
           args: [
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
+            { in: "query", key: "sessionID" },
+            { in: "query", key: "type" },
           ],
         },
       ],
@@ -3306,6 +3327,36 @@ export class Provider extends HeyApiClient {
   }
 
   /**
+   * List connected provider models
+   *
+   * Get the compact connected-provider model facts used by embedded runtimes.
+   */
+  public runtimeList<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<ProviderRuntimeListResponses, ProviderRuntimeListErrors, ThrowOnError>({
+      url: "/provider/runtime",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
    * Get provider auth methods
    *
    * Retrieve available authentication methods for all AI providers.
@@ -3338,6 +3389,167 @@ export class Provider extends HeyApiClient {
   private _oauth?: Oauth
   get oauth(): Oauth {
     return (this._oauth ??= new Oauth({ client: this.client }))
+  }
+}
+
+export class Context extends HeyApiClient {
+  /**
+   * Clear staged provider-only context
+   *
+   * Clear all provider-only contexts staged for the next prompt in this session.
+   */
+  public clearStaged<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).delete<
+      SessionContextClearStagedResponses,
+      SessionContextClearStagedErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/context/stage",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * List staged provider-only context
+   *
+   * List provider-only context currently staged for the next prompt in this session.
+   */
+  public listStaged<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      SessionContextListStagedResponses,
+      SessionContextListStagedErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/context/stage",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Stage provider-only context
+   *
+   * Stage provider-only context for the next real prompt in this session without creating transcript messages or submitting a prompt.
+   */
+  public stage<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+      id?: string
+      mode?: "next_prompt"
+      visibility?: "provider_only"
+      consume?: "once"
+      parts?: Array<StagedContextTextPartInput>
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "id" },
+            { in: "body", key: "mode" },
+            { in: "body", key: "visibility" },
+            { in: "body", key: "consume" },
+            { in: "body", key: "parts" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionContextStageResponses, SessionContextStageErrors, ThrowOnError>(
+      {
+        url: "/session/{sessionID}/context/stage",
+        ...options,
+        ...params,
+        headers: {
+          "Content-Type": "application/json",
+          ...options?.headers,
+          ...params.headers,
+        },
+      },
+    )
+  }
+
+  /**
+   * Clear staged provider-only context item
+   *
+   * Clear one provider-only context staged for the next prompt in this session.
+   */
+  public clearStagedItem<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      contextID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "contextID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).delete<
+      SessionContextClearStagedItemResponses,
+      SessionContextClearStagedItemErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/context/stage/{contextID}",
+      ...options,
+      ...params,
+    })
   }
 }
 
@@ -3647,6 +3859,38 @@ export class Session2 extends HeyApiClient {
   }
 
   /**
+   * Get session turns
+   *
+   * Return authoritative session turn and compaction boundary facts derived from persisted messages.
+   */
+  public turns<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<SessionTurnsResponses, SessionTurnsErrors, ThrowOnError>({
+      url: "/session/{sessionID}/turns",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
    * Get message diff
    *
    * Get the file changes (diff) that resulted from a specific user message in the session.
@@ -3843,6 +4087,92 @@ export class Session2 extends HeyApiClient {
     )
     return (options?.client ?? this.client).get<SessionMessageResponses, SessionMessageErrors, ThrowOnError>({
       url: "/session/{sessionID}/message/{messageID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Recall compacted transcript range
+   *
+   * Return the transcript messages summarized by a completed compaction marker without changing session state.
+   */
+  public compactedRange<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+      marker: string
+      tail_start_id?: string
+      message_id?: string
+      source_generation?: string
+      archive_id?: string
+      archive_revision?: string
+      source_message_id?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "marker" },
+            { in: "query", key: "tail_start_id" },
+            { in: "query", key: "message_id" },
+            { in: "query", key: "source_generation" },
+            { in: "query", key: "archive_id" },
+            { in: "query", key: "archive_revision" },
+            { in: "query", key: "source_message_id" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      SessionCompactedRangeResponses,
+      SessionCompactedRangeErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/compacted_range",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get bounded transcript window
+   *
+   * Return body-free compacted archive descriptors and the bounded current transcript tail without hydrating full history.
+   */
+  public transcriptWindow<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      SessionTranscriptWindowResponses,
+      SessionTranscriptWindowErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/transcript_window",
       ...options,
       ...params,
     })
@@ -4306,6 +4636,11 @@ export class Session2 extends HeyApiClient {
       ...options,
       ...params,
     })
+  }
+
+  private _context?: Context
+  get context(): Context {
+    return (this._context ??= new Context({ client: this.client }))
   }
 }
 

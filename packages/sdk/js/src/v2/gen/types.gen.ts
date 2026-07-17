@@ -2583,6 +2583,108 @@ export type NotFoundError = {
   }
 }
 
+export type SessionTurnCompaction = {
+  compactionMessageID: string
+  summaryMessageID: string
+  summaryPreview: string
+  preCompactionMessageIDs: Array<string>
+  postCompactionMessageIDs: Array<string>
+  syntheticPromptMessageIDs: Array<string>
+  replayPromptMessageIDs: Array<string>
+  recallMarkerID?: string
+  recallTailStartMessageID?: string
+}
+
+export type SessionTurn = {
+  id: string
+  startMessageID: string
+  messageIDs: Array<string>
+  intermediateMessageIDs: Array<string>
+  compactionBoundaryMessageIDs: Array<string>
+  finalOutputMessageID?: string
+  status: "complete" | "incomplete"
+  compaction?: SessionTurnCompaction
+}
+
+export type SessionTurnsResponse = {
+  sessionID: string
+  turns: Array<SessionTurn>
+}
+
+export type StagedContextTextPartInput = {
+  type: "text"
+  text: string
+  label?: string
+}
+
+export type StagedContextInfo = {
+  id: string
+  sessionID: string
+  mode: "next_prompt"
+  visibility: "provider_only"
+  consume: "once"
+  parts: Array<StagedContextTextPartInput>
+  time: {
+    created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  }
+}
+
+export type CompactedRangeResponse = {
+  reference: {
+    markerID: string
+    tailStartID?: string
+    messageID?: string
+  }
+  messages: Array<{
+    info: Message
+    parts: Array<Part>
+  }>
+  complete: boolean
+  notice?: string
+  status: "complete" | "stale" | "unavailable" | "too_large"
+  sourceGeneration?: string
+  archiveID?: string
+  archiveRevision?: string
+}
+
+export type TranscriptArchiveDescriptor = {
+  archiveID: string
+  archiveRevision: string
+  markerID: string
+  tailStartID?: string
+  sourceMessageID: string
+  summaryPreview: string
+  messageCount: number
+  partCount: number
+  textUnits: number
+  decodedBytes: number
+}
+
+export type TranscriptWindowResponse = {
+  status: "complete" | "index_required" | "indexing" | "index_failed" | "stale" | "revert_unrepresentable" | "too_large"
+  sessionID: string
+  sourceGeneration?: string
+  windowRevision?: string
+  tailStartID?: string
+  archiveDescriptors: Array<TranscriptArchiveDescriptor>
+  tail: Array<{
+    info: Message
+    parts: Array<Part>
+  }>
+  turns: Array<SessionTurn>
+  counts: {
+    descriptors: number
+    messages: number
+    parts: number
+    textUnits: number
+    decodedBytes: number
+    turns: number
+    turnIdentities: number
+    turnTextUnits: number
+    turnDecodedBytes: number
+  }
+}
+
 export type TextPartInput = {
   id?: string
   type: "text"
@@ -5446,6 +5548,8 @@ export type EventSubscribeData = {
   query?: {
     directory?: string
     workspace?: string
+    sessionID?: string
+    type?: string
   }
   url: "/event"
 }
@@ -7434,6 +7538,59 @@ export type ProviderListResponses = {
 
 export type ProviderListResponse = ProviderListResponses[keyof ProviderListResponses]
 
+export type ProviderRuntimeListData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/provider/runtime"
+}
+
+export type ProviderRuntimeListErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ProviderRuntimeListError = ProviderRuntimeListErrors[keyof ProviderRuntimeListErrors]
+
+export type ProviderRuntimeListResponses = {
+  /**
+   * Connected provider model-selection facts
+   */
+  200: {
+    all: Array<{
+      id: string
+      name: string
+      models: {
+        [key: string]: {
+          id: string
+          providerID: string
+          name: string
+          capabilities: {
+            reasoning: boolean
+          }
+          limit: {
+            context: number
+          }
+          variants?: {
+            [key: string]: null
+          }
+        }
+      }
+    }>
+    default: {
+      [key: string]: string
+    }
+    connected: Array<string>
+  }
+}
+
+export type ProviderRuntimeListResponse = ProviderRuntimeListResponses[keyof ProviderRuntimeListResponses]
+
 export type ProviderAuthData = {
   body?: never
   path?: never
@@ -7823,6 +7980,40 @@ export type SessionTodoResponses = {
 
 export type SessionTodoResponse = SessionTodoResponses[keyof SessionTodoResponses]
 
+export type SessionTurnsData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/turns"
+}
+
+export type SessionTurnsErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionTurnsError = SessionTurnsErrors[keyof SessionTurnsErrors]
+
+export type SessionTurnsResponses = {
+  /**
+   * Session turn facts
+   */
+  200: SessionTurnsResponse
+}
+
+export type SessionTurnsResponse2 = SessionTurnsResponses[keyof SessionTurnsResponses]
+
 export type SessionDiffData = {
   body?: never
   path: {
@@ -8021,6 +8212,228 @@ export type SessionMessageResponses = {
 }
 
 export type SessionMessageResponse = SessionMessageResponses[keyof SessionMessageResponses]
+
+export type SessionContextClearStagedData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/context/stage"
+}
+
+export type SessionContextClearStagedErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionContextClearStagedError = SessionContextClearStagedErrors[keyof SessionContextClearStagedErrors]
+
+export type SessionContextClearStagedResponses = {
+  /**
+   * Staged context cleared
+   */
+  204: void
+}
+
+export type SessionContextClearStagedResponse =
+  SessionContextClearStagedResponses[keyof SessionContextClearStagedResponses]
+
+export type SessionContextListStagedData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/context/stage"
+}
+
+export type SessionContextListStagedErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionContextListStagedError = SessionContextListStagedErrors[keyof SessionContextListStagedErrors]
+
+export type SessionContextListStagedResponses = {
+  /**
+   * Staged contexts
+   */
+  200: Array<StagedContextInfo>
+}
+
+export type SessionContextListStagedResponse =
+  SessionContextListStagedResponses[keyof SessionContextListStagedResponses]
+
+export type SessionContextStageData = {
+  body?: {
+    id?: string
+    mode?: "next_prompt"
+    visibility?: "provider_only"
+    consume?: "once"
+    parts: Array<StagedContextTextPartInput>
+  }
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/context/stage"
+}
+
+export type SessionContextStageErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionContextStageError = SessionContextStageErrors[keyof SessionContextStageErrors]
+
+export type SessionContextStageResponses = {
+  /**
+   * Staged context
+   */
+  200: StagedContextInfo
+}
+
+export type SessionContextStageResponse = SessionContextStageResponses[keyof SessionContextStageResponses]
+
+export type SessionContextClearStagedItemData = {
+  body?: never
+  path: {
+    sessionID: string
+    contextID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/context/stage/{contextID}"
+}
+
+export type SessionContextClearStagedItemErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionContextClearStagedItemError =
+  SessionContextClearStagedItemErrors[keyof SessionContextClearStagedItemErrors]
+
+export type SessionContextClearStagedItemResponses = {
+  /**
+   * Staged context cleared
+   */
+  204: void
+}
+
+export type SessionContextClearStagedItemResponse =
+  SessionContextClearStagedItemResponses[keyof SessionContextClearStagedItemResponses]
+
+export type SessionCompactedRangeData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query: {
+    directory?: string
+    workspace?: string
+    marker: string
+    tail_start_id?: string
+    message_id?: string
+    source_generation?: string
+    archive_id?: string
+    archive_revision?: string
+    source_message_id?: string
+  }
+  url: "/session/{sessionID}/compacted_range"
+}
+
+export type SessionCompactedRangeErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionCompactedRangeError = SessionCompactedRangeErrors[keyof SessionCompactedRangeErrors]
+
+export type SessionCompactedRangeResponses = {
+  /**
+   * Compacted transcript range
+   */
+  200: CompactedRangeResponse
+}
+
+export type SessionCompactedRangeResponse = SessionCompactedRangeResponses[keyof SessionCompactedRangeResponses]
+
+export type SessionTranscriptWindowData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/transcript_window"
+}
+
+export type SessionTranscriptWindowErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionTranscriptWindowError = SessionTranscriptWindowErrors[keyof SessionTranscriptWindowErrors]
+
+export type SessionTranscriptWindowResponses = {
+  /**
+   * Bounded transcript window
+   */
+  200: TranscriptWindowResponse
+}
+
+export type SessionTranscriptWindowResponse = SessionTranscriptWindowResponses[keyof SessionTranscriptWindowResponses]
 
 export type SessionForkData = {
   body?: {
