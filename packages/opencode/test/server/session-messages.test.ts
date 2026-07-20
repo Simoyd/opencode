@@ -168,7 +168,7 @@ const addAssistant = Effect.fn("SessionMessagesTest.addAssistant")(function* (
 const addCompaction = Effect.fn("SessionMessagesTest.addCompaction")(function* (
   sessionID: SessionID,
   tailStartID: MessageID,
-  opts?: { id?: MessageID; created?: number },
+  opts?: { auto?: boolean; id?: MessageID; created?: number },
 ) {
   const session = yield* SessionNs.Service
   const id = opts?.id ?? MessageID.ascending()
@@ -187,7 +187,7 @@ const addCompaction = Effect.fn("SessionMessagesTest.addCompaction")(function* (
     sessionID,
     messageID: id,
     type: "compaction",
-    auto: true,
+    auto: opts?.auto ?? true,
     tail_start_id: tailStartID,
   } as any)
   return id
@@ -202,6 +202,54 @@ function json<T>(response: HttpClientResponse.HttpClientResponse) {
 }
 
 describe("session messages endpoint", () => {
+  it.instance(
+    "indexes a completed manual compaction before returning its transcript window",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        const session = yield* sessionScoped
+        const start = yield* addUser(session.id, "manual source")
+        const work = yield* addAssistant(session.id, start, "manual work", { finish: "tool-calls" })
+        const final = yield* addAssistant(session.id, start, "manual answer", { finish: "end_turn" })
+        const marker = yield* addCompaction(session.id, start, { auto: false })
+        const summary = yield* addAssistant(session.id, marker, "manual summary", {
+          summary: true,
+          finish: "end_turn",
+        })
+
+        const response = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
+        const window = (yield* response.json) as {
+          status: string
+          sourceGeneration: string
+          archiveDescriptors: Array<{
+            archiveID: string
+            archiveRevision: string
+            markerID: string
+            sourceMessageID: string
+          }>
+          tail: SessionV1.WithParts[]
+        }
+
+        expect(window.status).toBe("complete")
+        expect(window.archiveDescriptors).toHaveLength(1)
+        expect(window.archiveDescriptors[0]).toEqual(
+          expect.objectContaining({ markerID: marker, sourceMessageID: start }),
+        )
+        expect(window.tail.map((message) => message.info.id)).toEqual([summary])
+
+        const descriptor = window.archiveDescriptors[0]!
+        const recall = yield* requestInDirectory(
+          `/session/${session.id}/compacted_range?marker=${encodeURIComponent(marker)}&tail_start_id=${encodeURIComponent(start)}&message_id=${encodeURIComponent(marker)}&source_generation=${encodeURIComponent(window.sourceGeneration)}&archive_id=${encodeURIComponent(descriptor.archiveID)}&archive_revision=${encodeURIComponent(descriptor.archiveRevision)}&source_message_id=${encodeURIComponent(start)}`,
+          tmp.directory,
+        )
+        const range = (yield* recall.json) as CompactedRangeBody
+        expect(range.status).toBe("complete")
+        expect(range.messages.map((message) => message.info.id)).toEqual([start, work, final])
+      }),
+    ),
+    { git: true },
+  )
+
   it.instance(
     "declares exact empty transcript window body counts",
     withoutWatcher(
@@ -813,6 +861,8 @@ describe("session messages endpoint", () => {
         const replay2 = yield* addUser(session.id, "second replay", { replay: true, replaySourceMessageID: start2 })
         yield* addAssistant(session.id, replay2, "second final", { finish: "end_turn" })
 
+        const indexed = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
+        expect(((yield* indexed.json) as { status: string }).status).toBe("complete")
         const res = yield* requestInDirectory(
           `/session/${session.id}/compacted_range?marker=${encodeURIComponent(compact2)}&tail_start_id=${encodeURIComponent(start2)}&message_id=${encodeURIComponent(compact2)}`,
           tmp.directory,

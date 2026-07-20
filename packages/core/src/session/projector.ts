@@ -359,6 +359,7 @@ export const layer = Layer.effectDiscard(
           messageID: event.data.messageID,
           messageTime: message?.time,
           revision: event.seq ?? 0,
+          requiresIndex: rows.some((row) => partIsStructural(row.data)),
         })
         yield* TranscriptWindowProjection.refresh(db, {
           sessionID: event.data.sessionID,
@@ -386,6 +387,7 @@ export const layer = Layer.effectDiscard(
           messageID: event.data.messageID,
           revision: event.seq ?? 0,
           structural: partIsStructural(row?.data),
+          requiresIndex: partIsStructural(row?.data),
         })
         yield* TranscriptWindowProjection.refresh(db, {
           sessionID: event.data.sessionID,
@@ -415,6 +417,7 @@ export const layer = Layer.effectDiscard(
           messageID,
           revision: event.seq ?? 0,
           structural: partIsStructural(row?.data) || partIsStructural(data),
+          requiresIndex: partIsStructural(row?.data) || partIsStructural(data),
         })
         yield* TranscriptWindowProjection.refresh(db, { sessionID, revision: event.seq ?? 0 })
       }),

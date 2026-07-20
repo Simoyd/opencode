@@ -32,6 +32,7 @@ type State = {
     counts: Counts
     markerID?: MessageID
     tailStartID?: MessageID
+    auto?: boolean
     overflow?: boolean
     summaryMessageID?: MessageID
     summaryPreview?: string
@@ -80,6 +81,7 @@ const runIndex = Effect.fn("SessionTranscriptIndex.runIndex")(function* (input: 
       if (marker && message.info.role === "user") {
         current.markerID = message.info.id
         current.tailStartID = marker.tail_start_id
+        current.auto = marker.auto
         current.overflow = marker.overflow
       } else if (!current.markerID) {
         add(current.counts, message)
@@ -115,14 +117,20 @@ const runIndex = Effect.fn("SessionTranscriptIndex.runIndex")(function* (input: 
       )
         current.continuationCount++
 
+      const manualCompactionComplete =
+        current.auto === false &&
+        message.info.role === "assistant" &&
+        message.info.id === current.summaryMessageID
+      const continuedCompactionComplete =
+        (current.continuationCount > 0 || current.replayMessageIDs.length > 0) &&
+        (!current.overflow || current.replayMessageIDs.length > 0) &&
+        isFinalAssistant(message)
       if (
         !current.published &&
         current.markerID &&
         current.summaryMessageID &&
         current.summaryPreview &&
-        (current.continuationCount > 0 || current.replayMessageIDs.length > 0) &&
-        (!current.overflow || current.replayMessageIDs.length > 0) &&
-        isFinalAssistant(message)
+        (manualCompactionComplete || continuedCompactionComplete)
       ) {
         const continuity = state.previous ? [state.previous.summaryMessageID, ...state.previous.replayMessageIDs] : []
         const rangeCounts = yield* countRangeMessages(
@@ -181,7 +189,7 @@ const runIndex = Effect.fn("SessionTranscriptIndex.runIndex")(function* (input: 
           .run()
           .pipe(Effect.orDie)
         current.published = true
-        state.latestTailStartID = current.tailStartID
+        state.latestTailStartID = manualCompactionComplete ? current.summaryMessageID : current.tailStartID
         state.previous = {
           summaryMessageID: current.summaryMessageID,
           replayMessageIDs: current.replayMessageIDs,

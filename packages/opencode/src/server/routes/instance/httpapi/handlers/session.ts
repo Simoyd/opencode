@@ -13,6 +13,7 @@ import { SessionRunState } from "@/session/run-state"
 import { SessionStagedContext } from "@/session/staged-context"
 import { SessionStatus } from "@/session/status"
 import { SessionTranscriptWindow } from "@/session/transcript-window"
+import { SessionTranscriptIndex } from "@/session/transcript-index"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
@@ -406,7 +407,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
     }) {
       yield* requireSession(ctx.params.sessionID)
-      const window = yield* SessionTranscriptWindow.loadWindow(ctx.params.sessionID).pipe(
+      const load = () => SessionTranscriptWindow.loadWindow(ctx.params.sessionID).pipe(
         Effect.catch((error) =>
           Effect.succeed({
             status: error instanceof SessionTranscriptWindow.TooLarge ? ("too_large" as const) : ("stale" as const),
@@ -417,6 +418,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
           }),
         ),
       )
+      let window = yield* load()
+      if (window.status === "index_required") {
+        yield* SessionTranscriptIndex.run({
+          sessionID: ctx.params.sessionID,
+          ownerID: crypto.randomUUID(),
+        }).pipe(Effect.catch(() => Effect.void))
+        window = yield* load()
+      }
       const turns = window.status === "complete" ? buildSessionTurns(ctx.params.sessionID, window.tail).turns : []
       const transportTurns = Schema.encodeSync(Schema.Array(SessionTurn))(turns)
       const turnEncoded = JSON.stringify(transportTurns)

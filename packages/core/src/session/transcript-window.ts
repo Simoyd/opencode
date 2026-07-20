@@ -82,6 +82,7 @@ export function touch(
     messageTime?: number
     revision: number
     structural?: boolean
+    requiresIndex?: boolean
   },
 ) {
   return Effect.gen(function* () {
@@ -100,6 +101,15 @@ export function touch(
       .run()
       .pipe(Effect.orDie)
     if (state.status !== "complete") return
+    if (input.requiresIndex) {
+      yield* db
+        .update(TranscriptWindowStateTable)
+        .set({ index_status: "index_required" })
+        .where(eq(TranscriptWindowStateTable.session_id, input.sessionID))
+        .run()
+        .pipe(Effect.orDie)
+      return
+    }
 
     const rows = yield* db
       .select()
