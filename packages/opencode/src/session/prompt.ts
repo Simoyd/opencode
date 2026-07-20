@@ -48,6 +48,7 @@ import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import { InstanceState } from "@/effect/instance-state"
 import { TaskTool, type TaskPromptOps } from "@/tool/task"
 import { SessionRunState } from "./run-state"
+import { SessionTranscriptIndex } from "./transcript-index"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
@@ -144,6 +145,13 @@ export const layer = Layer.effect(
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
     const { db } = database
+    const reconcileTranscript = Effect.fn("SessionPrompt.reconcileTranscript")(function* (sessionID: SessionID) {
+      const indexed = yield* SessionTranscriptIndex.runIfRequired(sessionID).pipe(
+        Effect.provideService(Database.Service, database),
+        Effect.catch(() => Effect.succeed(false)),
+      )
+      if (indexed) yield* events.publish(SessionTranscriptIndex.Event.Reconciled, { sessionID })
+    })
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
         cancel: (sessionID: SessionID) => cancel(sessionID),
@@ -1658,14 +1666,25 @@ export const layer = Layer.effect(
     return Service.of({
       cancel: (sessionID) => SessionMaintenance.withAdmission(db, { sessionID, kind: "cancel" }, cancel(sessionID)),
       prompt: (input, committed) =>
-        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "prompt" }, prompt(input, committed)),
-      loop: (input) => SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "loop" }, loop(input)),
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "prompt" }, prompt(input, committed)).pipe(
+          Effect.tap(() => reconcileTranscript(input.sessionID)),
+        ),
+      loop: (input) =>
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "loop" }, loop(input)).pipe(
+          Effect.tap(() => reconcileTranscript(input.sessionID)),
+        ),
       shell: (input) =>
-        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "shell" }, shell(input)),
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "shell" }, shell(input)).pipe(
+          Effect.tap(() => reconcileTranscript(input.sessionID)),
+        ),
       command: (input) =>
-        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "command" }, command(input)),
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "command" }, command(input)).pipe(
+          Effect.tap(() => reconcileTranscript(input.sessionID)),
+        ),
       summarize: (input) =>
-        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "summarize" }, summarize(input)),
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "summarize" }, summarize(input)).pipe(
+          Effect.tap(() => reconcileTranscript(input.sessionID)),
+        ),
       resolvePromptParts,
     })
   }),

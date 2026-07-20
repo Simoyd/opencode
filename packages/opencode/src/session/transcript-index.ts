@@ -1,6 +1,7 @@
 export * as SessionTranscriptIndex from "./transcript-index"
 
 import { Database } from "@opencode-ai/core/database/database"
+import { EventV2 } from "@opencode-ai/core/event"
 import { EventSequenceTable } from "@opencode-ai/core/event/sql"
 import { SessionMaintenance } from "@opencode-ai/core/session/maintenance"
 import {
@@ -16,6 +17,15 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { and, asc, eq, gt, inArray, or, sql } from "drizzle-orm"
 import { Cause, Effect, Exit } from "effect"
 import { MessageID, SessionID } from "./schema"
+
+export const Event = {
+  Reconciled: EventV2.define({
+    type: "session.transcript.reconciled",
+    schema: {
+      sessionID: SessionID,
+    },
+  }),
+}
 
 const BatchMessages = 256
 const BatchMetadataBytes = 8 * 1024 * 1024
@@ -333,6 +343,20 @@ export const run = Effect.fn("SessionTranscriptIndex.run")(function* (input: {
       Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause) ? markIndexFailed(db, input) : Effect.void,
     ),
   )
+})
+
+export const runIfRequired = Effect.fn("SessionTranscriptIndex.runIfRequired")(function* (sessionID: SessionID) {
+  const { db } = yield* Database.Service
+  const state = yield* db
+    .select({ status: TranscriptWindowStateTable.index_status })
+    .from(TranscriptWindowStateTable)
+    .where(eq(TranscriptWindowStateTable.session_id, sessionID))
+    .get()
+    .pipe(Effect.orDie)
+  if (state?.status !== "index_required") return false
+
+  yield* run({ sessionID, ownerID: crypto.randomUUID() })
+  return true
 })
 
 function markIndexFailed(db: Database.Interface["db"], input: { sessionID: SessionID; ownerID: string }) {
