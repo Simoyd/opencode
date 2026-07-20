@@ -4,7 +4,7 @@ import { Database } from "@opencode-ai/core/database/database"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
 import { tool } from "ai"
-import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
+import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Stream } from "effect"
 import path from "path"
 import z from "zod"
 import type { Agent } from "../../src/agent/agent"
@@ -44,6 +44,34 @@ const summary = Layer.succeed(
     computeDiff: () => Effect.succeed([]),
   }),
 )
+
+class SummaryGate extends Context.Service<
+  SummaryGate,
+  { readonly started: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void> }
+>()("@test/SessionProcessorSummaryGate") {}
+
+const summaryGate = Layer.effect(
+  SummaryGate,
+  Effect.gen(function* () {
+    return {
+      started: yield* Deferred.make<void>(),
+      release: yield* Deferred.make<void>(),
+    }
+  }),
+)
+
+const heldSummary = Layer.effect(
+  SessionSummary.Service,
+  Effect.gen(function* () {
+    const gate = yield* SummaryGate
+    return SessionSummary.Service.of({
+      summarize: () =>
+        Deferred.succeed(gate.started, undefined).pipe(Effect.andThen(Deferred.await(gate.release)), Effect.asVoid),
+      diff: () => Effect.succeed([]),
+      computeDiff: () => Effect.succeed([]),
+    })
+  }),
+).pipe(Layer.provideMerge(summaryGate))
 
 const ref = {
   providerID: ProviderV2.ID.make("test"),
@@ -201,6 +229,17 @@ const env = Layer.mergeAll(
 
 const it = testEffect(env)
 
+const heldSummaryEnv = Layer.mergeAll(
+  TestLLMServer.layer,
+  SessionProcessor.layer.pipe(
+    Layer.provide(Image.defaultLayer),
+    Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
+    Layer.provideMerge(heldSummary),
+    Layer.provideMerge(deps),
+  ),
+)
+const itHeldSummary = testEffect(heldSummaryEnv)
+
 const providerErrorLLM = Layer.succeed(
   LLM.Service,
   LLM.Service.of({
@@ -307,6 +346,53 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
         expect(value).toBe("continue")
         expect(calls).toBe(1)
         expect(parts.some((part) => part.type === "text" && part.text === "hello")).toBe(true)
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+itHeldSummary.live("session.processor waits for step summary settlement", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const gate = yield* SummaryGate
+        yield* llm.text("hello")
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "hi")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+        const completed = yield* Deferred.make<void>()
+        const run = yield* handle
+          .process({
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies SessionV1.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "hi" }],
+            tools: {},
+          })
+          .pipe(Effect.ensuring(Deferred.succeed(completed, undefined)), Effect.forkChild)
+
+        yield* Deferred.await(gate.started)
+        expect(yield* Deferred.isDone(completed)).toBe(false)
+        yield* Deferred.succeed(gate.release, undefined)
+        expect(yield* Fiber.join(run)).toBe("continue")
+        expect(yield* Deferred.isDone(completed)).toBe(true)
       }),
     { config: (url) => providerCfg(url) },
   ),

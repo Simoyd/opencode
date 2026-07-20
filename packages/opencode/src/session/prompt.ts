@@ -1402,8 +1402,7 @@ export const layer = Layer.effect(
               })
             }
 
-            if (step === 1)
-              yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
+            if (step === 1) yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore)
 
             if (step > 1 && lastFinished) {
               for (const m of msgs) {
@@ -1486,7 +1485,7 @@ export const layer = Layer.effect(
           continue
         }
 
-        yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
+        yield* compaction.prune({ sessionID }).pipe(Effect.ignore)
         return yield* lastAssistant(sessionID)
       },
     )
