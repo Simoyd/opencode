@@ -4,7 +4,7 @@ import { NodeHttpServer, NodeServices } from "@effect/platform-node"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { mkdir } from "node:fs/promises"
 import path from "node:path"
-import { Cause, Config, Effect, Exit, Layer } from "effect"
+import { Cause, Config, Effect, Exit, Fiber, Layer } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse, HttpRouter, HttpServer } from "effect/unstable/http"
 import { layerWebSocketConstructorGlobal } from "effect/unstable/socket/Socket"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -545,6 +545,127 @@ describe("session HttpApi", () => {
       expect(messages).toContainEqual(expect.objectContaining({ info: expect.objectContaining({ id: messageID }) }))
       yield* llm.wait(1)
     }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  )
+
+  it.live("queues executable input on the active Runner while rejecting busy no-reply input without mutation", () =>
+    Effect.gen(function* () {
+      const llm = yield* TestLLMServer
+      yield* llm.hang
+
+      const directory = yield* tmpdirScoped({ git: true, config: testProviderConfig(llm.url) })
+      const session = yield* createSession({ title: "runner admission" }).pipe(provideInstanceEffect(directory))
+      const headers = { "content-type": "application/json", "x-opencode-directory": directory }
+      const firstID = MessageID.ascending()
+      const queuedID = MessageID.ascending()
+      const noReplyID = MessageID.ascending()
+      const payload = (messageID: MessageID, text: string, noReply = false) =>
+        JSON.stringify({
+          messageID,
+          agent: "build",
+          model: { providerID: "test", modelID: "test-model" },
+          noReply,
+          parts: [{ type: "text", text }],
+        })
+
+      const first = yield* request(pathFor(SessionPaths.promptAsync, { sessionID: session.id }), {
+        method: "POST",
+        headers,
+        body: payload(firstID, "first active input"),
+      })
+      expect(first.status).toBe(204)
+      yield* llm.wait(1)
+
+      const queued = yield* request(pathFor(SessionPaths.promptAsync, { sessionID: session.id }), {
+        method: "POST",
+        headers,
+        body: payload(queuedID, "queued input"),
+      })
+      expect(queued.status).toBe(204)
+
+      const blocked = yield* request(pathFor(SessionPaths.prompt, { sessionID: session.id }), {
+        method: "POST",
+        headers,
+        body: payload(noReplyID, "must not enter active run", true),
+      })
+      expect(blocked.status).toBe(400)
+
+      const messages = yield* Session.use.messages({ sessionID: session.id }).pipe(provideInstanceEffect(directory))
+      expect(messages.some((message) => message.info.id === firstID)).toBe(true)
+      expect(messages.some((message) => message.info.id === queuedID)).toBe(true)
+      expect(messages.some((message) => message.info.id === noReplyID)).toBe(false)
+
+      const abort = yield* request(pathFor(SessionPaths.abort, { sessionID: session.id }), {
+        method: "POST",
+        headers,
+      })
+      expect(abort.status).toBe(200)
+    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  )
+
+  it.live(
+    "manual compaction and a following prompt attach to the active Runner and Stop preserves their committed rows",
+    () =>
+      Effect.gen(function* () {
+        const llm = yield* TestLLMServer
+        yield* llm.hang
+
+        const directory = yield* tmpdirScoped({ git: true, config: testProviderConfig(llm.url) })
+        const session = yield* createSession({ title: "compaction ownership" }).pipe(provideInstanceEffect(directory))
+        const headers = { "content-type": "application/json", "x-opencode-directory": directory }
+        const firstID = MessageID.ascending()
+        const queuedID = MessageID.ascending()
+
+        const first = yield* request(pathFor(SessionPaths.promptAsync, { sessionID: session.id }), {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            messageID: firstID,
+            agent: "build",
+            model: { providerID: "test", modelID: "test-model" },
+            parts: [{ type: "text", text: "hold the active run" }],
+          }),
+        })
+        expect(first.status).toBe(204)
+        yield* llm.wait(1)
+
+        const compact = yield* request(pathFor(SessionPaths.summarize, { sessionID: session.id }), {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ providerID: "test", modelID: "test-model" }),
+        }).pipe(Effect.forkChild)
+
+        let compacted = false
+        while (!compacted) {
+          const messages = yield* Session.use.messages({ sessionID: session.id }).pipe(provideInstanceEffect(directory))
+          compacted = messages.some((message) => message.parts.some((part) => part.type === "compaction"))
+          if (!compacted) yield* Effect.yieldNow
+        }
+        expect(compacted).toBe(true)
+
+        const queued = yield* request(pathFor(SessionPaths.promptAsync, { sessionID: session.id }), {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            messageID: queuedID,
+            agent: "build",
+            model: { providerID: "test", modelID: "test-model" },
+            parts: [{ type: "text", text: "queued after manual compaction" }],
+          }),
+        })
+        expect(queued.status).toBe(204)
+
+        const abort = yield* request(pathFor(SessionPaths.abort, { sessionID: session.id }), {
+          method: "POST",
+          headers,
+        })
+        expect(abort.status).toBe(200)
+        const compactResponse = yield* Fiber.join(compact)
+        expect(compactResponse.status).toBe(200)
+
+        const messages = yield* Session.use.messages({ sessionID: session.id }).pipe(provideInstanceEffect(directory))
+        expect(messages.some((message) => message.info.id === queuedID)).toBe(true)
+        expect(messages.some((message) => message.parts.some((part) => part.type === "compaction"))).toBe(true)
+      }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
   )
 
   it.instance(

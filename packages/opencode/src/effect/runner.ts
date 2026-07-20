@@ -4,6 +4,11 @@ export interface Runner<A, E = never> {
   readonly state: State<A, E>
   readonly busy: boolean
   readonly ensureRunning: (work: Effect.Effect<A, E>) => Effect.Effect<A, E>
+  readonly submit: <B, E2, R>(
+    admission: Effect.Effect<B, E2, R>,
+    work: Effect.Effect<A, E>,
+  ) => Effect.Effect<A, E | E2, R>
+  readonly commit: <B, E2, R>(work: Effect.Effect<B, E2, R>) => Effect.Effect<B, E2 | Busy, R>
   readonly startShell: (work: Effect.Effect<A, E>, ready?: Latch.Latch) => Effect.Effect<A, E | Busy>
   readonly cancel: Effect.Effect<void>
 }
@@ -137,6 +142,49 @@ export const make = <A, E = never>(
       }),
     ).pipe(Effect.flatten)
 
+  const submit = <B, E2, R>(
+    admission: Effect.Effect<B, E2, R>,
+    work: Effect.Effect<A, E>,
+  ): Effect.Effect<A, E | E2, R> =>
+    SynchronizedRef.modifyEffect(
+      ref,
+      Effect.fnUntraced(function* (st) {
+        if (st._tag === "Idle") yield* onBusy
+        yield* admission.pipe(Effect.onError(() => (st._tag === "Idle" ? idle : Effect.void)))
+        switch (st._tag) {
+          case "Running":
+          case "ShellThenRun":
+            return [awaitDone(st.run.done), st] as const
+          case "Shell": {
+            const run = {
+              id: next(),
+              done: yield* Deferred.make<A, E | Cancelled>(),
+              work,
+            } satisfies PendingHandle<A, E>
+            return [awaitDone(run.done), { _tag: "ShellThenRun", shell: st.shell, run }] as const
+          }
+          case "Idle": {
+            const done = yield* Deferred.make<A, E | Cancelled>()
+            const run = yield* startRun(work, done)
+            return [awaitDone(done), { _tag: "Running", run }] as const
+          }
+        }
+      }),
+    ).pipe(Effect.flatten)
+
+  const commit = <B, E2, R>(work: Effect.Effect<B, E2, R>): Effect.Effect<B, E2 | Busy, R> =>
+    SynchronizedRef.modifyEffect(
+      ref,
+      Effect.fnUntraced(function* (st) {
+        if (st._tag !== "Idle") {
+          const reject: Effect.Effect<B, E2 | Busy, R> = Effect.fail(new Busy())
+          return [reject, st] as const
+        }
+        const value = yield* work
+        return [Effect.succeed(value), st] as const
+      }),
+    ).pipe(Effect.flatten)
+
   const startShell = (work: Effect.Effect<A, E>, ready?: Latch.Latch): Effect.Effect<A, E | Busy> =>
     SynchronizedRef.modifyEffect(
       ref,
@@ -209,6 +257,8 @@ export const make = <A, E = never>(
       return state()._tag !== "Idle"
     },
     ensureRunning,
+    submit,
+    commit,
     startShell,
     cancel,
   }

@@ -113,6 +113,86 @@ describe("Runner", () => {
     }),
   )
 
+  it.live(
+    "submit acquires ownership before admission and starts the run afterward",
+    Effect.gen(function* () {
+      const s = yield* Scope.Scope
+      const order = yield* Ref.make<string[]>([])
+      const runner = Runner.make<string>(s, {
+        onBusy: Ref.update(order, (items) => [...items, "busy"]),
+        onIdle: Ref.update(order, (items) => [...items, "idle"]),
+      })
+
+      const result = yield* runner.submit(
+        Ref.update(order, (items) => [...items, "admission"]),
+        Ref.update(order, (items) => [...items, "run"]).pipe(Effect.as("done")),
+      )
+
+      expect(result).toBe("done")
+      expect(yield* Ref.get(order)).toEqual(["busy", "admission", "run", "idle"])
+    }),
+  )
+
+  it.live(
+    "submit attaches admission to the existing run without starting replacement work",
+    Effect.gen(function* () {
+      const s = yield* Scope.Scope
+      const runner = Runner.make<string>(s)
+      const started = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const admissions = yield* Ref.make<string[]>([])
+      const replacementRuns = yield* Ref.make(0)
+
+      const first = yield* runner
+        .ensureRunning(
+          Effect.gen(function* () {
+            yield* Deferred.succeed(started, undefined)
+            yield* Deferred.await(release)
+            return "shared"
+          }),
+        )
+        .pipe(Effect.forkChild)
+      yield* Deferred.await(started)
+
+      const attached = yield* runner
+        .submit(
+          Ref.update(admissions, (items) => [...items, "queued-input"]),
+          Ref.update(replacementRuns, (count) => count + 1).pipe(Effect.as("replacement")),
+        )
+        .pipe(Effect.forkChild)
+      yield* Effect.yieldNow
+      expect(yield* Ref.get(admissions)).toEqual(["queued-input"])
+
+      yield* Deferred.succeed(release, undefined)
+      expect(yield* Fiber.join(first)).toBe("shared")
+      expect(yield* Fiber.join(attached)).toBe("shared")
+      expect(yield* Ref.get(replacementRuns)).toBe(0)
+    }),
+  )
+
+  it.live(
+    "commit is idle-only and does not start a run lifecycle",
+    Effect.gen(function* () {
+      const s = yield* Scope.Scope
+      const busyCount = yield* Ref.make(0)
+      const runner = Runner.make<string>(s, {
+        onBusy: Ref.update(busyCount, (count) => count + 1),
+      })
+
+      expect(yield* runner.commit(Effect.succeed("committed"))).toBe("committed")
+      expect(yield* Ref.get(busyCount)).toBe(0)
+      expect(runner.state._tag).toBe("Idle")
+
+      const running = yield* runner.ensureRunning(Effect.never.pipe(Effect.as("running"))).pipe(Effect.forkChild)
+      yield* waitForState(runner, "Running")
+      const blocked = yield* runner.commit(Effect.succeed("rejected")).pipe(Effect.exit)
+      expect(Exit.isFailure(blocked)).toBe(true)
+      if (Exit.isFailure(blocked)) expect(Cause.squash(blocked.cause)).toBeInstanceOf(Runner.Busy)
+      yield* runner.cancel
+      yield* Fiber.await(running)
+    }),
+  )
+
   // --- cancel semantics ---
 
   it.live(

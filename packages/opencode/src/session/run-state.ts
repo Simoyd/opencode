@@ -10,6 +10,17 @@ import { SessionStatus } from "./status"
 export interface Interface {
   readonly assertNotBusy: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+  readonly commit: <B, E, R>(
+    sessionID: SessionID,
+    onInterrupt: Effect.Effect<SessionV1.WithParts>,
+    work: Effect.Effect<B, E, R>,
+  ) => Effect.Effect<B, E | Session.BusyError, R>
+  readonly submit: <B, E, R>(
+    sessionID: SessionID,
+    onInterrupt: Effect.Effect<SessionV1.WithParts>,
+    admission: Effect.Effect<B, E, R>,
+    work: Effect.Effect<SessionV1.WithParts>,
+  ) => Effect.Effect<SessionV1.WithParts, E, R>
   readonly ensureRunning: (
     sessionID: SessionID,
     onInterrupt: Effect.Effect<SessionV1.WithParts>,
@@ -92,6 +103,25 @@ export const layer = Layer.effect(
       return yield* (yield* runner(sessionID, onInterrupt)).ensureRunning(work)
     })
 
+    const commit = Effect.fn("SessionRunState.commit")(function* <B, E, R>(
+      sessionID: SessionID,
+      onInterrupt: Effect.Effect<SessionV1.WithParts>,
+      work: Effect.Effect<B, E, R>,
+    ) {
+      return yield* (yield* runner(sessionID, onInterrupt))
+        .commit(work)
+        .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
+    })
+
+    const submit = Effect.fn("SessionRunState.submit")(function* <B, E, R>(
+      sessionID: SessionID,
+      onInterrupt: Effect.Effect<SessionV1.WithParts>,
+      admission: Effect.Effect<B, E, R>,
+      work: Effect.Effect<SessionV1.WithParts>,
+    ) {
+      return yield* (yield* runner(sessionID, onInterrupt)).submit(admission, work)
+    })
+
     const startShell = Effect.fn("SessionRunState.startShell")(function* (
       sessionID: SessionID,
       onInterrupt: Effect.Effect<SessionV1.WithParts>,
@@ -103,7 +133,7 @@ export const layer = Layer.effect(
         .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
     })
 
-    return Service.of({ assertNotBusy, cancel, ensureRunning, startShell })
+    return Service.of({ assertNotBusy, cancel, commit, submit, ensureRunning, startShell })
   }),
 )
 

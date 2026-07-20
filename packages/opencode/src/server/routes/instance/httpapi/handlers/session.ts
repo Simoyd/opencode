@@ -1,13 +1,11 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { TranscriptWindowProjection } from "@opencode-ai/core/session/transcript-window"
-import { Agent } from "@/agent/agent"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Command } from "@/command"
 import { Permission } from "@/permission"
 import { SessionShare } from "@/share/session"
 import { Session } from "@/session/session"
-import { SessionCompaction } from "@/session/compaction"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
@@ -20,7 +18,7 @@ import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
 import { StreamDiagnostics } from "@/diagnostic/stream"
 import { NamedError } from "@opencode-ai/core/util/error"
-import { Cause, Effect, Option, Schema, Scope } from "effect"
+import { Cause, Deferred, Effect, Option, Schema, Scope } from "effect"
 import * as Stream from "effect/Stream"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder, HttpApiError, HttpApiSchema } from "effect/unstable/httpapi"
@@ -215,10 +213,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const shareSvc = yield* SessionShare.Service
     const promptSvc = yield* SessionPrompt.Service
     const revertSvc = yield* SessionRevert.Service
-    const compactSvc = yield* SessionCompaction.Service
     const runState = yield* SessionRunState.Service
     const stagedContext = yield* SessionStagedContext.Service
-    const agentSvc = yield* Agent.Service
     const permissionSvc = yield* Permission.Service
     const statusSvc = yield* SessionStatus.Service
     const todoSvc = yield* Todo.Service
@@ -602,21 +598,15 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof SummarizePayload.Type
     }) {
-      yield* revertSvc.cleanup(yield* requireSession(ctx.params.sessionID))
-      const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
-      const defaultAgent = yield* agentSvc.defaultAgent()
-      const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
-
-      yield* compactSvc.create({
-        sessionID: ctx.params.sessionID,
-        agent: currentAgent,
-        model: {
+      yield* requireSession(ctx.params.sessionID)
+      yield* SessionError.mapBusy(
+        promptSvc.summarize({
+          sessionID: ctx.params.sessionID,
           providerID: ctx.payload.providerID,
           modelID: ctx.payload.modelID,
-        },
-        auto: ctx.payload.auto ?? false,
-      })
-      yield* promptSvc.loop({ sessionID: ctx.params.sessionID })
+          auto: ctx.payload.auto,
+        }),
+      )
       return true
     })
 
@@ -671,13 +661,16 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         routeMode: "prompt-async",
         correlation,
       })
-      yield* promptSvc
-        .prompt({ ...ctx.payload, sessionID: ctx.params.sessionID, noReply: true })
-        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
-      if (ctx.payload.noReply !== true) {
-        yield* promptSvc.loop({ sessionID: ctx.params.sessionID }).pipe(
-          Effect.catchCause((cause) =>
+      const committed = yield* Deferred.make<void, HttpApiError.BadRequest>()
+      const operation = promptSvc
+        .prompt(
+          { ...ctx.payload, sessionID: ctx.params.sessionID },
+          Deferred.succeed(committed, undefined).pipe(Effect.asVoid),
+        )
+        .pipe(
+          Effect.onError((cause) =>
             Effect.gen(function* () {
+              yield* Deferred.fail(committed, new HttpApiError.BadRequest({})).pipe(Effect.asVoid)
               yield* Effect.logError("prompt_async failed").pipe(
                 Effect.annotateLogs({ sessionID: ctx.params.sessionID, cause }),
               )
@@ -694,9 +687,10 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
               })
             }),
           ),
-          Effect.forkIn(scope, { startImmediately: true }),
+          Effect.mapError(() => new HttpApiError.BadRequest({})),
         )
-      }
+      yield* operation.pipe(Effect.forkIn(scope, { startImmediately: true }))
+      yield* Deferred.await(committed)
       StreamDiagnostics.record({
         stage: "prompt.route",
         action: "returned",

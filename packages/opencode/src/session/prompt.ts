@@ -94,10 +94,19 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
 
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
-  readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
+  readonly prompt: (
+    input: PromptInput,
+    committed?: Effect.Effect<void>,
+  ) => Effect.Effect<SessionV1.WithParts, Image.Error | Session.BusyError>
   readonly loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts>
   readonly shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
   readonly command: (input: CommandInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
+  readonly summarize: (input: {
+    sessionID: SessionID
+    providerID: ProviderV2.ID
+    modelID: ModelV2.ID
+    auto?: boolean
+  }) => Effect.Effect<SessionV1.WithParts>
   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
 }
 
@@ -1187,8 +1196,8 @@ export const layer = Layer.effect(
       return { info, parts }
     }, Effect.scoped)
 
-    const prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error> = Effect.fn(
-      "SessionPrompt.prompt",
+    const preparePrompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error> = Effect.fn(
+      "SessionPrompt.preparePrompt",
     )(function* (input: PromptInput) {
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
       yield* revert.cleanup(session)
@@ -1204,8 +1213,7 @@ export const layer = Layer.effect(
         yield* sessions.setPermission({ sessionID: session.id, permission: permissions })
       }
 
-      if (input.noReply === true) return message
-      return yield* loop({ sessionID: input.sessionID })
+      return message
     })
 
     const lastAssistant = Effect.fnUntraced(function* (sessionID: SessionID) {
@@ -1475,6 +1483,14 @@ export const layer = Layer.effect(
       },
     )
 
+    const prompt = Effect.fn("SessionPrompt.prompt")(function* (input: PromptInput, committed?: Effect.Effect<void>) {
+      const admission = preparePrompt(input).pipe(Effect.tap(() => committed ?? Effect.void))
+      if (input.noReply === true) {
+        return yield* state.commit(input.sessionID, lastAssistant(input.sessionID), admission)
+      }
+      return yield* state.submit(input.sessionID, lastAssistant(input.sessionID), admission, runLoop(input.sessionID))
+    })
+
     const loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
       input: LoopInput,
     ) {
@@ -1488,7 +1504,7 @@ export const layer = Layer.effect(
       return yield* state.startShell(input.sessionID, lastAssistant(input.sessionID), shellImpl(input, ready), ready)
     })
 
-    const command = Effect.fn("SessionPrompt.command")(function* (input: CommandInput) {
+    const prepareCommand = Effect.fn("SessionPrompt.prepareCommand")(function* (input: CommandInput) {
       yield* elog.info("command", { sessionID: input.sessionID, command: input.command, agent: input.agent })
       const cmd = yield* commands.get(input.command)
       if (!cmd) {
@@ -1588,7 +1604,7 @@ export const layer = Layer.effect(
         { parts },
       )
 
-      const result = yield* prompt({
+      const result = yield* preparePrompt({
         sessionID: input.sessionID,
         messageID: input.messageID,
         model: userModel,
@@ -1605,17 +1621,51 @@ export const layer = Layer.effect(
       return result
     })
 
+    const command = Effect.fn("SessionPrompt.command")(function* (input: CommandInput) {
+      return yield* state.submit(
+        input.sessionID,
+        lastAssistant(input.sessionID),
+        prepareCommand(input),
+        runLoop(input.sessionID),
+      )
+    })
+
+    const summarize = Effect.fn("SessionPrompt.summarize")(function* (input: {
+      sessionID: SessionID
+      providerID: ProviderV2.ID
+      modelID: ModelV2.ID
+      auto?: boolean
+    }) {
+      const admission = Effect.gen(function* () {
+        yield* revert.cleanup(yield* sessions.get(input.sessionID).pipe(Effect.orDie))
+        const messages = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
+        const defaultAgent = yield* agents.defaultInfo()
+        const currentAgent =
+          messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent.name
+        yield* compaction.create({
+          sessionID: input.sessionID,
+          agent: currentAgent,
+          model: {
+            providerID: input.providerID,
+            modelID: input.modelID,
+          },
+          auto: input.auto ?? false,
+        })
+      })
+      return yield* state.submit(input.sessionID, lastAssistant(input.sessionID), admission, runLoop(input.sessionID))
+    })
+
     return Service.of({
-      cancel: (sessionID) =>
-        SessionMaintenance.withAdmission(db, { sessionID, kind: "cancel" }, cancel(sessionID)),
-      prompt: (input) =>
-        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "prompt" }, prompt(input)),
-      loop: (input) =>
-        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "loop" }, loop(input)),
+      cancel: (sessionID) => SessionMaintenance.withAdmission(db, { sessionID, kind: "cancel" }, cancel(sessionID)),
+      prompt: (input, committed) =>
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "prompt" }, prompt(input, committed)),
+      loop: (input) => SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "loop" }, loop(input)),
       shell: (input) =>
         SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "shell" }, shell(input)),
       command: (input) =>
         SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "command" }, command(input)),
+      summarize: (input) =>
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "summarize" }, summarize(input)),
       resolvePromptParts,
     })
   }),
