@@ -44,6 +44,36 @@ const apiLayer = HttpRouter.serve(
 const it = testEffect(apiLayer)
 
 describe("global HttpApi", () => {
+  it.effect("continues global event delivery after an observer throws", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const received = new Array<string>()
+        const broken = () => {
+          throw new Error("observer failed")
+        }
+        const healthy = (event: { payload: { type: string } }) => received.push(event.payload.type)
+        GlobalBus.on("event", broken)
+        GlobalBus.on("event", healthy)
+        return { broken, healthy, received }
+      }),
+      ({ received }) =>
+        Effect.sync(() => {
+          expect(
+            GlobalBus.emit("event", {
+              directory: "/workspace",
+              payload: { type: "test.observer-isolation", properties: {} },
+            }),
+          ).toBe(true)
+          expect(received).toEqual(["test.observer-isolation"])
+        }),
+      ({ broken, healthy }) =>
+        Effect.sync(() => {
+          GlobalBus.off("event", broken)
+          GlobalBus.off("event", healthy)
+        }),
+    ),
+  )
+
   it.live("registers before connected and preserves acquisition events across reconnect", () =>
     Effect.gen(function* () {
       const baselineListeners = GlobalBus.listenerCount("event")

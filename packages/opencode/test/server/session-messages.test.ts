@@ -124,7 +124,7 @@ const addUser = Effect.fn("SessionMessagesTest.addUser")(function* (
 })
 
 type CompactedRangeBody = {
-  reference: { markerID: string; tailStartID?: string; messageID?: string }
+  reference: { markerID: string; tailStartID?: string; messageID?: string; sourceMessageID?: string }
   messages: SessionV1.WithParts[]
   complete: boolean
   notice?: string
@@ -540,7 +540,12 @@ describe("session messages endpoint", () => {
         const body = (yield* res.json) as CompactedRangeBody
         const ids = body.messages.map((message) => message.info.id)
 
-        expect(body.reference).toEqual({ markerID: compact3, tailStartID: start3, messageID: compact3 })
+        expect(body.reference).toEqual({
+          markerID: compact3,
+          tailStartID: start3,
+          messageID: compact3,
+          sourceMessageID: start3,
+        })
         expect(body.complete).toBe(true)
         expect(ids).toContain(summary2)
         expect(ids).toContain(replay2)
@@ -679,6 +684,60 @@ describe("session messages endpoint", () => {
           .pipe(Effect.orDie)
         expect(invalidatedState?.status).toBe("index_required")
         expect(String(invalidatedDescriptor?.revision)).not.toBe(descriptor.archiveRevision)
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
+    "preserves ordinary zero-part messages in compacted ranges",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        const session = yield* sessionScoped
+        const sessionService = yield* SessionNs.Service
+        const start = yield* addUser(session.id, "source prompt")
+        const empty = MessageID.ascending()
+        yield* sessionService.updateMessage({
+          id: empty,
+          sessionID: session.id,
+          role: "assistant",
+          parentID: start,
+          time: { created: Date.now() },
+          modelID: ModelV2.ID.make("test"),
+          providerID: ProviderV2.ID.make("test"),
+          mode: "build",
+          agent: "build",
+          path: { cwd: "/", root: "/" },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          finish: "tool-calls",
+        } satisfies SessionV1.Assistant)
+        const marker = yield* addCompaction(session.id, start)
+        yield* addAssistant(session.id, marker, "summary", { summary: true, finish: "end_turn" })
+        const replay = yield* addUser(session.id, "replay", { replay: true, replaySourceMessageID: start })
+        yield* addAssistant(session.id, replay, "final", { finish: "end_turn" })
+
+        const windowResponse = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
+        const window = (yield* windowResponse.json) as {
+          status: string
+          sourceGeneration: string
+          archiveDescriptors: Array<{ archiveID: string; archiveRevision: string; markerID: string }>
+        }
+        const descriptor = window.archiveDescriptors.find((item) => item.markerID === marker)
+        expect(window.status).toBe("complete")
+        expect(descriptor).toBeDefined()
+
+        const recall = yield* requestInDirectory(
+          `/session/${session.id}/compacted_range?marker=${encodeURIComponent(marker)}&tail_start_id=${encodeURIComponent(start)}&message_id=${encodeURIComponent(marker)}&source_generation=${encodeURIComponent(window.sourceGeneration)}&archive_id=${encodeURIComponent(descriptor!.archiveID)}&archive_revision=${encodeURIComponent(descriptor!.archiveRevision)}&source_message_id=${encodeURIComponent(start)}`,
+          tmp.directory,
+        )
+        const body = (yield* recall.json) as CompactedRangeBody
+        expect(body.status).toBe("complete")
+        expect(body.reference.sourceMessageID).toBe(start)
+        expect(body.messages.find((message) => message.info.id === empty)).toEqual(
+          expect.objectContaining({ info: expect.objectContaining({ id: empty }), parts: [] }),
+        )
       }),
     ),
     { git: true },

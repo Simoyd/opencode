@@ -31,8 +31,13 @@ export const Info = Schema.Struct({
 }).annotate({ identifier: "StagedContextInfo" })
 export type Info = Schema.Schema.Type<typeof Info>
 
+export class DuplicateError extends Schema.TaggedErrorClass<DuplicateError>()("SessionStagedContext.Duplicate", {
+  sessionID: SessionID,
+  contextID: Schema.String,
+}) {}
+
 export interface Interface {
-  readonly stage: (input: StageInput) => Effect.Effect<Info>
+  readonly stage: (input: StageInput) => Effect.Effect<Info, DuplicateError>
   readonly list: (input: { sessionID: SessionID }) => Effect.Effect<Info[]>
   readonly clear: (input: { sessionID: SessionID; contextID?: string }) => Effect.Effect<void>
   readonly injectAndConsume: (input: {
@@ -49,8 +54,12 @@ const contexts = new Map<SessionID, Info[]>()
 export const stage = Effect.fn("SessionStagedContext.stage")(function* (input: StageInput) {
   const parts = input.parts.filter((part) => part.type === "text" && part.text.length > 0)
   if (parts.length === 0) throw new Error("Staged context requires at least one non-empty text part.")
+  const id = input.id ?? `ctx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+  if ((contexts.get(input.sessionID) ?? []).some((context) => context.id === id)) {
+    return yield* new DuplicateError({ sessionID: input.sessionID, contextID: id })
+  }
   const info: Info = {
-    id: input.id ?? `ctx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+    id,
     sessionID: input.sessionID,
     mode: "next_prompt",
     visibility: "provider_only",

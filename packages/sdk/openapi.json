@@ -593,6 +593,23 @@
               "type": "string"
             },
             "required": false
+          },
+          {
+            "name": "sessionID",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": false
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
           }
         ],
         "responses": {
@@ -5162,6 +5179,138 @@
         ]
       }
     },
+    "/provider/runtime": {
+      "get": {
+        "tags": ["provider"],
+        "operationId": "provider.runtimeList",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connected provider model-selection facts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "all": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "models": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "object",
+                              "properties": {
+                                "id": {
+                                  "type": "string"
+                                },
+                                "providerID": {
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "type": "string"
+                                },
+                                "capabilities": {
+                                  "type": "object",
+                                  "properties": {
+                                    "reasoning": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  "required": ["reasoning"],
+                                  "additionalProperties": false
+                                },
+                                "limit": {
+                                  "type": "object",
+                                  "properties": {
+                                    "context": {
+                                      "type": "number"
+                                    }
+                                  },
+                                  "required": ["context"],
+                                  "additionalProperties": false
+                                },
+                                "variants": {
+                                  "type": "object",
+                                  "additionalProperties": {
+                                    "type": "null"
+                                  }
+                                }
+                              },
+                              "required": ["id", "providerID", "name", "capabilities", "limit"],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": ["id", "name", "models"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "default": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "connected": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": ["all", "default", "connected"],
+                  "additionalProperties": false,
+                  "description": "Connected provider model-selection facts"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Get the compact connected-provider model facts used by embedded runtimes.",
+        "summary": "List connected provider models",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.provider.runtimeList({\n  ...\n})"
+          }
+        ]
+      }
+    },
     "/provider/auth": {
       "get": {
         "tags": ["provider"],
@@ -6127,6 +6276,86 @@
         ]
       }
     },
+    "/session/{sessionID}/turns": {
+      "get": {
+        "tags": ["session"],
+        "operationId": "session.turns",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": true
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session turn facts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionTurnsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "BadRequest | InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/effect_HttpApiError_BadRequest"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Return authoritative session turn and compaction boundary facts derived from persisted messages.",
+        "summary": "Get session turns",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.turns({\n  ...\n})"
+          }
+        ]
+      }
+    },
     "/session/{sessionID}/diff": {
       "get": {
         "tags": ["session"],
@@ -6398,7 +6627,7 @@
             }
           }
         },
-        "description": "Create and send a new message to a session, streaming the AI response.",
+        "description": "Create and send a new message to a session. With noReply=true, return the committed user message without starting model execution.",
         "summary": "Send message",
         "requestBody": {
           "content": {
@@ -6675,6 +6904,574 @@
           {
             "lang": "js",
             "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.deleteMessage({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/session/{sessionID}/context/stage": {
+      "post": {
+        "tags": ["session"],
+        "operationId": "session.context.stage",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": true
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Staged context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StagedContextInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "BadRequest | InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/effect_HttpApiError_BadRequest"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Stage provider-only context for the next real prompt in this session without creating transcript messages or submitting a prompt.",
+        "summary": "Stage provider-only context",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": ["next_prompt"]
+                  },
+                  "visibility": {
+                    "type": "string",
+                    "enum": ["provider_only"]
+                  },
+                  "consume": {
+                    "type": "string",
+                    "enum": ["once"]
+                  },
+                  "parts": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/StagedContextTextPartInput"
+                    }
+                  }
+                },
+                "required": ["parts"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.context.stage({\n  ...\n})"
+          }
+        ]
+      },
+      "get": {
+        "tags": ["session"],
+        "operationId": "session.context.listStaged",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": true
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Staged contexts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StagedContextInfo"
+                  },
+                  "description": "Staged contexts"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "BadRequest | InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/effect_HttpApiError_BadRequest"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          }
+        },
+        "description": "List provider-only context currently staged for the next prompt in this session.",
+        "summary": "List staged provider-only context",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.context.listStaged({\n  ...\n})"
+          }
+        ]
+      },
+      "delete": {
+        "tags": ["session"],
+        "operationId": "session.context.clearStaged",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": true
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Staged context cleared"
+          },
+          "400": {
+            "description": "BadRequest | InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/effect_HttpApiError_BadRequest"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Clear all provider-only contexts staged for the next prompt in this session.",
+        "summary": "Clear staged provider-only context",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.context.clearStaged({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/session/{sessionID}/context/stage/{contextID}": {
+      "delete": {
+        "tags": ["session"],
+        "operationId": "session.context.clearStagedItem",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": true
+          },
+          {
+            "name": "contextID",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Staged context cleared"
+          },
+          "400": {
+            "description": "BadRequest | InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/effect_HttpApiError_BadRequest"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Clear one provider-only context staged for the next prompt in this session.",
+        "summary": "Clear staged provider-only context item",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.context.clearStagedItem({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/session/{sessionID}/compacted_range": {
+      "get": {
+        "tags": ["session"],
+        "operationId": "session.compactedRange",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": true
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "marker",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "pattern": "^msg"
+            },
+            "required": true
+          },
+          {
+            "name": "tail_start_id",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "pattern": "^msg"
+            },
+            "required": false
+          },
+          {
+            "name": "message_id",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "pattern": "^msg"
+            },
+            "required": false
+          },
+          {
+            "name": "source_generation",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "archive_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "archive_revision",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "source_message_id",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "pattern": "^msg"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Compacted transcript range",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompactedRangeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "BadRequest | InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/effect_HttpApiError_BadRequest"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Return the transcript messages summarized by a completed compaction marker without changing session state.",
+        "summary": "Recall compacted transcript range",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.compactedRange({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/session/{sessionID}/transcript_window": {
+      "get": {
+        "tags": ["session"],
+        "operationId": "session.transcriptWindow",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": true
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded transcript window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptWindowResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "BadRequest | InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/effect_HttpApiError_BadRequest"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Return body-free compacted archive descriptors and the bounded current transcript tail without hydrating full history.",
+        "summary": "Get bounded transcript window",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.transcriptWindow({\n  ...\n})"
           }
         ]
       }
@@ -7280,7 +8077,7 @@
             }
           }
         },
-        "description": "Create and send a new message to a session asynchronously, starting the session if needed and returning immediately.",
+        "description": "Commit a new user message before returning 204. Unless noReply=true, start or join session execution asynchronously after admission.",
         "summary": "Send async message",
         "requestBody": {
           "content": {
@@ -19902,6 +20699,453 @@
             }
           }
         }
+      },
+      "SessionTurnCompaction": {
+        "type": "object",
+        "properties": {
+          "compactionMessageID": {
+            "type": "string",
+            "pattern": "^msg"
+          },
+          "summaryMessageID": {
+            "type": "string",
+            "pattern": "^msg"
+          },
+          "summaryPreview": {
+            "type": "string"
+          },
+          "preCompactionMessageIDs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^msg"
+            }
+          },
+          "postCompactionMessageIDs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^msg"
+            }
+          },
+          "syntheticPromptMessageIDs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^msg"
+            }
+          },
+          "replayPromptMessageIDs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^msg"
+            }
+          },
+          "recallMarkerID": {
+            "type": "string",
+            "pattern": "^msg"
+          },
+          "recallTailStartMessageID": {
+            "type": "string",
+            "pattern": "^msg"
+          }
+        },
+        "required": [
+          "compactionMessageID",
+          "summaryMessageID",
+          "summaryPreview",
+          "preCompactionMessageIDs",
+          "postCompactionMessageIDs",
+          "syntheticPromptMessageIDs",
+          "replayPromptMessageIDs"
+        ],
+        "additionalProperties": false
+      },
+      "SessionTurn": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "startMessageID": {
+            "type": "string",
+            "pattern": "^msg"
+          },
+          "messageIDs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^msg"
+            }
+          },
+          "intermediateMessageIDs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^msg"
+            }
+          },
+          "compactionBoundaryMessageIDs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^msg"
+            }
+          },
+          "finalOutputMessageID": {
+            "type": "string",
+            "pattern": "^msg"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["complete", "incomplete"]
+          },
+          "compaction": {
+            "$ref": "#/components/schemas/SessionTurnCompaction"
+          }
+        },
+        "required": [
+          "id",
+          "startMessageID",
+          "messageIDs",
+          "intermediateMessageIDs",
+          "compactionBoundaryMessageIDs",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "SessionTurnsResponse": {
+        "type": "object",
+        "properties": {
+          "sessionID": {
+            "type": "string",
+            "pattern": "^ses"
+          },
+          "turns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionTurn"
+            }
+          }
+        },
+        "required": ["sessionID", "turns"],
+        "additionalProperties": false
+      },
+      "StagedContextTextPartInput": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["text"]
+          },
+          "text": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "required": ["type", "text"],
+        "additionalProperties": false
+      },
+      "StagedContextInfo": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "sessionID": {
+            "type": "string",
+            "pattern": "^ses"
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["next_prompt"]
+          },
+          "visibility": {
+            "type": "string",
+            "enum": ["provider_only"]
+          },
+          "consume": {
+            "type": "string",
+            "enum": ["once"]
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StagedContextTextPartInput"
+            }
+          },
+          "time": {
+            "type": "object",
+            "properties": {
+              "created": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["NaN"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["Infinity"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["-Infinity"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["Infinity", "-Infinity", "NaN"]
+                  }
+                ]
+              }
+            },
+            "required": ["created"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "sessionID", "mode", "visibility", "consume", "parts", "time"],
+        "additionalProperties": false
+      },
+      "CompactedRangeResponse": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "type": "object",
+            "properties": {
+              "markerID": {
+                "type": "string"
+              },
+              "tailStartID": {
+                "type": "string"
+              },
+              "messageID": {
+                "type": "string"
+              },
+              "sourceMessageID": {
+                "type": "string",
+                "pattern": "^msg"
+              }
+            },
+            "required": ["markerID"],
+            "additionalProperties": false
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "info": {
+                  "$ref": "#/components/schemas/Message"
+                },
+                "parts": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Part"
+                  }
+                }
+              },
+              "required": ["info", "parts"],
+              "additionalProperties": false
+            }
+          },
+          "complete": {
+            "type": "boolean"
+          },
+          "notice": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["complete", "stale", "unavailable", "too_large"]
+          },
+          "sourceGeneration": {
+            "type": "string"
+          },
+          "archiveID": {
+            "type": "string"
+          },
+          "archiveRevision": {
+            "type": "string"
+          }
+        },
+        "required": ["reference", "messages", "complete", "status"],
+        "additionalProperties": false
+      },
+      "TranscriptArchiveDescriptor": {
+        "type": "object",
+        "properties": {
+          "archiveID": {
+            "type": "string"
+          },
+          "archiveRevision": {
+            "type": "string"
+          },
+          "markerID": {
+            "type": "string",
+            "pattern": "^msg"
+          },
+          "tailStartID": {
+            "type": "string",
+            "pattern": "^msg"
+          },
+          "sourceMessageID": {
+            "type": "string",
+            "pattern": "^msg"
+          },
+          "summaryPreview": {
+            "type": "string"
+          },
+          "messageCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "partCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "textUnits": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "decodedBytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "archiveID",
+          "archiveRevision",
+          "markerID",
+          "sourceMessageID",
+          "summaryPreview",
+          "messageCount",
+          "partCount",
+          "textUnits",
+          "decodedBytes"
+        ],
+        "additionalProperties": false
+      },
+      "TranscriptWindowResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "complete",
+              "index_required",
+              "indexing",
+              "index_failed",
+              "stale",
+              "revert_unrepresentable",
+              "too_large"
+            ]
+          },
+          "sessionID": {
+            "type": "string",
+            "pattern": "^ses"
+          },
+          "sourceGeneration": {
+            "type": "string"
+          },
+          "windowRevision": {
+            "type": "string"
+          },
+          "tailStartID": {
+            "type": "string",
+            "pattern": "^msg"
+          },
+          "archiveDescriptors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TranscriptArchiveDescriptor"
+            }
+          },
+          "tail": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "info": {
+                  "$ref": "#/components/schemas/Message"
+                },
+                "parts": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Part"
+                  }
+                }
+              },
+              "required": ["info", "parts"],
+              "additionalProperties": false
+            }
+          },
+          "turns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionTurn"
+            }
+          },
+          "counts": {
+            "type": "object",
+            "properties": {
+              "descriptors": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "messages": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "parts": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "textUnits": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "decodedBytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "turns": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "turnIdentities": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "turnTextUnits": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "turnDecodedBytes": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "descriptors",
+              "messages",
+              "parts",
+              "textUnits",
+              "decodedBytes",
+              "turns",
+              "turnIdentities",
+              "turnTextUnits",
+              "turnDecodedBytes"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": ["status", "sessionID", "archiveDescriptors", "tail", "turns", "counts"],
+        "additionalProperties": false
       },
       "TextPartInput": {
         "type": "object",

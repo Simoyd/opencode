@@ -332,7 +332,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       if (!ctx.payload.parts.some((part) => part.type === "text" && part.text.length > 0)) {
         return yield* new HttpApiError.BadRequest({})
       }
-      return yield* stagedContext.stage({ ...ctx.payload, sessionID: ctx.params.sessionID })
+      return yield* stagedContext
+        .stage({ ...ctx.payload, sessionID: ctx.params.sessionID })
+        .pipe(Effect.catchTag("SessionStagedContext.Duplicate", () => Effect.fail(new HttpApiError.BadRequest({}))))
     })
 
     const contextListStaged = Effect.fn("SessionHttpApi.contextListStaged")(function* (ctx: {
@@ -375,6 +377,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
             markerID: ctx.query.marker,
             tailStartID: ctx.query.tail_start_id,
             messageID: ctx.query.message_id,
+            ...(ctx.query.source_message_id ? { sourceMessageID: ctx.query.source_message_id } : {}),
           },
           messages: [],
           complete: false,
@@ -392,6 +395,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
           markerID: result.value.markerID,
           tailStartID: result.value.tailStartID,
           messageID: result.value.markerID,
+          sourceMessageID: result.value.sourceMessageID,
         },
         messages: result.value.messages,
         complete: true,
@@ -667,27 +671,32 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         routeMode: "prompt-async",
         correlation,
       })
-      yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.gen(function* () {
-            yield* Effect.logError("prompt_async failed").pipe(
-              Effect.annotateLogs({ sessionID: ctx.params.sessionID, cause }),
-            )
-            yield* events.publish(Session.Event.Error, {
-              sessionID: ctx.params.sessionID,
-              error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
-            })
-            StreamDiagnostics.record({
-              stage: "prompt.route",
-              action: "error",
-              routeMode: "prompt-async",
-              correlation,
-              match: false,
-            })
-          }),
-        ),
-        Effect.forkIn(scope, { startImmediately: true }),
-      )
+      yield* promptSvc
+        .prompt({ ...ctx.payload, sessionID: ctx.params.sessionID, noReply: true })
+        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      if (ctx.payload.noReply !== true) {
+        yield* promptSvc.loop({ sessionID: ctx.params.sessionID }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.gen(function* () {
+              yield* Effect.logError("prompt_async failed").pipe(
+                Effect.annotateLogs({ sessionID: ctx.params.sessionID, cause }),
+              )
+              yield* events.publish(Session.Event.Error, {
+                sessionID: ctx.params.sessionID,
+                error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
+              })
+              StreamDiagnostics.record({
+                stage: "prompt.route",
+                action: "error",
+                routeMode: "prompt-async",
+                correlation,
+                match: false,
+              })
+            }),
+          ),
+          Effect.forkIn(scope, { startImmediately: true }),
+        )
+      }
       StreamDiagnostics.record({
         stage: "prompt.route",
         action: "returned",

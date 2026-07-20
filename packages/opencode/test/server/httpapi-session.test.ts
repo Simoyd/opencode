@@ -328,6 +328,89 @@ describe("session HttpApi", () => {
   )
 
   it.instance(
+    "commits synchronous and asynchronous no-reply inputs before returning",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const session = yield* createSession({ title: "no-reply result matrix" })
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const syncID = MessageID.ascending()
+        const asyncID = MessageID.ascending()
+        const payload = (messageID: MessageID) =>
+          JSON.stringify({
+            messageID,
+            agent: "build",
+            model: { providerID: "test", modelID: "test-model" },
+            noReply: true,
+            parts: [{ type: "text", text: messageID === syncID ? "sync input" : "async input" }],
+          })
+
+        const sync = yield* request(pathFor(SessionPaths.prompt, { sessionID: session.id }), {
+          method: "POST",
+          headers,
+          body: payload(syncID),
+        })
+        expect(sync.status).toBe(200)
+        expect(yield* responseJson(sync)).toMatchObject({ info: { id: syncID, role: "user" } })
+
+        const async = yield* request(pathFor(SessionPaths.promptAsync, { sessionID: session.id }), {
+          method: "POST",
+          headers,
+          body: payload(asyncID),
+        })
+        expect(async.status).toBe(204)
+
+        const committed = yield* request(pathFor(SessionPaths.message, { sessionID: session.id, messageID: asyncID }), {
+          headers,
+        })
+        expect(committed.status).toBe(200)
+        expect(yield* responseJson(committed)).toMatchObject({ info: { id: asyncID, role: "user" } })
+
+        const messages = yield* requestJson<SessionV1.WithParts[]>(
+          pathFor(SessionPaths.messages, { sessionID: session.id }),
+          { headers },
+        )
+        expect(messages.map((message) => [message.info.id, message.info.role])).toEqual([
+          [syncID, "user"],
+          [asyncID, "user"],
+        ])
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "rejects duplicate staged context per session while allowing cross-session reuse",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const first = yield* createSession({ title: "first staged context" })
+        const second = yield* createSession({ title: "second staged context" })
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const body = JSON.stringify({ id: "ctx_shared", parts: [{ type: "text", text: "context" }] })
+        const stage = (sessionID: SessionIDType) =>
+          request(pathFor(SessionPaths.contextStage, { sessionID }), { method: "POST", headers, body })
+
+        const pair = yield* Effect.all([stage(first.id), stage(first.id)], { concurrency: "unbounded" })
+        expect(pair.map((response) => response.status).sort()).toEqual([200, 400])
+
+        const accepted = pair.find((response) => response.status === 200)!
+        expect(accepted.status).toBe(200)
+        expect(yield* responseJson(accepted)).toMatchObject({ id: "ctx_shared", sessionID: first.id })
+
+        const reused = yield* stage(second.id)
+        expect(reused.status).toBe(200)
+        expect(yield* responseJson(reused)).toMatchObject({ id: "ctx_shared", sessionID: second.id })
+
+        const listed = yield* requestJson<Array<{ id: string }>>(
+          pathFor(SessionPaths.contextStage, { sessionID: first.id }),
+          { headers },
+        )
+        expect(listed.map((item) => item.id)).toEqual(["ctx_shared"])
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
     "serves read routes",
     () =>
       Effect.gen(function* () {
@@ -435,6 +518,32 @@ describe("session HttpApi", () => {
         cwd: sessionDirectory,
         root: sessionDirectory,
       })
+    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  )
+
+  it.live("commits asynchronous executable input before returning 204", () =>
+    Effect.gen(function* () {
+      const llm = yield* TestLLMServer
+      yield* llm.text("async result", { usage: { input: 1, output: 1 } })
+
+      const directory = yield* tmpdirScoped({ git: true, config: testProviderConfig(llm.url) })
+      const session = yield* createSession({ title: "async admission" }).pipe(provideInstanceEffect(directory))
+      const messageID = MessageID.ascending()
+      const response = yield* request(pathFor(SessionPaths.promptAsync, { sessionID: session.id }), {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-opencode-directory": directory },
+        body: JSON.stringify({
+          messageID,
+          agent: "build",
+          model: { providerID: "test", modelID: "test-model" },
+          parts: [{ type: "text", text: "run asynchronously" }],
+        }),
+      })
+
+      expect(response.status).toBe(204)
+      const messages = yield* Session.use.messages({ sessionID: session.id }).pipe(provideInstanceEffect(directory))
+      expect(messages).toContainEqual(expect.objectContaining({ info: expect.objectContaining({ id: messageID }) }))
+      yield* llm.wait(1)
     }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
   )
 

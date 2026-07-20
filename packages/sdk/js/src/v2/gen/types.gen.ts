@@ -2634,6 +2634,7 @@ export type CompactedRangeResponse = {
     markerID: string
     tailStartID?: string
     messageID?: string
+    sourceMessageID?: string
   }
   messages: Array<{
     info: Message

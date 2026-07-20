@@ -1,6 +1,6 @@
 export * as EventV2 from "./event"
 
-import { Cause, Context, Effect, Layer, Option, PubSub, Schema, Stream } from "effect"
+import { Cause, Context, Deferred, Effect, Layer, Option, PubSub, Schema, Stream } from "effect"
 import { and, asc, eq, gt } from "drizzle-orm"
 import { Database } from "./database/database"
 import { EventSequenceTable, EventTable } from "./event/sql"
@@ -186,7 +186,12 @@ export const layerWith = (options?: LayerOptions) =>
       const typed = new Map<string, PubSub.PubSub<Payload>>()
       const projectors = new Map<string, AnyProjector[]>()
       const commitGuards = new Array<CommitGuard>()
-      const listeners = new Array<Listener>()
+      const listeners = new Array<{
+        readonly listener: Listener
+        readonly drained: Deferred.Deferred<void>
+        inFlight: number
+        closed: boolean
+      }>()
       const syncHandlers = new Array<Sync>()
       const { db } = yield* Database.Service
 
@@ -396,11 +401,11 @@ export const layerWith = (options?: LayerOptions) =>
             if (committed) {
               event = { ...event, seq: committed.seq }
               yield* Effect.forEach(syncHandlers, (sync) => observe(event as Payload, "sync", sync), { discard: true })
-              yield* notify(event as Payload, true)
+              yield* notify(event as Payload)
               return event
             }
           }
-          yield* notify(event as Payload, false)
+          yield* notify(event as Payload)
           return event
         })
       }
@@ -416,12 +421,29 @@ export const layerWith = (options?: LayerOptions) =>
           ),
         )
 
-      function notify(event: Payload, isolateListeners: boolean) {
+      function notify(event: Payload) {
         return Effect.gen(function* () {
-          yield* Effect.forEach(
-            listeners,
-            (listener) => (isolateListeners ? observe(event, "listener", listener) : listener(event)),
-            { discard: true },
+          yield* Effect.acquireUseRelease(
+            Effect.sync(() =>
+              listeners.map((entry) => {
+                entry.inFlight++
+                return entry
+              }),
+            ),
+            (selected) =>
+              Effect.forEach(selected, (entry) => observe(event, "listener", entry.listener), { discard: true }),
+            (selected) =>
+              Effect.gen(function* () {
+                const drained = yield* Effect.sync(() => {
+                  const result = new Array<Deferred.Deferred<void>>()
+                  for (const entry of selected) {
+                    entry.inFlight--
+                    if (entry.closed && entry.inFlight === 0) result.push(entry.drained)
+                  }
+                  return result
+                })
+                yield* Effect.forEach(drained, (entry) => Deferred.succeed(entry, undefined), { discard: true })
+              }),
           )
           const pubsub = typed.get(event.type)
           if (pubsub) yield* PubSub.publish(pubsub, event)
@@ -476,7 +498,7 @@ export const layerWith = (options?: LayerOptions) =>
               strictOwner: options?.strictOwner,
             })
             if (committed && options?.publish) {
-              yield* notify({ ...payload, seq: committed.seq }, true)
+              yield* notify({ ...payload, seq: committed.seq })
             }
           }
         })
@@ -630,10 +652,18 @@ export const layerWith = (options?: LayerOptions) =>
 
       const listen = (listener: Listener): Effect.Effect<Unsubscribe> =>
         Effect.sync(() => {
-          listeners.push(listener)
-          return Effect.sync(() => {
-            const index = listeners.indexOf(listener)
-            if (index >= 0) listeners.splice(index, 1)
+          const entry = { listener, drained: Deferred.makeUnsafe<void>(), inFlight: 0, closed: false }
+          listeners.push(entry)
+          return Effect.gen(function* () {
+            const pending = yield* Effect.sync(() => {
+              if (!entry.closed) {
+                entry.closed = true
+                const index = listeners.indexOf(entry)
+                if (index >= 0) listeners.splice(index, 1)
+              }
+              return entry.inFlight > 0
+            })
+            if (pending) yield* Deferred.await(entry.drained)
           })
         })
 

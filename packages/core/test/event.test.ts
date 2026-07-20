@@ -311,7 +311,7 @@ describe("EventV2", () => {
     Effect.gen(function* () {
       const events = yield* EventV2.Service
       const { db } = yield* Database.Service
-      yield* events.listen(() => Effect.interrupt)
+      const unsubscribe = yield* events.listen(() => Effect.interrupt)
 
       const exit = yield* events.publish(SyncMessage, { id: "interrupted", text: "hello" }).pipe(Effect.exit)
       const committed = yield* db
@@ -323,16 +323,70 @@ describe("EventV2", () => {
 
       expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBeTrue()
       expect(committed).toBeDefined()
+      yield* unsubscribe
     }),
   )
 
-  it.effect("keeps live-only listener defects fail-fast", () =>
+  it.effect("isolates live-only listener defects", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service
       const defect = new Error("listener defect")
       yield* events.listen(() => Effect.die(defect))
+      const received = new Array<string>()
+      yield* events.listen((event) =>
+        Effect.sync(() => {
+          received.push(event.type)
+        }),
+      )
 
-      expect(yield* events.publish(Message, { text: "hello" }).pipe(Effect.catchDefect(Effect.succeed))).toBe(defect)
+      yield* events.publish(Message, { text: "hello" })
+
+      expect(received).toEqual([Message.type])
+    }),
+  )
+
+  it.effect("drains listeners selected before unsubscribe completes", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const entered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const received = new Array<string>()
+      yield* events.listen(() => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))))
+      const unsubscribe = yield* events.listen((event) =>
+        Effect.sync(() => {
+          received.push(event.type)
+        }),
+      )
+      const publish = yield* events.publish(Message, { text: "hello" }).pipe(Effect.forkScoped)
+      yield* Deferred.await(entered)
+      const close = yield* unsubscribe.pipe(Effect.forkScoped)
+
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(publish)
+      yield* Fiber.join(close)
+
+      expect(received).toEqual([Message.type])
+    }),
+  )
+
+  it.effect("allows listeners to publish nested events", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const received = new Array<string>()
+      yield* events.listen((event) =>
+        event.type === Message.type && (event.data as { text: string }).text === "outer"
+          ? events.publish(Message, { text: "inner" }).pipe(Effect.asVoid)
+          : Effect.void,
+      )
+      yield* events.listen((event) =>
+        Effect.sync(() => {
+          received.push((event.data as { text: string }).text)
+        }),
+      )
+
+      yield* events.publish(Message, { text: "outer" })
+
+      expect(received).toEqual(["inner", "outer"])
     }),
   )
 

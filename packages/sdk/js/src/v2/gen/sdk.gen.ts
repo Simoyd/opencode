@@ -3963,7 +3963,7 @@ export class Session2 extends HeyApiClient {
   /**
    * Send message
    *
-   * Create and send a new message to a session, streaming the AI response.
+   * Create and send a new message to a session. With noReply=true, return the committed user message without starting model execution.
    */
   public prompt<ThrowOnError extends boolean = false>(
     parameters: {
@@ -4402,7 +4402,7 @@ export class Session2 extends HeyApiClient {
   /**
    * Send async message
    *
-   * Create and send a new message to a session asynchronously, starting the session if needed and returning immediately.
+   * Commit a new user message before returning 204. Unless noReply=true, start or join session execution asynchronously after admission.
    */
   public promptAsync<ThrowOnError extends boolean = false>(
     parameters: {

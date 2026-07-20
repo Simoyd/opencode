@@ -130,6 +130,7 @@ export const CompactedRangeResponse = Schema.Struct({
     markerID: Schema.String,
     tailStartID: Schema.optional(Schema.String),
     messageID: Schema.optional(Schema.String),
+    sourceMessageID: Schema.optional(MessageID),
   }),
   messages: Schema.Array(SessionV1.WithParts),
   complete: Schema.Boolean,
@@ -510,7 +511,8 @@ export const SessionApi = HttpApi.make("session")
           OpenApi.annotations({
             identifier: "session.prompt",
             summary: "Send message",
-            description: "Create and send a new message to a session, streaming the AI response.",
+            description:
+              "Create and send a new message to a session. With noReply=true, return the committed user message without starting model execution.",
           }),
         ),
         HttpApiEndpoint.post("promptAsync", SessionPaths.promptAsync, {
@@ -524,7 +526,7 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.prompt_async",
             summary: "Send async message",
             description:
-              "Create and send a new message to a session asynchronously, starting the session if needed and returning immediately.",
+              "Commit a new user message before returning 204. Unless noReply=true, start or join session execution asynchronously after admission.",
           }),
         ),
         HttpApiEndpoint.post("command", SessionPaths.command, {
