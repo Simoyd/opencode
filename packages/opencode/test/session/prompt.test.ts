@@ -26,7 +26,7 @@ import { Image } from "../../src/image/image"
 import { Question } from "../../src/question"
 import { Todo } from "../../src/session/todo"
 import { Session } from "@/session/session"
-import { SessionMessageTable } from "@opencode-ai/core/session/sql"
+import { SessionMessageTable, TranscriptWindowStateTable } from "@opencode-ai/core/session/sql"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -35,6 +35,7 @@ import { SessionSummary } from "../../src/session/summary"
 import { Instruction } from "../../src/session/instruction"
 import { SessionProcessor } from "../../src/session/processor"
 import { SessionPrompt } from "../../src/session/prompt"
+import { SessionTranscriptIndex } from "../../src/session/transcript-index"
 import { SessionRevert } from "../../src/session/revert"
 import { SessionRunState } from "../../src/session/run-state"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
@@ -440,6 +441,64 @@ const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
   const chat = yield* sessions.create(input ?? { title: "Pinned" })
   return { prompt, run, sessions, chat }
 })
+
+noLLMServer.instance(
+  "prompt completion indexes required transcript state and publishes reconciliation",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, chat } = yield* boot()
+      const { db } = yield* Database.Service
+      const events = yield* EventV2Bridge.Service
+      const reconciled = yield* Deferred.make<SessionID>()
+      const unsubscribe = yield* events.listen((event) => {
+        if (event.type === SessionTranscriptIndex.Event.Reconciled.type)
+          Deferred.doneUnsafe(
+            reconciled,
+            Effect.succeed((event.data as typeof SessionTranscriptIndex.Event.Reconciled.data.Type).sessionID),
+          )
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsubscribe)
+
+      yield* db
+        .insert(TranscriptWindowStateTable)
+        .values({
+          session_id: chat.id,
+          source_generation: crypto.randomUUID(),
+          window_revision: 0,
+          index_status: "index_required",
+        })
+        .onConflictDoUpdate({
+          target: TranscriptWindowStateTable.session_id,
+          set: { index_status: "index_required" },
+        })
+        .run()
+        .pipe(Effect.orDie)
+
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "index after admission" }],
+      })
+
+      expect(
+        yield* awaitWithTimeout(
+          Deferred.await(reconciled),
+          "timed out waiting for session.transcript.reconciled",
+          "2 seconds",
+        ),
+      ).toBe(chat.id)
+      const state = yield* db
+        .select({ status: TranscriptWindowStateTable.index_status })
+        .from(TranscriptWindowStateTable)
+        .where(eq(TranscriptWindowStateTable.session_id, chat.id))
+        .get()
+        .pipe(Effect.orDie)
+      expect(state?.status).toBe("complete")
+    }),
+  { config: cfg },
+)
 
 // Loop semantics
 
