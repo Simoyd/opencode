@@ -7980,6 +7980,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionBusyError"
+                }
+              }
+            }
           }
         },
         "description": "Generate a concise summary of the session using AI compaction to preserve key information.",
@@ -13054,6 +13064,9 @@
             "$ref": "#/components/schemas/EventMcpBrowserOpenFailed"
           },
           {
+            "$ref": "#/components/schemas/EventSessionTranscriptReconciled"
+          },
+          {
             "$ref": "#/components/schemas/EventCommandExecuted"
           },
           {
@@ -17488,6 +17501,32 @@
                   },
                   "type": {
                     "type": "string",
+                    "enum": ["session.transcript.reconciled"]
+                  },
+                  "properties": {
+                    "type": "object",
+                    "properties": {
+                      "sessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      }
+                    },
+                    "required": ["sessionID"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["id", "type", "properties"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^evt_"
+                  },
+                  "type": {
+                    "type": "string",
                     "enum": ["command.executed"]
                   },
                   "properties": {
@@ -20953,6 +20992,12 @@
               "additionalProperties": false
             }
           },
+          "turns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionTurn"
+            }
+          },
           "complete": {
             "type": "boolean"
           },
@@ -20973,7 +21018,7 @@
             "type": "string"
           }
         },
-        "required": ["reference", "messages", "complete", "status"],
+        "required": ["reference", "messages", "turns", "complete", "status"],
         "additionalProperties": false
       },
       "TranscriptArchiveDescriptor": {
@@ -21147,6 +21192,23 @@
         "required": ["status", "sessionID", "archiveDescriptors", "tail", "turns", "counts"],
         "additionalProperties": false
       },
+      "SessionBusyError": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["SessionBusyError"]
+          },
+          "sessionID": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["_tag", "sessionID", "message"],
+        "additionalProperties": false
+      },
       "TextPartInput": {
         "type": "object",
         "properties": {
@@ -21290,23 +21352,6 @@
           }
         },
         "required": ["type", "prompt", "description", "agent"],
-        "additionalProperties": false
-      },
-      "SessionBusyError": {
-        "type": "object",
-        "properties": {
-          "_tag": {
-            "type": "string",
-            "enum": ["SessionBusyError"]
-          },
-          "sessionID": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          }
-        },
-        "required": ["_tag", "sessionID", "message"],
         "additionalProperties": false
       },
       "EventTuiPromptAppend": {
@@ -28457,6 +28502,32 @@
               }
             },
             "required": ["mcpName", "url"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
+        "additionalProperties": false
+      },
+      "EventSessionTranscriptReconciled": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^evt_"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["session.transcript.reconciled"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              }
+            },
+            "required": ["sessionID"],
             "additionalProperties": false
           }
         },

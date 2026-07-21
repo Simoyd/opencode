@@ -133,6 +133,7 @@ export const CompactedRangeResponse = Schema.Struct({
     sourceMessageID: Schema.optional(MessageID),
   }),
   messages: Schema.Array(SessionV1.WithParts),
+  turns: Schema.Array(SessionTurn),
   complete: Schema.Boolean,
   notice: Schema.optional(Schema.String),
   status: Schema.Literals(["complete", "stale", "unavailable", "too_large"]),

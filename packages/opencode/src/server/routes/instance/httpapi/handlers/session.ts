@@ -377,6 +377,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
             ...(ctx.query.source_message_id ? { sourceMessageID: ctx.query.source_message_id } : {}),
           },
           messages: [],
+          turns: [],
           complete: false,
           notice: tooLarge
             ? "Compacted transcript range exceeds the safe recall limit."
@@ -387,6 +388,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
           archiveRevision: ctx.query.archive_revision,
         }
       }
+      const turns = buildSessionTurns(ctx.params.sessionID, result.value.messages).turns
       return {
         reference: {
           markerID: result.value.markerID,
@@ -395,6 +397,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
           sourceMessageID: result.value.sourceMessageID,
         },
         messages: result.value.messages,
+        turns,
         complete: true,
         status: "complete" as const,
         sourceGeneration: result.value.sourceGeneration,

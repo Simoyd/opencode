@@ -74,6 +74,7 @@ export type Event =
   | EventTuiSessionSelect2
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
+  | EventSessionTranscriptReconciled
   | EventCommandExecuted
   | EventProjectDirectoriesUpdated
   | EventProjectUpdated
@@ -1460,6 +1461,13 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.transcript.reconciled"
+        properties: {
+          sessionID: string
+        }
+      }
+    | {
+        id: string
         type: "command.executed"
         properties: {
           name: string
@@ -2640,6 +2648,7 @@ export type CompactedRangeResponse = {
     info: Message
     parts: Array<Part>
   }>
+  turns: Array<SessionTurn>
   complete: boolean
   notice?: string
   status: "complete" | "stale" | "unavailable" | "too_large"
@@ -5069,6 +5078,14 @@ export type EventMcpBrowserOpenFailed = {
   properties: {
     mcpName: string
     url: string
+  }
+}
+
+export type EventSessionTranscriptReconciled = {
+  id: string
+  type: "session.transcript.reconciled"
+  properties: {
+    sessionID: string
   }
 }
 

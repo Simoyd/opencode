@@ -126,6 +126,12 @@ const addUser = Effect.fn("SessionMessagesTest.addUser")(function* (
 type CompactedRangeBody = {
   reference: { markerID: string; tailStartID?: string; messageID?: string; sourceMessageID?: string }
   messages: SessionV1.WithParts[]
+  turns: Array<{
+    startMessageID: string
+    intermediateMessageIDs: string[]
+    finalOutputMessageID?: string
+    status: "complete" | "incomplete"
+  }>
   complete: boolean
   notice?: string
   status: "complete" | "stale" | "unavailable" | "too_large"
@@ -245,6 +251,14 @@ describe("session messages endpoint", () => {
         const range = (yield* recall.json) as CompactedRangeBody
         expect(range.status).toBe("complete")
         expect(range.messages.map((message) => message.info.id)).toEqual([start, work, final])
+        expect(range.turns).toEqual([
+          expect.objectContaining({
+            startMessageID: start,
+            intermediateMessageIDs: [work],
+            finalOutputMessageID: final,
+            status: "complete",
+          }),
+        ])
       }),
     ),
     { git: true },
