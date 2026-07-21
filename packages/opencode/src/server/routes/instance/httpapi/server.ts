@@ -69,12 +69,14 @@ import {
   ptyConnectAuthorizationLayer,
   v2AuthorizationLayer,
 } from "./middleware/authorization"
+import { DiagnosticsApi } from "./groups/diagnostics"
 import { EventApi } from "./groups/event"
 import { PtyConnectApi } from "./groups/pty"
 import { eventHandlers } from "./handlers/event"
 import { configHandlers } from "./handlers/config"
 import { controlHandlers } from "./handlers/control"
 import { controlPlaneHandlers } from "./handlers/control-plane"
+import { diagnosticsHandlers } from "./handlers/diagnostics"
 import { experimentalHandlers } from "./handlers/experimental"
 import { fileHandlers } from "./handlers/file"
 import { globalHandlers } from "./handlers/global"
@@ -101,7 +103,6 @@ import { corsVaryFix } from "./middleware/cors-vary"
 import { errorLayer } from "./middleware/error"
 import { fenceLayer } from "./middleware/fence"
 import { schemaErrorLayer } from "./middleware/schema-error"
-import { StreamDiagnostics } from "@/diagnostic/stream"
 
 export const context = Context.makeUnsafe<unknown>(new Map())
 
@@ -130,15 +131,10 @@ const rootApiRoutes = HttpApiBuilder.layer(RootHttpApi).pipe(
   Layer.provide(schemaErrorLayer),
   Layer.provide(httpApiAuthLayer),
 )
-const diagnosticsRoute = HttpRouter.use((router) =>
-  router.add("GET", "/debug/stream-diagnostics", () =>
-    Effect.succeed(
-      StreamDiagnostics.enabled()
-        ? HttpServerResponse.jsonUnsafe(StreamDiagnostics.snapshot())
-        : HttpServerResponse.empty({ status: 404 }),
-    ),
-  ),
-).pipe(Layer.provide(authOnlyRouterLayer))
+const diagnosticsApiRoutes = HttpApiBuilder.layer(DiagnosticsApi).pipe(
+  Layer.provide(diagnosticsHandlers),
+  Layer.provide([httpApiAuthLayer, schemaErrorLayer]),
+)
 const eventApiRoutes = HttpApiBuilder.layer(EventApi).pipe(
   Layer.provide(eventHandlers),
   Layer.provide([httpApiAuthLayer, workspaceRoutingLive, instanceContextLayer]),
@@ -209,7 +205,7 @@ export function createRoutes(
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
   return Layer.mergeAll(
     rootApiRoutes,
-    diagnosticsRoute,
+    diagnosticsApiRoutes,
     eventApiRoutes,
     ptyConnectApiRoutes,
     instanceRoutes,
