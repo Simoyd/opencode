@@ -36,10 +36,8 @@ type Counts = { messages: number; parts: number; textUnits: number; decodedBytes
 type State = {
   ordinal: number
   latestTailStartID?: MessageID
-  previous?: { summaryMessageID: MessageID; replayMessageIDs: MessageID[] }
   current?: {
     sourceMessageID: MessageID
-    counts: Counts
     markerID?: MessageID
     tailStartID?: MessageID
     auto?: boolean
@@ -77,10 +75,9 @@ const runIndex = Effect.fn("SessionTranscriptIndex.runIndex")(function* (input: 
     })
     if (page.messages.length === 0) break
     for (const message of page.messages) {
-      if (isPrompt(message)) {
+      if (isPrompt(message) && (!state.current || state.current.published)) {
         state.current = {
           sourceMessageID: message.info.id,
-          counts: emptyCounts(),
           replayMessageIDs: [],
           continuationCount: 0,
         }
@@ -93,8 +90,6 @@ const runIndex = Effect.fn("SessionTranscriptIndex.runIndex")(function* (input: 
         current.tailStartID = marker.tail_start_id
         current.auto = marker.auto
         current.overflow = marker.overflow
-      } else if (!current.markerID) {
-        add(current.counts, message)
       }
       if (
         current.markerID &&
@@ -142,15 +137,13 @@ const runIndex = Effect.fn("SessionTranscriptIndex.runIndex")(function* (input: 
         current.summaryPreview &&
         (manualCompactionComplete || continuedCompactionComplete)
       ) {
-        const continuity = state.previous ? [state.previous.summaryMessageID, ...state.previous.replayMessageIDs] : []
         const rangeCounts = yield* countRangeMessages(
           db,
           input.sessionID,
           current.sourceMessageID,
           current.markerID,
         )
-        const continuityCounts = yield* countMessages(db, input.sessionID, continuity)
-        const counts = finalizeCounts(sum(rangeCounts, continuityCounts))
+        const counts = finalizeCounts(rangeCounts)
         if (
           counts.messages > TranscriptWindowProjection.Limits.messages ||
           counts.parts > TranscriptWindowProjection.Limits.parts ||
@@ -174,7 +167,7 @@ const runIndex = Effect.fn("SessionTranscriptIndex.runIndex")(function* (input: 
             range_start_id: current.sourceMessageID,
             range_end_id: current.markerID,
             summary_preview: current.summaryPreview,
-            continuity_message_ids: continuity,
+            continuity_message_ids: [],
             replay_message_ids: current.replayMessageIDs,
             message_count: counts.messages,
             part_count: counts.parts,
@@ -200,10 +193,6 @@ const runIndex = Effect.fn("SessionTranscriptIndex.runIndex")(function* (input: 
           .pipe(Effect.orDie)
         current.published = true
         state.latestTailStartID = manualCompactionComplete ? current.summaryMessageID : current.tailStartID
-        state.previous = {
-          summaryMessageID: current.summaryMessageID,
-          replayMessageIDs: current.replayMessageIDs,
-        }
       }
     }
 
@@ -496,41 +485,6 @@ function loadBatch(
   })
 }
 
-function countMessages(db: Database.Interface["db"], sessionID: SessionID, ids: MessageID[]) {
-  if (ids.length === 0) return Effect.succeed(emptyCounts())
-  return Effect.gen(function* () {
-    const rows = yield* db
-      .select()
-      .from(MessageTable)
-      .where(and(eq(MessageTable.session_id, sessionID), inArray(MessageTable.id, ids)))
-      .orderBy(asc(MessageTable.time_created), asc(MessageTable.id))
-      .all()
-      .pipe(Effect.orDie)
-    const parts = yield* db
-      .select()
-      .from(PartTable)
-      .where(and(eq(PartTable.session_id, sessionID), inArray(PartTable.message_id, ids)))
-      .orderBy(PartTable.message_id, PartTable.id)
-      .all()
-      .pipe(Effect.orDie)
-    const partsByMessage = new Map<MessageID, SessionV1.Part[]>()
-    for (const row of parts) {
-      const part = { ...row.data, id: row.id, sessionID: row.session_id, messageID: row.message_id } as SessionV1.Part
-      const list = partsByMessage.get(row.message_id)
-      if (list) list.push(part)
-      else partsByMessage.set(row.message_id, [part])
-    }
-    const counts = emptyCounts()
-    for (const row of rows) {
-      add(counts, {
-        info: { ...row.data, id: row.id, sessionID: row.session_id } as SessionV1.Info,
-        parts: partsByMessage.get(row.id) ?? [],
-      })
-    }
-    return counts
-  })
-}
-
 function countRangeMessages(
   db: Database.Interface["db"],
   sessionID: SessionID,
@@ -591,15 +545,6 @@ function add(counts: Counts, message: SessionV1.WithParts) {
   counts.parts += wireMessage.parts.length
   counts.textUnits += encoded.length
   counts.decodedBytes += Buffer.byteLength(encoded, "utf8")
-}
-
-function sum(left: Counts, right: Counts): Counts {
-  return {
-    messages: left.messages + right.messages,
-    parts: left.parts + right.parts,
-    textUnits: left.textUnits + right.textUnits,
-    decodedBytes: left.decodedBytes + right.decodedBytes,
-  }
 }
 
 function finalizeCounts(counts: Counts): Counts {

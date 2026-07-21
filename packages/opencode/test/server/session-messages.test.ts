@@ -265,6 +265,73 @@ describe("session messages endpoint", () => {
   )
 
   it.instance(
+    "partitions every turn across repeated manual compaction archives",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        const session = yield* sessionScoped
+
+        const firstPrompt = yield* addUser(session.id, "output pong")
+        const firstFinal = yield* addAssistant(session.id, firstPrompt, "pong", { finish: "end_turn" })
+        const secondPrompt = yield* addUser(session.id, "read a file")
+        const secondWork = yield* addAssistant(session.id, secondPrompt, "reading", { finish: "tool-calls" })
+        const secondFinal = yield* addAssistant(session.id, secondPrompt, "file read", { finish: "end_turn" })
+        const firstMarker = yield* addCompaction(session.id, secondPrompt, { auto: false })
+        yield* addAssistant(session.id, firstMarker, "first summary", { summary: true, finish: "end_turn" })
+
+        const thirdPrompt = yield* addUser(session.id, "output pong")
+        const thirdFinal = yield* addAssistant(session.id, thirdPrompt, "pong", { finish: "end_turn" })
+        const fourthPrompt = yield* addUser(session.id, "output pong again")
+        const fourthFinal = yield* addAssistant(session.id, fourthPrompt, "pong", { finish: "end_turn" })
+        const secondMarker = yield* addCompaction(session.id, fourthPrompt, { auto: false })
+        yield* addAssistant(session.id, secondMarker, "second summary", { summary: true, finish: "end_turn" })
+
+        const response = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
+        const window = (yield* response.json) as {
+          status: string
+          sourceGeneration: string
+          archiveDescriptors: Array<{
+            archiveID: string
+            archiveRevision: string
+            markerID: string
+            tailStartID?: string
+            sourceMessageID: string
+          }>
+        }
+
+        expect(window.status).toBe("complete")
+        expect(window.archiveDescriptors).toHaveLength(2)
+        expect(window.archiveDescriptors.map((descriptor) => descriptor.sourceMessageID)).toEqual([
+          firstPrompt,
+          thirdPrompt,
+        ])
+
+        const expected = [
+          [firstPrompt, firstFinal, secondPrompt, secondWork, secondFinal],
+          [thirdPrompt, thirdFinal, fourthPrompt, fourthFinal],
+        ]
+        for (const [index, marker] of [firstMarker, secondMarker].entries()) {
+          const descriptor = window.archiveDescriptors[index]!
+          const tail = descriptor.tailStartID
+            ? `&tail_start_id=${encodeURIComponent(descriptor.tailStartID)}`
+            : ""
+          const recall = yield* requestInDirectory(
+            `/session/${session.id}/compacted_range?marker=${encodeURIComponent(marker)}${tail}&message_id=${encodeURIComponent(marker)}&source_generation=${encodeURIComponent(window.sourceGeneration)}&archive_id=${encodeURIComponent(descriptor.archiveID)}&archive_revision=${encodeURIComponent(descriptor.archiveRevision)}&source_message_id=${encodeURIComponent(descriptor.sourceMessageID)}`,
+            tmp.directory,
+          )
+          const range = (yield* recall.json) as CompactedRangeBody
+          expect(range.status).toBe("complete")
+          expect(range.messages.map((message) => message.info.id)).toEqual(expected[index])
+          expect(range.turns.map((turn) => turn.startMessageID)).toEqual(
+            index === 0 ? [firstPrompt, secondPrompt] : [thirdPrompt, fourthPrompt],
+          )
+        }
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
     "declares exact empty transcript window body counts",
     withoutWatcher(
       Effect.gen(function* () {
@@ -609,13 +676,13 @@ describe("session messages endpoint", () => {
           sourceMessageID: start3,
         })
         expect(body.complete).toBe(true)
-        expect(ids).toContain(summary2)
-        expect(ids).toContain(replay2)
         expect(ids).toContain(start3)
         expect(ids).toContain(pre3)
         expect(ids).not.toContain(start1)
         expect(ids).not.toContain(start2)
         expect(ids).not.toContain(replay1)
+        expect(ids).not.toContain(summary2)
+        expect(ids).not.toContain(replay2)
         expect(ids).not.toContain(replay3)
 
         const windowResponse = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
@@ -853,7 +920,7 @@ describe("session messages endpoint", () => {
   )
 
   it.instance(
-    "excludes synthetic continue prompts from compacted range continuity",
+    "keeps prior compaction protocol rows out of the next archive",
     withoutWatcher(
       Effect.gen(function* () {
         const tmp = yield* TestInstance
@@ -886,9 +953,9 @@ describe("session messages endpoint", () => {
         const ids = body.messages.map((message) => message.info.id)
 
         expect(body.complete).toBe(true)
-        expect(ids).toContain(summary1)
-        expect(ids).toContain(replay1)
         expect(ids).toContain(start2)
+        expect(ids).not.toContain(summary1)
+        expect(ids).not.toContain(replay1)
         expect(ids).not.toContain(synthetic1)
         expect(ids).not.toContain(start1)
         expect(ids).not.toContain(replay2)
