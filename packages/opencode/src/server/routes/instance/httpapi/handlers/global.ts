@@ -3,6 +3,7 @@ import { GlobalBus, type GlobalEvent as GlobalBusEvent } from "@/bus/global"
 import { EffectBridge } from "@/effect/bridge"
 import { EventV2 } from "@opencode-ai/core/event"
 import { StreamDiagnostics } from "@/diagnostic/stream"
+import { CompactionDiagnostics } from "@/diagnostic/compaction"
 import { Installation } from "@/installation"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -18,6 +19,7 @@ import { GlobalUpgradeInput } from "../groups/global"
 const log = Log.create({ service: "server" })
 
 function eventData(data: unknown): Sse.Event {
+  CompactionDiagnostics.recordPayload(data, "route.global", "write")
   StreamDiagnostics.record({
     stage: "route.global",
     action: "write",
@@ -48,7 +50,11 @@ export function globalEventStream(beforeConnected: Effect.Effect<void> = Effect.
     // Register eagerly so an event published after request admission cannot be
     // lost while the response body starts or emits server.connected.
     const queue = yield* Queue.unbounded<GlobalBusEvent>()
-    const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
+    const handler = (event: GlobalBusEvent) => {
+      const offered = Queue.offerUnsafe(queue, event)
+      CompactionDiagnostics.recordPayload(event, "route.global", "enqueue", { offered })
+      return offered
+    }
     GlobalBus.on("event", handler)
     yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", handler)))
     const events = Stream.fromQueue(queue)
@@ -91,7 +97,8 @@ export function globalEventStream(beforeConnected: Effect.Effect<void> = Effect.
       Stream.concat(
         events.pipe(
           Stream.tap((event) =>
-            Effect.sync(() =>
+            Effect.sync(() => {
+              CompactionDiagnostics.recordPayload(event, "route.global", "dequeue")
               StreamDiagnostics.record({
                 stage: "route.global",
                 action: "queue",
@@ -100,8 +107,8 @@ export function globalEventStream(beforeConnected: Effect.Effect<void> = Effect.
                 routeMode: "global",
                 shape: StreamDiagnostics.shape(event),
                 correlation: StreamDiagnostics.correlationForPayload(event),
-              }),
-            ),
+              })
+            }),
           ),
           Stream.merge(heartbeat, { haltStrategy: "left" }),
         ),

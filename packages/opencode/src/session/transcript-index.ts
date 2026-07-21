@@ -17,6 +17,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { and, asc, eq, gt, inArray, or, sql } from "drizzle-orm"
 import { Cause, Effect, Exit } from "effect"
 import { MessageID, SessionID } from "./schema"
+import { CompactionDiagnostics } from "@/diagnostic/compaction"
 
 export const Event = {
   Reconciled: EventV2.define({
@@ -327,9 +328,27 @@ export const run = Effect.fn("SessionTranscriptIndex.run")(function* (input: {
   maxBatches?: number
 }) {
   const { db } = yield* Database.Service
+  CompactionDiagnostics.recordSession(input.sessionID, "transcript.index", "started", {
+    facts: { bounded: input.maxBatches !== undefined },
+  })
   return yield* runIndex(input).pipe(
+    Effect.tap((result) =>
+      Effect.sync(() =>
+        CompactionDiagnostics.recordSession(input.sessionID, "transcript.index", "completed", {
+          facts: {
+            complete: result.complete,
+            descriptors: result.descriptors,
+            resumed: result.resumed,
+          },
+        }),
+      ),
+    ),
     Effect.onExit((exit) =>
-      Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause) ? markIndexFailed(db, input) : Effect.void,
+      Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)
+        ? Effect.sync(() =>
+            CompactionDiagnostics.recordSession(input.sessionID, "transcript.index", "failed"),
+          ).pipe(Effect.andThen(markIndexFailed(db, input)))
+        : Effect.void,
     ),
   )
 })

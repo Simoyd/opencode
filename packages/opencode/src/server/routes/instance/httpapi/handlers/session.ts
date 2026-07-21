@@ -18,6 +18,7 @@ import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
 import { StreamDiagnostics } from "@/diagnostic/stream"
+import { CompactionDiagnostics } from "@/diagnostic/compaction"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Cause, Deferred, Effect, Option, Schema, Scope } from "effect"
 import * as Stream from "effect/Stream"
@@ -431,6 +432,17 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         }).pipe(Effect.catch(() => Effect.void))
         window = yield* load()
       }
+      const activeActionToken = CompactionDiagnostics.activeToken(ctx.params.sessionID)
+      CompactionDiagnostics.recordSession(ctx.params.sessionID, "transcript.window", "loaded", {
+        facts: {
+          status: window.status,
+          descriptors: window.counts.descriptors,
+          messages: window.counts.messages,
+          ...("windowRevision" in window && window.windowRevision && activeActionToken
+            ? { revisionToken: CompactionDiagnostics.opaque(activeActionToken, "revision", window.windowRevision)! }
+            : {}),
+        },
+      })
       const turns = window.status === "complete" ? buildSessionTurns(ctx.params.sessionID, window.tail).turns : []
       const transportTurns = Schema.encodeSync(Schema.Array(SessionTurn))(turns)
       const turnEncoded = JSON.stringify(transportTurns)
@@ -613,14 +625,32 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof SummarizePayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const actionToken = CompactionDiagnostics.tokenFromHeader(
+        request.headers["x-opencode-avalonia-stream-diagnostic"],
+      )
+      if (actionToken) {
+        CompactionDiagnostics.begin(ctx.params.sessionID, actionToken)
+        StreamDiagnostics.bindCorrelation(ctx.params.sessionID, actionToken)
+        CompactionDiagnostics.recordSession(ctx.params.sessionID, "summarize.route", "accepted", {
+          facts: { auto: ctx.payload.auto },
+        })
+      }
       yield* SessionError.mapBusy(
         promptSvc.summarize({
           sessionID: ctx.params.sessionID,
           providerID: ctx.payload.providerID,
           modelID: ctx.payload.modelID,
           auto: ctx.payload.auto,
-        }),
+        }).pipe(
+          Effect.tapError(() =>
+            Effect.sync(() =>
+              CompactionDiagnostics.recordSession(ctx.params.sessionID, "summarize.route", "failed"),
+            ),
+          ),
+        ),
       )
+      CompactionDiagnostics.recordSession(ctx.params.sessionID, "summarize.route", "returned")
       return true
     })
 

@@ -10,6 +10,7 @@ import "@opencode-ai/core/account"
 import "@opencode-ai/core/catalog"
 import "@opencode-ai/core/session/event"
 import { Context, Effect, Layer } from "effect"
+import { CompactionDiagnostics } from "@/diagnostic/compaction"
 
 export class Service extends Context.Service<Service, EventV2.Interface>()("@opencode/EventV2Bridge") {}
 
@@ -36,14 +37,17 @@ export const layer = Layer.effect(
 
     const unsubscribe = yield* events.listen((event) =>
       Effect.gen(function* () {
+        CompactionDiagnostics.recordPayload(event, "event.v2", "published")
         const ctx = yield* InstanceRef
         const workspaceID = (yield* WorkspaceRef) ?? event.location?.workspaceID
-        GlobalBus.emit("event", {
+        const bridged = {
           directory: event.location?.directory ?? ctx?.directory,
           project: ctx?.project.id,
           workspace: workspaceID,
           payload: { id: event.id, type: event.type, properties: event.data },
-        })
+        }
+        CompactionDiagnostics.recordPayload(bridged, "event.v2", "bridge-global")
+        GlobalBus.emit("event", bridged)
         const sync = EventV2.registry.get(event.type)?.sync
         if (sync === undefined || event.seq === undefined || event.version === undefined) return
         const aggregateID = (event.data as Record<string, unknown>)[sync.aggregate]

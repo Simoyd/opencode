@@ -12,7 +12,7 @@ import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
 
-import { Effect, Layer, Context } from "effect"
+import { Effect, Exit, Layer, Context } from "effect"
 import * as DateTime from "effect/DateTime"
 import { InstanceState } from "@/effect/instance-state"
 import { isOverflow as overflow, usable } from "./overflow"
@@ -26,6 +26,7 @@ import { SessionMessage } from "@opencode-ai/core/session/message"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { EventV2 } from "@opencode-ai/core/event"
+import { CompactionDiagnostics } from "@/diagnostic/compaction"
 
 const log = Log.create({ service: "session.compaction" })
 
@@ -354,6 +355,9 @@ export const layer = Layer.effect(
       auto: boolean
       overflow?: boolean
     }) {
+      CompactionDiagnostics.recordSession(input.sessionID, "compaction.process", "started", {
+        facts: { auto: input.auto, overflow: input.overflow === true },
+      })
       const parent = input.messages.findLast((m) => m.info.id === input.parentID)
       if (!parent || parent.info.role !== "user") {
         throw new Error(`Compaction parent must be a user message: ${input.parentID}`)
@@ -470,6 +474,9 @@ export const layer = Layer.effect(
         }).toObject()
         processor.message.finish = "error"
         yield* session.updateMessage(processor.message)
+        CompactionDiagnostics.recordSession(input.sessionID, "compaction.process", "stopped", {
+          facts: { reason: "context-overflow" },
+        })
         return "stop"
       }
 
@@ -574,7 +581,12 @@ export const layer = Layer.effect(
         }
       }
 
-      if (processor.message.error) return "stop"
+      if (processor.message.error) {
+        CompactionDiagnostics.recordSession(input.sessionID, "compaction.process", "stopped", {
+          facts: { reason: "processor-error" },
+        })
+        return "stop"
+      }
       if (result === "continue") {
         const summary = summaryText(
           (yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)).find(
@@ -592,8 +604,14 @@ export const layer = Layer.effect(
             include: selected.tail_start_id,
           })
         }
+        CompactionDiagnostics.recordSession(input.sessionID, "compaction.process", "publish-compacted", {
+          eventType: Event.Compacted.type,
+        })
         yield* events.publish(Event.Compacted, { sessionID: input.sessionID })
       }
+      CompactionDiagnostics.recordSession(input.sessionID, "compaction.process", "completed", {
+        facts: { result },
+      })
       return result
     })
 
@@ -604,6 +622,9 @@ export const layer = Layer.effect(
       auto: boolean
       overflow?: boolean
     }) {
+      CompactionDiagnostics.recordSession(input.sessionID, "compaction.create", "started", {
+        facts: { auto: input.auto, overflow: input.overflow === true },
+      })
       const msg = yield* session.updateMessage({
         id: MessageID.ascending(),
         role: "user",
@@ -628,6 +649,7 @@ export const layer = Layer.effect(
           reason: input.auto ? "auto" : "manual",
         })
       }
+      CompactionDiagnostics.recordSession(input.sessionID, "compaction.create", "completed")
     })
 
     return Service.of({
@@ -638,7 +660,15 @@ export const layer = Layer.effect(
         SessionMaintenance.withAdmission(
           db,
           { sessionID: input.sessionID, kind: "compaction-process" },
-          processCompaction(input),
+          processCompaction(input).pipe(
+            Effect.onExit((exit) =>
+              Exit.isFailure(exit)
+                ? Effect.sync(() =>
+                    CompactionDiagnostics.recordSession(input.sessionID, "compaction.process", "failed"),
+                  )
+                : Effect.void,
+            ),
+          ),
         ),
       create: (input) =>
         SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "compaction-create" }, create(input)),
