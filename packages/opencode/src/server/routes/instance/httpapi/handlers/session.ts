@@ -633,7 +633,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         CompactionDiagnostics.begin(ctx.params.sessionID, actionToken)
         StreamDiagnostics.bindCorrelation(ctx.params.sessionID, actionToken)
         CompactionDiagnostics.recordSession(ctx.params.sessionID, "summarize.route", "accepted", {
-          facts: { auto: ctx.payload.auto },
+          facts: { auto: ctx.payload.auto ?? false },
         })
       }
       yield* SessionError.mapBusy(
