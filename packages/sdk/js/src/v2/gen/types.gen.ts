@@ -2648,6 +2648,10 @@ export type CompactedRangeResponse = {
     info: Message
     parts: Array<Part>
   }>
+  precedingSummary?: {
+    info: Message
+    parts: Array<Part>
+  }
   turns: Array<SessionTurn>
   complete: boolean
   notice?: string
@@ -2663,6 +2667,7 @@ export type TranscriptArchiveDescriptor = {
   markerID: string
   tailStartID?: string
   sourceMessageID: string
+  summaryMessageID: string
   summaryPreview: string
   messageCount: number
   partCount: number

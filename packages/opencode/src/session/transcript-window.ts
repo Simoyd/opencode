@@ -101,6 +101,7 @@ export const loadWindow = Effect.fn("SessionTranscriptWindow.loadWindow")(functi
         markerID: row.marker_id,
         tailStartID: row.tail_start_id ?? undefined,
         sourceMessageID: row.source_message_id,
+        summaryMessageID: row.summary_message_id,
         summaryPreview: row.summary_preview,
         messageCount: row.message_count,
         partCount: row.part_count,
@@ -193,6 +194,28 @@ export const loadArchive = Effect.fn("SessionTranscriptWindow.loadArchive")(func
         endID: row.range_end_id,
         continuityIDs: row.continuity_message_ids,
       })
+      const precedingSummary = yield* Effect.gen(function* () {
+        if (row.ordinal === 0) return undefined
+        const preceding = yield* db
+          .select({ summaryMessageID: CompactionArchiveManifestTable.summary_message_id })
+          .from(CompactionArchiveManifestTable)
+          .where(
+            and(
+              eq(CompactionArchiveManifestTable.session_id, input.sessionID),
+              eq(CompactionArchiveManifestTable.ordinal, row.ordinal - 1),
+            ),
+          )
+          .get()
+          .pipe(Effect.orDie)
+        if (!preceding) return yield* Effect.fail(new Stale())
+        const summaries = yield* loadRange(db, {
+          sessionID: input.sessionID,
+          continuityIDs: [preceding.summaryMessageID],
+        })
+        if (summaries.length !== 1 || summaries[0]?.info.id !== preceding.summaryMessageID)
+          return yield* Effect.fail(new Stale())
+        return summaries[0]
+      })
       const encoded = JSON.stringify(messages)
       const partCount = messages.reduce((count, message) => count + message.parts.length, 0)
       if (
@@ -210,6 +233,7 @@ export const loadArchive = Effect.fn("SessionTranscriptWindow.loadArchive")(func
         markerID: row.marker_id,
         tailStartID: row.tail_start_id ?? undefined,
         sourceMessageID: row.source_message_id,
+        precedingSummary,
         messages,
       }
     }),
@@ -236,7 +260,9 @@ function loadRange(
     if ((input.startID && !start) || (input.endID && !end)) return yield* Effect.fail(new Stale())
     const range = start
       ? TranscriptWindowProjection.orderedRange(input.sessionID, start, end)
-      : eq(MessageTable.session_id, input.sessionID)
+      : input.continuityIDs?.length
+        ? undefined
+        : eq(MessageTable.session_id, input.sessionID)
     const continuity = input.continuityIDs?.length
       ? and(eq(MessageTable.session_id, input.sessionID), inArray(MessageTable.id, input.continuityIDs))
       : undefined
@@ -247,7 +273,7 @@ function loadRange(
         bytes: sql<number>`length(cast(${MessageTable.data} as blob))`,
       })
       .from(MessageTable)
-      .where(continuity ? or(range, continuity) : range)
+      .where(range && continuity ? or(range, continuity) : (range ?? continuity)!)
       .orderBy(asc(MessageTable.time_created), asc(MessageTable.id))
       .limit(TranscriptWindowProjection.Limits.messages + 1)
       .all()

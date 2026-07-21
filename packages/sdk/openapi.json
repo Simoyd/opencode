@@ -20992,6 +20992,22 @@
               "additionalProperties": false
             }
           },
+          "precedingSummary": {
+            "type": "object",
+            "properties": {
+              "info": {
+                "$ref": "#/components/schemas/Message"
+              },
+              "parts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Part"
+                }
+              }
+            },
+            "required": ["info", "parts"],
+            "additionalProperties": false
+          },
           "turns": {
             "type": "array",
             "items": {
@@ -21042,6 +21058,10 @@
             "type": "string",
             "pattern": "^msg"
           },
+          "summaryMessageID": {
+            "type": "string",
+            "pattern": "^msg"
+          },
           "summaryPreview": {
             "type": "string"
           },
@@ -21067,6 +21087,7 @@
           "archiveRevision",
           "markerID",
           "sourceMessageID",
+          "summaryMessageID",
           "summaryPreview",
           "messageCount",
           "partCount",

@@ -126,6 +126,7 @@ const addUser = Effect.fn("SessionMessagesTest.addUser")(function* (
 type CompactedRangeBody = {
   reference: { markerID: string; tailStartID?: string; messageID?: string; sourceMessageID?: string }
   messages: SessionV1.WithParts[]
+  precedingSummary?: SessionV1.WithParts
   turns: Array<{
     startMessageID: string
     intermediateMessageIDs: string[]
@@ -141,7 +142,7 @@ const addAssistant = Effect.fn("SessionMessagesTest.addAssistant")(function* (
   sessionID: SessionID,
   parentID: MessageID,
   text: string,
-  opts?: { summary?: boolean; finish?: string; id?: MessageID; created?: number },
+  opts?: { summary?: boolean; finish?: string; id?: MessageID; created?: number; reasoning?: string },
 ) {
   const session = yield* SessionNs.Service
   const id = opts?.id ?? MessageID.ascending()
@@ -161,6 +162,16 @@ const addAssistant = Effect.fn("SessionMessagesTest.addAssistant")(function* (
     summary: opts?.summary,
     finish: opts?.finish,
   } as unknown as SessionV1.Info)
+  if (opts?.reasoning) {
+    yield* session.updatePart({
+      id: PartID.ascending(),
+      sessionID,
+      messageID: id,
+      type: "reasoning",
+      text: opts.reasoning,
+      time: { start: Date.now(), end: Date.now() },
+    })
+  }
   yield* session.updatePart({
     id: PartID.ascending(),
     sessionID,
@@ -277,14 +288,21 @@ describe("session messages endpoint", () => {
         const secondWork = yield* addAssistant(session.id, secondPrompt, "reading", { finish: "tool-calls" })
         const secondFinal = yield* addAssistant(session.id, secondPrompt, "file read", { finish: "end_turn" })
         const firstMarker = yield* addCompaction(session.id, secondPrompt, { auto: false })
-        yield* addAssistant(session.id, firstMarker, "first summary", { summary: true, finish: "end_turn" })
+        const firstSummary = yield* addAssistant(session.id, firstMarker, "# Goal\n\n- Preserve **Markdown**", {
+          summary: true,
+          finish: "end_turn",
+          reasoning: "Updating the compaction summary",
+        })
 
         const thirdPrompt = yield* addUser(session.id, "output pong")
         const thirdFinal = yield* addAssistant(session.id, thirdPrompt, "pong", { finish: "end_turn" })
         const fourthPrompt = yield* addUser(session.id, "output pong again")
         const fourthFinal = yield* addAssistant(session.id, fourthPrompt, "pong", { finish: "end_turn" })
         const secondMarker = yield* addCompaction(session.id, fourthPrompt, { auto: false })
-        yield* addAssistant(session.id, secondMarker, "second summary", { summary: true, finish: "end_turn" })
+        const secondSummary = yield* addAssistant(session.id, secondMarker, "second summary", {
+          summary: true,
+          finish: "end_turn",
+        })
 
         const response = yield* requestInDirectory(`/session/${session.id}/transcript_window`, tmp.directory)
         const window = (yield* response.json) as {
@@ -296,6 +314,7 @@ describe("session messages endpoint", () => {
             markerID: string
             tailStartID?: string
             sourceMessageID: string
+            summaryMessageID: string
           }>
         }
 
@@ -304,6 +323,10 @@ describe("session messages endpoint", () => {
         expect(window.archiveDescriptors.map((descriptor) => descriptor.sourceMessageID)).toEqual([
           firstPrompt,
           thirdPrompt,
+        ])
+        expect(window.archiveDescriptors.map((descriptor) => descriptor.summaryMessageID)).toEqual([
+          firstSummary,
+          secondSummary,
         ])
 
         const expected = [
@@ -322,6 +345,15 @@ describe("session messages endpoint", () => {
           const range = (yield* recall.json) as CompactedRangeBody
           expect(range.status).toBe("complete")
           expect(range.messages.map((message) => message.info.id)).toEqual(expected[index])
+          if (index === 0) {
+            expect(range.precedingSummary).toBeUndefined()
+          } else {
+            expect(range.precedingSummary?.info.id).toBe(firstSummary)
+            expect(range.precedingSummary?.parts.map((part) => part.type)).toEqual(["reasoning", "text"])
+            expect(range.precedingSummary?.parts.find((part) => part.type === "text")?.text).toBe(
+              "# Goal\n\n- Preserve **Markdown**",
+            )
+          }
           expect(range.turns.map((turn) => turn.startMessageID)).toEqual(
             index === 0 ? [firstPrompt, secondPrompt] : [thirdPrompt, fourthPrompt],
           )
