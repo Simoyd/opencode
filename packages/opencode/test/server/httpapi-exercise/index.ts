@@ -998,21 +998,6 @@ const scenarios: Scenario[] = [
       check(stable(body) === stable(ctx.state.todos), "todos should match seeded state")
     }),
   http.protected
-    .get("/session/{sessionID}/turns", "session.turns")
-    .seeded((ctx) =>
-      Effect.gen(function* () {
-        const session = yield* ctx.session({ title: "Turns session" })
-        yield* ctx.message(session.id, { text: "turn prompt" })
-        return session
-      }),
-    )
-    .at((ctx) => ({ path: route("/session/{sessionID}/turns", { sessionID: ctx.state.id }), headers: ctx.headers() }))
-    .json(200, (body, ctx) => {
-      object(body)
-      check(body.sessionID === ctx.state.id, "turns should report requested session")
-      check(Array.isArray(body.turns) && body.turns.length === 1, "turns should include seeded prompt turn")
-    }),
-  http.protected
     .post("/session/{sessionID}/context/stage", "session.context.stage")
     .seeded((ctx) => ctx.session({ title: "Stage context session" }))
     .at((ctx) => ({

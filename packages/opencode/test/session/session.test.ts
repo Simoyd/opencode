@@ -16,6 +16,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { BackgroundJob } from "@/background/job"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { GlobalBus } from "@/bus/global"
+import { CompactionCatalog } from "@/session/compaction-catalog"
 
 void Log.init({ print: false })
 
@@ -125,6 +126,86 @@ describe("session.created event", () => {
         data: { sessionID: info.id },
       })
 
+      yield* session.remove(info.id)
+    }),
+  )
+})
+
+describe("compaction catalog invalidation", () => {
+  it.instance("publishes only after the completed region metadata commits", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const info = yield* session.create({})
+      const received = yield* Deferred.make<SessionID>()
+      const unsubscribe = yield* events.listen((event) => {
+        if (event.type === CompactionCatalog.Event.Changed.type) {
+          Deferred.doneUnsafe(received, Effect.succeed((event.data as { sessionID: SessionID }).sessionID))
+        }
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsubscribe)
+
+      const prompt = MessageID.ascending()
+      yield* session.updateMessage({
+        id: prompt,
+        sessionID: info.id,
+        role: "user",
+        time: { created: Date.now() },
+        agent: "test",
+        model: { providerID: "test", modelID: "test" },
+        tools: {},
+      } as unknown as SessionV1.Info)
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID: info.id,
+        messageID: prompt,
+        type: "text",
+        text: "prompt",
+      })
+      const marker = MessageID.ascending()
+      yield* session.updateMessage({
+        id: marker,
+        sessionID: info.id,
+        role: "user",
+        time: { created: Date.now() + 1 },
+        agent: "test",
+        model: { providerID: "test", modelID: "test" },
+        tools: {},
+      } as unknown as SessionV1.Info)
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID: info.id,
+        messageID: marker,
+        type: "compaction",
+        auto: false,
+      } as SessionV1.Part)
+      const summary = MessageID.ascending()
+      yield* session.updateMessage({
+        id: summary,
+        sessionID: info.id,
+        role: "assistant",
+        parentID: marker,
+        summary: true,
+        finish: "end_turn",
+        time: { created: Date.now() + 2 },
+        modelID: "test",
+        providerID: "test",
+        agent: "test",
+        mode: "",
+        path: { cwd: "/", root: "/" },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      } as unknown as SessionV1.Info)
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID: info.id,
+        messageID: summary,
+        type: "text",
+        text: "summary",
+      })
+
+      expect(yield* awaitDeferred(received, "timed out waiting for catalog invalidation")).toBe(info.id)
       yield* session.remove(info.id)
     }),
   )

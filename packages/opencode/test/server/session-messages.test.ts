@@ -340,4 +340,81 @@ describe("session messages and compaction catalog", () => {
     ),
     { git: true },
   )
+
+  it.instance(
+    "paginates every completed region in fixed pages of 50",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const session = yield* sessionScoped
+        const markers: MessageID[] = []
+        for (let index = 0; index < 51; index++) {
+          const prompt = yield* addUser(session.id, `prompt ${index}`)
+          yield* addAssistant(session.id, prompt, `answer ${index}`, { finish: "end_turn" })
+          const marker = yield* addCompaction(session.id, prompt, { auto: false })
+          yield* addAssistant(session.id, marker, `summary ${index}`, { summary: true, finish: "end_turn" })
+          markers.push(marker)
+        }
+
+        const firstResponse = yield* request(`/session/${session.id}/compaction`)
+        const first = yield* json<{ items: Array<{ markerID: MessageID }>; nextCursor?: string }>(firstResponse)
+        expect(first.items).toHaveLength(50)
+        expect(first.items.map((item) => item.markerID)).toEqual(markers.slice(0, 50))
+        expect(first.nextCursor).toBeTruthy()
+
+        const secondResponse = yield* request(
+          `/session/${session.id}/compaction?cursor=${encodeURIComponent(first.nextCursor!)}`,
+        )
+        const second = yield* json<{
+          items: Array<{ markerID: MessageID; precedingSummaryMessageID?: MessageID }>
+          nextCursor?: string
+        }>(secondResponse)
+        expect(second.items).toHaveLength(1)
+        expect(second.items[0]!.markerID).toBe(markers[50])
+        expect(second.items[0]!.precedingSummaryMessageID).toBeTruthy()
+        expect(second.nextCursor).toBeUndefined()
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
+    "stores normalized previews at and above the 80-code-unit boundary",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const session = yield* sessionScoped
+        const exactPrompt = yield* addUser(session.id, "exact preview")
+        const exactMarker = yield* addCompaction(session.id, exactPrompt, { auto: false })
+        yield* addAssistant(session.id, exactMarker, "x".repeat(80), { summary: true, finish: "end_turn" })
+        const longPrompt = yield* addUser(session.id, "long preview")
+        const longMarker = yield* addCompaction(session.id, longPrompt, { auto: false })
+        yield* addAssistant(session.id, longMarker, `  ${"y".repeat(81)}  `, { summary: true, finish: "end_turn" })
+
+        const response = yield* request(`/session/${session.id}/compaction`)
+        const page = yield* json<{ items: Array<{ summaryPreview: string }> }>(response)
+        expect(page.items.map((item) => item.summaryPreview)).toEqual(["x".repeat(80), `${"y".repeat(77)}...`])
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
+    "retires metadata when its canonical summary is removed",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const session = yield* sessionScoped
+        const prompt = yield* addUser(session.id, "retire region")
+        const marker = yield* addCompaction(session.id, prompt, { auto: false })
+        const summary = yield* addAssistant(session.id, marker, "summary", { summary: true, finish: "end_turn" })
+        const before = yield* request(`/session/${session.id}/compaction`).pipe(Effect.flatMap(json<{ items: unknown[] }>))
+        expect(before.items).toHaveLength(1)
+
+        const service = yield* SessionNs.Service
+        yield* service.removeMessage({ sessionID: session.id, messageID: summary })
+
+        const after = yield* request(`/session/${session.id}/compaction`).pipe(Effect.flatMap(json<{ items: unknown[] }>))
+        expect(after.items).toEqual([])
+      }),
+    ),
+    { git: true },
+  )
 })
