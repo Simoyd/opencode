@@ -1062,17 +1062,6 @@ const scenarios: Scenario[] = [
     }))
     .status(204),
   http.protected
-    .get("/session/{sessionID}/compacted_range", "session.compactedRange")
-    .seeded((ctx) => ctx.session({ title: "Compacted range session" }))
-    .at((ctx) => ({
-      path: `${route("/session/{sessionID}/compacted_range", { sessionID: ctx.state.id })}?marker=msg_missing`,
-      headers: ctx.headers(),
-    }))
-    .json(200, (body) => {
-      object(body)
-      check(body.complete === false, "missing compaction marker should return incomplete range")
-    }),
-  http.protected
     .get("/session/{sessionID}/diff", "session.diff")
     .seeded((ctx) => ctx.session({ title: "Diff session" }))
     .at((ctx) => ({ path: route("/session/{sessionID}/diff", { sessionID: ctx.state.id }), headers: ctx.headers() }))

@@ -46,103 +46,27 @@ export const MessagesQuery = Schema.Struct({
   limit: Schema.optional(Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
   before: Schema.optional(Schema.String),
 })
-export const CompactedRangeQuery = Schema.Struct({
+export const CompactionCatalogQuery = Schema.Struct({
   ...WorkspaceRoutingQueryFields,
-  marker: MessageID,
-  tail_start_id: Schema.optional(MessageID),
-  message_id: Schema.optional(MessageID),
-  source_generation: Schema.optional(Schema.String),
-  archive_id: Schema.optional(Schema.String),
-  archive_revision: Schema.optional(Schema.String),
-  source_message_id: Schema.optional(MessageID),
+  cursor: Schema.optional(Schema.String),
 })
-export const TranscriptWindowStatus = Schema.Literals([
-  "complete",
-  "index_required",
-  "indexing",
-  "index_failed",
-  "stale",
-  "revert_unrepresentable",
-  "too_large",
-])
-export const TranscriptWindowCounts = Schema.Struct({
-  descriptors: NonNegativeInt,
-  messages: NonNegativeInt,
-  parts: NonNegativeInt,
-  textUnits: NonNegativeInt,
-  decodedBytes: NonNegativeInt,
-  turns: NonNegativeInt,
-  turnIdentities: NonNegativeInt,
-  turnTextUnits: NonNegativeInt,
-  turnDecodedBytes: NonNegativeInt,
-})
-export const TranscriptArchiveDescriptor = Schema.Struct({
-  archiveID: Schema.String,
-  archiveRevision: Schema.String,
-  markerID: MessageID,
-  tailStartID: Schema.optional(MessageID),
-  sourceMessageID: MessageID,
-  summaryMessageID: MessageID,
-  summaryPreview: Schema.String,
-  messageCount: NonNegativeInt,
-  partCount: NonNegativeInt,
-  textUnits: NonNegativeInt,
-  decodedBytes: NonNegativeInt,
-}).annotate({ identifier: "TranscriptArchiveDescriptor" })
-export const StatusMap = Schema.Record(Schema.String, SessionStatus.Info)
-export const SessionTurnCompaction = Schema.Struct({
-  compactionMessageID: MessageID,
-  summaryMessageID: MessageID,
-  summaryPreview: Schema.String,
-  preCompactionMessageIDs: Schema.Array(MessageID),
-  postCompactionMessageIDs: Schema.Array(MessageID),
-  syntheticPromptMessageIDs: Schema.Array(MessageID),
-  replayPromptMessageIDs: Schema.Array(MessageID),
-  recallMarkerID: Schema.optional(MessageID),
-  recallTailStartMessageID: Schema.optional(MessageID),
-}).annotate({ identifier: "SessionTurnCompaction" })
-export const SessionTurn = Schema.Struct({
-  id: Schema.String,
+export const CompactionRegionDescriptor = Schema.Struct({
   startMessageID: MessageID,
-  messageIDs: Schema.Array(MessageID),
-  intermediateMessageIDs: Schema.Array(MessageID),
-  compactionBoundaryMessageIDs: Schema.Array(MessageID),
-  finalOutputMessageID: Schema.optional(MessageID),
-  status: Schema.Literals(["complete", "incomplete"]),
-  compaction: Schema.optional(SessionTurnCompaction),
-}).annotate({ identifier: "SessionTurn" })
-export const SessionTurnsResponse = Schema.Struct({
-  sessionID: SessionID,
-  turns: Schema.Array(SessionTurn),
-}).annotate({ identifier: "SessionTurnsResponse" })
-export const TranscriptWindowResponse = Schema.Struct({
-  status: TranscriptWindowStatus,
-  sessionID: SessionID,
-  sourceGeneration: Schema.optional(Schema.String),
-  windowRevision: Schema.optional(Schema.String),
-  tailStartID: Schema.optional(MessageID),
-  archiveDescriptors: Schema.Array(TranscriptArchiveDescriptor),
-  tail: Schema.Array(SessionV1.WithParts),
-  turns: Schema.Array(SessionTurn),
-  counts: TranscriptWindowCounts,
-}).annotate({ identifier: "TranscriptWindowResponse" })
-export const CompactedRangeResponse = Schema.Struct({
-  reference: Schema.Struct({
-    markerID: Schema.String,
-    tailStartID: Schema.optional(Schema.String),
-    messageID: Schema.optional(Schema.String),
-    sourceMessageID: Schema.optional(MessageID),
-  }),
-  messages: Schema.Array(SessionV1.WithParts),
-  precedingSummary: Schema.optional(SessionV1.WithParts),
-  turns: Schema.Array(SessionTurn),
-  complete: Schema.Boolean,
-  notice: Schema.optional(Schema.String),
-  status: Schema.Literals(["complete", "stale", "unavailable", "too_large"]),
-  sourceGeneration: Schema.optional(Schema.String),
-  archiveID: Schema.optional(Schema.String),
-  archiveRevision: Schema.optional(Schema.String),
-}).annotate({ identifier: "CompactedRangeResponse" })
+  markerID: MessageID,
+  endExclusiveCursor: Schema.String,
+  physicalMessageCount: NonNegativeInt,
+  semanticMessageCount: NonNegativeInt,
+  partCount: NonNegativeInt,
+  summaryMessageID: MessageID,
+  summaryPreview: Schema.String,
+  precedingSummaryMessageID: Schema.optional(MessageID),
+}).annotate({ identifier: "CompactionRegionDescriptor" })
+export const CompactionCatalogResponse = Schema.Struct({
+  items: Schema.Array(CompactionRegionDescriptor),
+  nextCursor: Schema.optional(Schema.String),
+}).annotate({ identifier: "CompactionCatalogResponse" })
+
+export const StatusMap = Schema.Record(Schema.String, SessionStatus.Info)
 export const UpdatePayload = Schema.Struct({
   title: Schema.optional(Schema.String),
   metadata: Schema.optional(Session.Metadata),
@@ -179,14 +103,12 @@ export const SessionPaths = {
   get: `${root}/:sessionID`,
   children: `${root}/:sessionID/children`,
   todo: `${root}/:sessionID/todo`,
-  turns: `${root}/:sessionID/turns`,
   diff: `${root}/:sessionID/diff`,
   messages: `${root}/:sessionID/message`,
   message: `${root}/:sessionID/message/:messageID`,
   contextStage: `${root}/:sessionID/context/stage`,
   contextStageItem: `${root}/:sessionID/context/stage/:contextID`,
-  compactedRange: `${root}/:sessionID/compacted_range`,
-  transcriptWindow: `${root}/:sessionID/transcript_window`,
+  compactionCatalog: `${root}/:sessionID/compaction`,
   create: root,
   remove: `${root}/:sessionID`,
   update: `${root}/:sessionID`,
@@ -266,18 +188,6 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.todo",
             summary: "Get session todos",
             description: "Retrieve the todo list associated with a specific session, showing tasks and action items.",
-          }),
-        ),
-        HttpApiEndpoint.get("turns", SessionPaths.turns, {
-          params: { sessionID: SessionID },
-          query: WorkspaceRoutingQuery,
-          success: described(SessionTurnsResponse, "Session turn facts"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
-        }).annotateMerge(
-          OpenApi.annotations({
-            identifier: "session.turns",
-            summary: "Get session turns",
-            description: "Return authoritative session turn and compaction boundary facts derived from persisted messages.",
           }),
         ),
         HttpApiEndpoint.get("diff", SessionPaths.diff, {
@@ -365,30 +275,16 @@ export const SessionApi = HttpApi.make("session")
             description: "Clear one provider-only context staged for the next prompt in this session.",
           }),
         ),
-        HttpApiEndpoint.get("compactedRange", SessionPaths.compactedRange, {
+        HttpApiEndpoint.get("compactionCatalog", SessionPaths.compactionCatalog, {
           params: { sessionID: SessionID },
-          query: CompactedRangeQuery,
-          success: described(CompactedRangeResponse, "Compacted transcript range"),
+          query: CompactionCatalogQuery,
+          success: described(CompactionCatalogResponse, "Compaction region metadata catalog page"),
           error: [HttpApiError.BadRequest, ApiNotFoundError],
         }).annotateMerge(
           OpenApi.annotations({
-            identifier: "session.compactedRange",
-            summary: "Recall compacted transcript range",
-            description:
-              "Return the transcript messages summarized by a completed compaction marker without changing session state.",
-          }),
-        ),
-        HttpApiEndpoint.get("transcriptWindow", SessionPaths.transcriptWindow, {
-          params: { sessionID: SessionID },
-          query: WorkspaceRoutingQuery,
-          success: described(TranscriptWindowResponse, "Bounded transcript window"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
-        }).annotateMerge(
-          OpenApi.annotations({
-            identifier: "session.transcriptWindow",
-            summary: "Get bounded transcript window",
-            description:
-              "Return body-free compacted archive descriptors and the bounded current transcript tail without hydrating full history.",
+            identifier: "session.compactionCatalog",
+            summary: "Get compaction region catalog",
+            description: "Return one fixed page of compact-region metadata without transcript bodies.",
           }),
         ),
         HttpApiEndpoint.post("create", SessionPaths.create, {

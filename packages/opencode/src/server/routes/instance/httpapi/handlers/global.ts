@@ -15,6 +15,7 @@ import { HttpApiBuilder } from "effect/unstable/httpapi"
 import * as Sse from "effect/unstable/encoding/Sse"
 import { RootHttpApi } from "../api"
 import { GlobalUpgradeInput } from "../groups/global"
+import * as SelectedEventProjection from "@/server/shared/selected-event-projection"
 
 const log = Log.create({ service: "server" })
 
@@ -45,7 +46,7 @@ function parseBody(body: string) {
   }
 }
 
-export function globalEventStream(beforeConnected: Effect.Effect<void> = Effect.void) {
+export function globalEventStream(beforeConnected: Effect.Effect<void> = Effect.void, selectedProjection = false) {
   return Effect.gen(function* () {
     // Register eagerly so an event published after request admission cannot be
     // lost while the response body starts or emits server.connected.
@@ -57,7 +58,11 @@ export function globalEventStream(beforeConnected: Effect.Effect<void> = Effect.
     }
     GlobalBus.on("event", handler)
     yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", handler)))
-    const events = Stream.fromQueue(queue)
+    const events = Stream.fromQueue(queue).pipe(
+      Stream.filter(
+        (event) => selectedProjection || event.payload.type !== SelectedEventProjection.CatalogChangedType,
+      ),
+    )
     const heartbeat = Stream.tick("10 seconds").pipe(
       Stream.drop(1),
       Stream.map(() => ({ payload: { id: EventV2.ID.create(), type: "server.heartbeat", properties: {} } })),
@@ -119,7 +124,9 @@ export function globalEventStream(beforeConnected: Effect.Effect<void> = Effect.
 
 function eventResponse() {
   return Effect.gen(function* () {
-    const events = yield* globalEventStream()
+    const request = yield* HttpServerRequest.HttpServerRequest
+    const selectedProjection = SelectedEventProjection.selected(request)
+    const events = yield* globalEventStream(Effect.void, selectedProjection)
     return HttpServerResponse.stream(
       events.pipe(
         Stream.map(eventData),
@@ -138,6 +145,9 @@ function eventResponse() {
           "Cache-Control": "no-cache, no-transform",
           "X-Accel-Buffering": "no",
           "X-Content-Type-Options": "nosniff",
+          ...(selectedProjection
+            ? { [SelectedEventProjection.AcknowledgementHeader]: SelectedEventProjection.Selector }
+            : {}),
         },
       },
     )

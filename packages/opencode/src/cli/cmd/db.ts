@@ -3,9 +3,7 @@ import { spawn } from "child_process"
 import { Database } from "@opencode-ai/core/database/database"
 import { Effect } from "effect"
 import { sql } from "drizzle-orm"
-import { CliError, effectCmd } from "../effect-cmd"
-import { SessionTranscriptIndex } from "@/session/transcript-index"
-import { SessionID } from "@/session/schema"
+import { effectCmd } from "../effect-cmd"
 
 const QueryCommand = effectCmd({
   command: "$0 [query]",
@@ -53,42 +51,12 @@ const PathCommand = effectCmd({
   }),
 })
 
-const TranscriptIndexCommand = effectCmd({
-  command: "transcript-index <session>",
-  describe: "build or resume one bounded transcript window index",
-  instance: false,
-  builder: (yargs: Argv) =>
-    yargs
-      .positional("session", {
-        type: "string",
-        demandOption: true,
-        describe: "session ID to index",
-      })
-      .option("owner", {
-        type: "string",
-        describe: "explicit owner token printed by a prior interrupted run",
-      }),
-  handler: Effect.fn("Cli.db.transcriptIndex")(function* (args: { session: string; owner?: string }) {
-    const ownerID = args.owner ?? crypto.randomUUID()
-    console.log(`Transcript index owner: ${ownerID}`)
-    const result = yield* SessionTranscriptIndex.run({
-      sessionID: SessionID.make(args.session),
-      ownerID,
-    }).pipe(
-      Effect.mapError(
-        (error) => new CliError({ message: error instanceof Error ? error.message : "Transcript indexing failed" }),
-      ),
-    )
-    console.log(`Indexed ${result.descriptors} compacted transcript ranges${result.resumed ? " (resumed)" : ""}.`)
-  }),
-})
-
 export const DbCommand = effectCmd({
   command: "db",
   describe: "database tools",
   instance: false,
   builder: (yargs: Argv) => {
-    return yargs.command(QueryCommand).command(PathCommand).command(TranscriptIndexCommand).demandCommand()
+    return yargs.command(QueryCommand).command(PathCommand).demandCommand()
   },
   handler: Effect.fn("Cli.db")(function* () {}),
 })

@@ -10,6 +10,7 @@ import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import * as Sse from "effect/unstable/encoding/Sse"
 import { EventApi } from "../groups/event"
+import * as SelectedEventProjection from "@/server/shared/selected-event-projection"
 
 const log = Log.create({ service: "server" })
 
@@ -60,6 +61,7 @@ function eventResponse(events: EventV2.Interface) {
     const request = yield* HttpServerRequest.HttpServerRequest
     const url = Option.getOrElse(HttpServerRequest.toURL(request), () => new URL(request.url, "http://localhost"))
     const sessionID = url.searchParams.get("sessionID") ?? undefined
+    const selectedProjection = SelectedEventProjection.selected(request)
     const routeMode = sessionID ? "instance-event-filtered" : "instance-event-unfiltered"
     const typeFilter = new Set(
       (url.searchParams.get("type") ?? "")
@@ -103,7 +105,12 @@ function eventResponse(events: EventV2.Interface) {
     })
     const output = stream.pipe(
       Stream.merge(disposed, { haltStrategy: "left" }),
-      Stream.filter((event) => typeMatches(typeFilter, event) && sessionMatches(sessionID, event)),
+      Stream.filter(
+        (event) =>
+          (selectedProjection || event.type !== SelectedEventProjection.CatalogChangedType) &&
+          typeMatches(typeFilter, event) &&
+          sessionMatches(sessionID, event),
+      ),
       Stream.tap((event) =>
         Effect.sync(() =>
           StreamDiagnostics.record({
@@ -181,6 +188,9 @@ function eventResponse(events: EventV2.Interface) {
           "Cache-Control": "no-cache, no-transform",
           "X-Accel-Buffering": "no",
           "X-Content-Type-Options": "nosniff",
+          ...(selectedProjection
+            ? { [SelectedEventProjection.AcknowledgementHeader]: SelectedEventProjection.Selector }
+            : {}),
         },
       },
     )

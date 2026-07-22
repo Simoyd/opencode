@@ -9,6 +9,7 @@ export const EventQuery = Schema.Struct({
   ...WorkspaceRoutingQuery.fields,
   sessionID: Schema.optional(SessionID),
   type: Schema.optional(Schema.String),
+  oca_event_projection: Schema.optional(Schema.String),
 })
 
 export const EventPaths = {

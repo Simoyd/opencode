@@ -85,6 +85,7 @@ export const GlobalApi = HttpApi.make("global").add(
         }),
       ),
       HttpApiEndpoint.get("event", GlobalPaths.event, {
+        query: Schema.Struct({ oca_event_projection: Schema.optional(Schema.String) }),
         success: GlobalEventSchema,
       }).annotateMerge(
         OpenApi.annotations({

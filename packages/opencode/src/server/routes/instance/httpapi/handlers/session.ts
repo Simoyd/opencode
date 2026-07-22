@@ -1,5 +1,4 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
-import { TranscriptWindowProjection } from "@opencode-ai/core/session/transcript-window"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Command } from "@/command"
@@ -12,8 +11,7 @@ import { SessionRevert } from "@/session/revert"
 import { SessionRunState } from "@/session/run-state"
 import { SessionStagedContext } from "@/session/staged-context"
 import { SessionStatus } from "@/session/status"
-import { SessionTranscriptWindow } from "@/session/transcript-window"
-import { SessionTranscriptIndex } from "@/session/transcript-index"
+import { CompactionCatalog } from "@/session/compaction-catalog"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
@@ -27,7 +25,7 @@ import { HttpApiBuilder, HttpApiError, HttpApiSchema } from "effect/unstable/htt
 import { InstanceHttpApi } from "../api"
 import {
   CommandPayload,
-  CompactedRangeQuery,
+  CompactionCatalogQuery,
   DiffQuery,
   ForkPayload,
   InitPayload,
@@ -36,7 +34,6 @@ import {
   PermissionResponsePayload,
   PromptPayload,
   RevertPayload,
-  SessionTurn,
   ShellPayload,
   SummarizePayload,
   StagedContextPayload,
@@ -50,164 +47,6 @@ const tryParseJson = (text: string) =>
     try: () => JSON.parse(text) as unknown,
     catch: () => new HttpApiError.BadRequest({}),
   })
-
-function messageText(message: SessionV1.WithParts) {
-  return message.parts
-    .filter(
-      (part): part is SessionV1.TextPart | SessionV1.ReasoningPart => part.type === "text" || part.type === "reasoning",
-    )
-    .map((part) => part.text.trim())
-    .filter(Boolean)
-    .join("\n")
-    .trim()
-}
-
-function isCompactionMessage(message: SessionV1.WithParts) {
-  return message.info.role === "user" && message.parts.some((part) => part.type === "compaction")
-}
-
-function isCompactionReplayMessage(message: SessionV1.WithParts) {
-  return (
-    message.info.role === "user" &&
-    message.parts.some((part) => part.type === "text" && part.metadata?.compaction_replay === true)
-  )
-}
-
-function isPromptMessage(message: SessionV1.WithParts) {
-  return (
-    message.info.role === "user" &&
-    !isCompactionMessage(message) &&
-    !isCompactionReplayMessage(message) &&
-    !message.parts.every((part) => "synthetic" in part && !!part.synthetic)
-  )
-}
-
-function isFinalAssistant(message: SessionV1.WithParts) {
-  if (message.info.role !== "assistant" || !message.info.finish || message.info.error || message.info.summary)
-    return false
-  if (message.info.finish === "tool-calls" || message.info.finish === "tool_calls") return false
-  return !!messageText(message).trim()
-}
-
-function createSummaryPreview(summary: string) {
-  const normalized = summary.split(/\s+/).filter(Boolean).join(" ")
-  return normalized.length <= 80 ? normalized : `${normalized.slice(0, 77)}...`
-}
-
-function buildTurnCompaction(
-  promptMessageID: MessageID,
-  segment: SessionV1.WithParts[],
-  finalOutputMessageID: MessageID | undefined,
-) {
-  if (!finalOutputMessageID) return undefined
-  const compactionItems = segment
-    .map((message, index) => ({
-      message,
-      index,
-      part: message.parts.find((part): part is SessionV1.CompactionPart => part.type === "compaction"),
-    }))
-    .filter((item) => item.part)
-  if (compactionItems.length !== 1) return undefined
-
-  const compaction = compactionItems[0]
-  const compactionPart = compaction.part
-  if (!compactionPart) return undefined
-  const summaryItems = segment
-    .map((message, index) => ({ message, index }))
-    .filter(
-      (item) =>
-        item.message.info.role === "assistant" &&
-        item.message.info.parentID === compaction.message.info.id &&
-        !!item.message.info.summary &&
-        !!item.message.info.finish &&
-        !item.message.info.error,
-    )
-  if (summaryItems.length !== 1) return undefined
-
-  const summary = summaryItems[0]
-  const fullSummary = messageText(summary.message)
-  if (!fullSummary) return undefined
-
-  const syntheticPromptMessageIDs = segment
-    .filter(
-      (message) =>
-        message.info.role === "user" &&
-        message.parts.some(
-          (part) => part.type === "text" && part.synthetic && part.metadata?.compaction_continue === true,
-        ),
-    )
-    .map((message) => message.info.id)
-  const replayPromptMessageIDs = segment.filter(isCompactionReplayMessage).map((message) => message.info.id)
-  if (syntheticPromptMessageIDs.length + replayPromptMessageIDs.length === 0) return undefined
-  if (compactionPart.overflow && replayPromptMessageIDs.length === 0) return undefined
-
-  const finalIndex = segment.findIndex((message) => message.info.id === finalOutputMessageID)
-  const represented = new Set<MessageID>([
-    compaction.message.info.id,
-    summary.message.info.id,
-    ...syntheticPromptMessageIDs,
-    ...replayPromptMessageIDs,
-  ])
-  const allowedParents = new Set<MessageID>([promptMessageID, ...syntheticPromptMessageIDs, ...replayPromptMessageIDs])
-  const isCollapsibleOperationalMessage = (message: SessionV1.WithParts) =>
-    message.info.role === "assistant" &&
-    allowedParents.has(message.info.parentID) &&
-    message.info.id !== finalOutputMessageID &&
-    !represented.has(message.info.id)
-
-  return {
-    compactionMessageID: compaction.message.info.id,
-    summaryMessageID: summary.message.info.id,
-    summaryPreview: createSummaryPreview(fullSummary),
-    preCompactionMessageIDs: segment
-      .slice(0, compaction.index)
-      .filter(isCollapsibleOperationalMessage)
-      .map((message) => message.info.id),
-    postCompactionMessageIDs: segment
-      .slice(summary.index + 1, finalIndex >= 0 ? finalIndex : segment.length)
-      .filter(isCollapsibleOperationalMessage)
-      .map((message) => message.info.id),
-    syntheticPromptMessageIDs,
-    replayPromptMessageIDs,
-    recallMarkerID: compaction.message.info.id,
-    ...(compactionPart.tail_start_id ? { recallTailStartMessageID: compactionPart.tail_start_id } : {}),
-  }
-}
-
-function buildSessionTurns(sessionID: SessionID, messages: SessionV1.WithParts[]) {
-  return {
-    sessionID,
-    turns: messages.flatMap((prompt, start) => {
-      if (!isPromptMessage(prompt)) return []
-      const nextPrompt = messages.findIndex((message, index) => index > start && isPromptMessage(message))
-      const segment = messages.slice(start, nextPrompt < 0 ? messages.length : nextPrompt)
-      const finalOutputMessageID = segment.filter(isFinalAssistant).at(-1)?.info.id
-      const intermediateMessageIDs = finalOutputMessageID
-        ? segment
-            .slice(
-              1,
-              segment.findIndex((message) => message.info.id === finalOutputMessageID),
-            )
-            .map((message) => message.info.id)
-        : segment.slice(1).map((message) => message.info.id)
-      const compaction = buildTurnCompaction(prompt.info.id, segment, finalOutputMessageID)
-      return [
-        {
-          id: `turn:${prompt.info.id}`,
-          startMessageID: prompt.info.id,
-          messageIDs: segment.map((message) => message.info.id),
-          intermediateMessageIDs: compaction
-            ? [...compaction.preCompactionMessageIDs, ...compaction.postCompactionMessageIDs]
-            : intermediateMessageIDs,
-          compactionBoundaryMessageIDs: compaction ? [compaction.compactionMessageID] : [],
-          ...(finalOutputMessageID ? { finalOutputMessageID } : {}),
-          status: finalOutputMessageID ? ("complete" as const) : ("incomplete" as const),
-          ...(compaction ? { compaction } : {}),
-        },
-      ]
-    }),
-  }
-}
 
 export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", (handlers) =>
   Effect.gen(function* () {
@@ -256,14 +95,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const todo = Effect.fn("SessionHttpApi.todo")(function* (ctx: { params: { sessionID: SessionID } }) {
       yield* requireSession(ctx.params.sessionID)
       return yield* todoSvc.get(ctx.params.sessionID)
-    })
-
-    const turns = Effect.fn("SessionHttpApi.turns")(function* (ctx: { params: { sessionID: SessionID } }) {
-      yield* requireSession(ctx.params.sessionID)
-      return buildSessionTurns(
-        ctx.params.sessionID,
-        yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID })),
-      )
     })
 
     const diff = Effect.fn("SessionHttpApi.diff")(function* (ctx: {
@@ -350,156 +181,12 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return HttpApiSchema.NoContent.make()
     })
 
-    const compactedRange = Effect.fn("SessionHttpApi.compactedRange")(function* (ctx: {
+    const compactionCatalog = Effect.fn("SessionHttpApi.compactionCatalog")(function* (ctx: {
       params: { sessionID: SessionID }
-      query: typeof CompactedRangeQuery.Type
+      query: typeof CompactionCatalogQuery.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      const result = yield* SessionTranscriptWindow.loadArchive({
-        sessionID: ctx.params.sessionID,
-        markerID: ctx.query.marker,
-        sourceGeneration: ctx.query.source_generation,
-        archiveID: ctx.query.archive_id,
-        archiveRevision: ctx.query.archive_revision,
-        tailStartID: ctx.query.tail_start_id,
-        messageID: ctx.query.message_id,
-        sourceMessageID: ctx.query.source_message_id,
-      }).pipe(
-        Effect.map((value) => ({ value })),
-        Effect.catch((error) => Effect.succeed({ error })),
-      )
-      if ("error" in result) {
-        const tooLarge = result.error instanceof SessionTranscriptWindow.TooLarge
-        return {
-          reference: {
-            markerID: ctx.query.marker,
-            tailStartID: ctx.query.tail_start_id,
-            messageID: ctx.query.message_id,
-            ...(ctx.query.source_message_id ? { sourceMessageID: ctx.query.source_message_id } : {}),
-          },
-          messages: [],
-          precedingSummary: undefined,
-          turns: [],
-          complete: false,
-          notice: tooLarge
-            ? "Compacted transcript range exceeds the safe recall limit."
-            : "Compacted transcript range is stale or unavailable.",
-          status: tooLarge ? ("too_large" as const) : ("stale" as const),
-          sourceGeneration: ctx.query.source_generation,
-          archiveID: ctx.query.archive_id,
-          archiveRevision: ctx.query.archive_revision,
-        }
-      }
-      const turns = buildSessionTurns(ctx.params.sessionID, result.value.messages).turns
-      return {
-        reference: {
-          markerID: result.value.markerID,
-          tailStartID: result.value.tailStartID,
-          messageID: result.value.markerID,
-          sourceMessageID: result.value.sourceMessageID,
-        },
-        messages: result.value.messages,
-        ...(result.value.precedingSummary ? { precedingSummary: result.value.precedingSummary } : {}),
-        turns,
-        complete: true,
-        status: "complete" as const,
-        sourceGeneration: result.value.sourceGeneration,
-        archiveID: result.value.archiveID,
-        archiveRevision: result.value.archiveRevision,
-      }
-    })
-
-    const transcriptWindow = Effect.fn("SessionHttpApi.transcriptWindow")(function* (ctx: {
-      params: { sessionID: SessionID }
-    }) {
-      yield* requireSession(ctx.params.sessionID)
-      const load = () => SessionTranscriptWindow.loadWindow(ctx.params.sessionID).pipe(
-        Effect.catch((error) =>
-          Effect.succeed({
-            status: error instanceof SessionTranscriptWindow.TooLarge ? ("too_large" as const) : ("stale" as const),
-            sessionID: ctx.params.sessionID,
-            archiveDescriptors: [],
-            tail: [],
-            counts: { descriptors: 0, messages: 0, parts: 0, textUnits: 2, decodedBytes: 2 },
-          }),
-        ),
-      )
-      let window = yield* load()
-      if (window.status === "index_required") {
-        yield* SessionTranscriptIndex.run({
-          sessionID: ctx.params.sessionID,
-          ownerID: crypto.randomUUID(),
-        }).pipe(Effect.catch(() => Effect.void))
-        window = yield* load()
-      }
-      const activeActionToken = CompactionDiagnostics.activeToken(ctx.params.sessionID)
-      CompactionDiagnostics.recordSession(ctx.params.sessionID, "transcript.window", "loaded", {
-        facts: {
-          status: window.status,
-          descriptors: window.counts.descriptors,
-          messages: window.counts.messages,
-          ...("windowRevision" in window && window.windowRevision && activeActionToken
-            ? { revisionToken: CompactionDiagnostics.opaque(activeActionToken, "revision", window.windowRevision)! }
-            : {}),
-        },
-      })
-      const turns = window.status === "complete" ? buildSessionTurns(ctx.params.sessionID, window.tail).turns : []
-      const transportTurns = Schema.encodeSync(Schema.Array(SessionTurn))(turns)
-      const turnEncoded = JSON.stringify(transportTurns)
-      const turnIdentities = transportTurns.reduce(
-        (count, turn) =>
-          count +
-          2 +
-          turn.messageIDs.length +
-          turn.intermediateMessageIDs.length +
-          turn.compactionBoundaryMessageIDs.length +
-          (turn.finalOutputMessageID ? 1 : 0) +
-          (turn.compaction
-            ? 2 +
-              turn.compaction.preCompactionMessageIDs.length +
-              turn.compaction.postCompactionMessageIDs.length +
-              turn.compaction.syntheticPromptMessageIDs.length +
-              turn.compaction.replayPromptMessageIDs.length +
-              (turn.compaction.recallMarkerID ? 1 : 0) +
-              (turn.compaction.recallTailStartMessageID ? 1 : 0)
-            : 0),
-        0,
-      )
-      const turnDecodedBytes = Buffer.byteLength(turnEncoded, "utf8")
-      if (
-        turnIdentities > TranscriptWindowProjection.Limits.parts ||
-        turnEncoded.length > TranscriptWindowProjection.Limits.textCodeUnits ||
-        turnDecodedBytes > TranscriptWindowProjection.Limits.decodedBytes
-      )
-        return {
-          status: "too_large" as const,
-          sessionID: ctx.params.sessionID,
-          archiveDescriptors: [],
-          tail: [],
-          turns: [],
-          counts: {
-            descriptors: 0,
-            messages: 0,
-            parts: 0,
-            textUnits: 2,
-            decodedBytes: 2,
-            turns: 0,
-            turnIdentities: 0,
-            turnTextUnits: 2,
-            turnDecodedBytes: 2,
-          },
-        }
-      return {
-        ...window,
-        turns,
-        counts: {
-          ...window.counts,
-          turns: turns.length,
-          turnIdentities,
-          turnTextUnits: turnEncoded.length,
-          turnDecodedBytes,
-        },
-      }
+      return yield* CompactionCatalog.page({ sessionID: ctx.params.sessionID, cursor: ctx.query.cursor })
     })
 
     const create = Effect.fn("SessionHttpApi.create")(function* (ctx: { payload?: Session.CreateInput }) {
@@ -833,7 +520,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("get", get)
       .handle("children", children)
       .handle("todo", todo)
-      .handle("turns", turns)
       .handle("diff", diff)
       .handle("messages", messages)
       .handle("message", message)
@@ -841,8 +527,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("contextListStaged", contextListStaged)
       .handle("contextClearStaged", contextClearStaged)
       .handle("contextClearStagedItem", contextClearStaged)
-      .handle("compactedRange", compactedRange)
-      .handle("transcriptWindow", transcriptWindow)
+      .handle("compactionCatalog", compactionCatalog)
       .handleRaw("create", createRaw)
       .handle("remove", remove)
       .handle("update", update)

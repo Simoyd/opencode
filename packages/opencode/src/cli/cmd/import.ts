@@ -4,14 +4,8 @@ import { Session } from "@/session/session"
 import { MessageV2 } from "../../session/message-v2"
 import { CliError, effectCmd } from "../effect-cmd"
 import { Database } from "@opencode-ai/core/database/database"
-import {
-  SessionAdmissionTable,
-  SessionTable,
-  MessageTable,
-  PartTable,
-  TranscriptWindowStateTable,
-} from "@opencode-ai/core/session/sql"
-import { SessionMaintenance } from "@opencode-ai/core/session/maintenance"
+import { SessionTable, MessageTable, PartTable } from "@opencode-ai/core/session/sql"
+import { CompactionRegionProjection } from "@opencode-ai/core/session/compaction-region"
 import { InstanceRef } from "@/effect/instance-ref"
 import { ShareNext } from "@/share/share-next"
 import { EOL } from "os"
@@ -19,7 +13,7 @@ import path from "path"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Effect, Schema } from "effect"
 import type { InstanceContext } from "@/project/instance-context"
-import { and, eq } from "drizzle-orm"
+import { eq } from "drizzle-orm"
 
 const decodeMessageInfo = Schema.decodeUnknownSync(SessionV1.Info)
 const decodePart = Schema.decodeUnknownSync(SessionV1.Part)
@@ -217,20 +211,7 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
           .pipe(Effect.orDie)
       }
     }
-    yield* db
-      .insert(TranscriptWindowStateTable)
-      .values({
-        session_id: row.id,
-        source_generation: crypto.randomUUID(),
-        window_revision: 0,
-        index_status: "index_required",
-      })
-      .onConflictDoUpdate({
-        target: TranscriptWindowStateTable.session_id,
-        set: { index_status: "index_required" },
-      })
-      .run()
-      .pipe(Effect.orDie)
+    yield* CompactionRegionProjection.reconcile(db, { sessionID: row.id })
   })
   const upsertSession = db
     .insert(SessionTable)
@@ -241,7 +222,10 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
     })
     .run()
     .pipe(Effect.orDie)
-  const persistExisting = upsertSession.pipe(Effect.andThen(writeImportedRows))
+  const persistExisting = db.transaction(
+    () => upsertSession.pipe(Effect.andThen(writeImportedRows)),
+    { behavior: "immediate" },
+  ).pipe(Effect.orDie)
   const existing = yield* db
     .select({ id: SessionTable.id })
     .from(SessionTable)
@@ -249,33 +233,14 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
     .get()
     .pipe(Effect.orDie)
   if (existing) {
-    yield* SessionMaintenance.withAdmission(db, { sessionID: row.id, kind: "import" }, persistExisting)
+    yield* persistExisting
   } else {
-    const operationID = crypto.randomUUID()
     yield* db
       .transaction(
-        () =>
-          Effect.gen(function* () {
-            yield* db.insert(SessionTable).values(row).run().pipe(Effect.orDie)
-            yield* db
-              .insert(SessionAdmissionTable)
-              .values({
-                session_id: row.id,
-                operation_id: operationID,
-                kind: "import",
-                time_started: Date.now(),
-              })
-              .run()
-              .pipe(Effect.orDie)
-            yield* writeImportedRows
-            yield* db
-              .delete(SessionAdmissionTable)
-              .where(
-                and(eq(SessionAdmissionTable.session_id, row.id), eq(SessionAdmissionTable.operation_id, operationID)),
-              )
-              .run()
-              .pipe(Effect.orDie)
-          }),
+        () => Effect.gen(function* () {
+          yield* db.insert(SessionTable).values(row).run().pipe(Effect.orDie)
+          yield* writeImportedRows
+        }),
         { behavior: "immediate" },
       )
       .pipe(Effect.orDie)

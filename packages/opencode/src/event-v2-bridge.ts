@@ -11,6 +11,9 @@ import "@opencode-ai/core/catalog"
 import "@opencode-ai/core/session/event"
 import { Context, Effect, Layer } from "effect"
 import { CompactionDiagnostics } from "@/diagnostic/compaction"
+import { CompactionRegionProjection } from "@opencode-ai/core/session/compaction-region"
+import { CompactionCatalog } from "@/session/compaction-catalog"
+import { SessionID } from "@/session/schema"
 
 export class Service extends Context.Service<Service, EventV2.Interface>()("@opencode/EventV2Bridge") {}
 
@@ -48,6 +51,12 @@ export const layer = Layer.effect(
         }
         CompactionDiagnostics.recordPayload(bridged, "event.v2", "bridge-global")
         GlobalBus.emit("event", bridged)
+        if (CompactionRegionProjection.takeInvalidation(event.data)) {
+          const sessionID = (event.data as Record<string, unknown>).sessionID
+          if (typeof sessionID === "string") {
+            yield* events.publish(CompactionCatalog.Event.Changed, { sessionID: SessionID.make(sessionID) }, { location: event.location })
+          }
+        }
         const sync = EventV2.registry.get(event.type)?.sync
         if (sync === undefined || event.seq === undefined || event.version === undefined) return
         const aggregateID = (event.data as Record<string, unknown>)[sync.aggregate]
