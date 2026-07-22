@@ -13,6 +13,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { httpApiLayer, requestInDirectory } from "./httpapi-layer"
 import { Database } from "@opencode-ai/core/database/database"
+import { CompactionRegionTable } from "@opencode-ai/core/session/sql"
 import { eq } from "drizzle-orm"
 
 void Log.init({ print: false })
@@ -413,6 +414,31 @@ describe("session messages and compaction catalog", () => {
 
         const after = yield* request(`/session/${session.id}/compaction`).pipe(Effect.flatMap(json<{ items: unknown[] }>))
         expect(after.items).toEqual([])
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
+    "cascades compact-region metadata when the session is removed",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const session = yield* SessionNs.Service
+        const db = (yield* Database.Service).db
+        const info = yield* session.create({})
+        const prompt = yield* addUser(info.id, "cascade region")
+        const marker = yield* addCompaction(info.id, prompt, { auto: false })
+        yield* addAssistant(info.id, marker, "summary", { summary: true, finish: "end_turn" })
+
+        expect(
+          yield* db.select().from(CompactionRegionTable).where(eq(CompactionRegionTable.session_id, info.id)).all(),
+        ).toHaveLength(1)
+
+        yield* session.remove(info.id)
+
+        expect(
+          yield* db.select().from(CompactionRegionTable).where(eq(CompactionRegionTable.session_id, info.id)).all(),
+        ).toEqual([])
       }),
     ),
     { git: true },

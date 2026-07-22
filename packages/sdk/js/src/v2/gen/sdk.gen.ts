@@ -24,6 +24,8 @@ import type {
   ConfigProvidersResponses,
   ConfigUpdateErrors,
   ConfigUpdateResponses,
+  DebugCompactionIncidentResponses,
+  DebugStreamDiagnosticsResponses,
   EventSubscribeResponses,
   EventTuiCommandExecute,
   EventTuiPromptAppend,
@@ -180,8 +182,8 @@ import type {
   SessionChildrenResponses,
   SessionCommandErrors,
   SessionCommandResponses,
-  SessionCompactedRangeErrors,
-  SessionCompactedRangeResponses,
+  SessionCompactionCatalogErrors,
+  SessionCompactionCatalogResponses,
   SessionContextClearStagedErrors,
   SessionContextClearStagedItemErrors,
   SessionContextClearStagedItemResponses,
@@ -226,10 +228,6 @@ import type {
   SessionSummarizeResponses,
   SessionTodoErrors,
   SessionTodoResponses,
-  SessionTranscriptWindowErrors,
-  SessionTranscriptWindowResponses,
-  SessionTurnsErrors,
-  SessionTurnsResponses,
   SessionUnrevertErrors,
   SessionUnrevertResponses,
   SessionUnshareErrors,
@@ -1323,10 +1321,17 @@ export class Global extends HeyApiClient {
    *
    * Subscribe to global events from the OpenCode system using server-sent events.
    */
-  public event<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
+  public event<ThrowOnError extends boolean = false>(
+    parameters?: {
+      oca_event_projection?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "query", key: "oca_event_projection" }] }])
     return (options?.client ?? this.client).sse.get<GlobalEventResponses, GlobalEventErrors, ThrowOnError>({
       url: "/global/event",
       ...options,
+      ...params,
     })
   }
 
@@ -1372,6 +1377,39 @@ export class Global extends HeyApiClient {
   }
 }
 
+export class Debug extends HeyApiClient {
+  /**
+   * Get stream diagnostics
+   *
+   * Return sanitized aggregate stream diagnostics when enabled for the custom sidecar.
+   */
+  public streamDiagnostics<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
+    return (options?.client ?? this.client).get<DebugStreamDiagnosticsResponses, unknown, ThrowOnError>({
+      url: "/debug/stream-diagnostics",
+      ...options,
+    })
+  }
+
+  /**
+   * Get a compaction incident fragment
+   *
+   * Return one sanitized persisted sidecar fragment for a host-issued Compact action token.
+   */
+  public compactionIncident<ThrowOnError extends boolean = false>(
+    parameters: {
+      action: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "query", key: "action" }] }])
+    return (options?.client ?? this.client).get<DebugCompactionIncidentResponses, unknown, ThrowOnError>({
+      url: "/debug/compaction-incident",
+      ...options,
+      ...params,
+    })
+  }
+}
+
 export class Event extends HeyApiClient {
   /**
    * Subscribe to events
@@ -1384,6 +1422,7 @@ export class Event extends HeyApiClient {
       workspace?: string
       sessionID?: string
       type?: string
+      oca_event_projection?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -1396,6 +1435,7 @@ export class Event extends HeyApiClient {
             { in: "query", key: "workspace" },
             { in: "query", key: "sessionID" },
             { in: "query", key: "type" },
+            { in: "query", key: "oca_event_projection" },
           ],
         },
       ],
@@ -3859,38 +3899,6 @@ export class Session2 extends HeyApiClient {
   }
 
   /**
-   * Get session turns
-   *
-   * Return authoritative session turn and compaction boundary facts derived from persisted messages.
-   */
-  public turns<ThrowOnError extends boolean = false>(
-    parameters: {
-      sessionID: string
-      directory?: string
-      workspace?: string
-    },
-    options?: Options<never, ThrowOnError>,
-  ) {
-    const params = buildClientParams(
-      [parameters],
-      [
-        {
-          args: [
-            { in: "path", key: "sessionID" },
-            { in: "query", key: "directory" },
-            { in: "query", key: "workspace" },
-          ],
-        },
-      ],
-    )
-    return (options?.client ?? this.client).get<SessionTurnsResponses, SessionTurnsErrors, ThrowOnError>({
-      url: "/session/{sessionID}/turns",
-      ...options,
-      ...params,
-    })
-  }
-
-  /**
    * Get message diff
    *
    * Get the file changes (diff) that resulted from a specific user message in the session.
@@ -4093,22 +4101,16 @@ export class Session2 extends HeyApiClient {
   }
 
   /**
-   * Recall compacted transcript range
+   * Get compaction region catalog
    *
-   * Return the transcript messages summarized by a completed compaction marker without changing session state.
+   * Return one fixed page of compact-region metadata without transcript bodies.
    */
-  public compactedRange<ThrowOnError extends boolean = false>(
+  public compactionCatalog<ThrowOnError extends boolean = false>(
     parameters: {
       sessionID: string
       directory?: string
       workspace?: string
-      marker: string
-      tail_start_id?: string
-      message_id?: string
-      source_generation?: string
-      archive_id?: string
-      archive_revision?: string
-      source_message_id?: string
+      cursor?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -4120,59 +4122,17 @@ export class Session2 extends HeyApiClient {
             { in: "path", key: "sessionID" },
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
-            { in: "query", key: "marker" },
-            { in: "query", key: "tail_start_id" },
-            { in: "query", key: "message_id" },
-            { in: "query", key: "source_generation" },
-            { in: "query", key: "archive_id" },
-            { in: "query", key: "archive_revision" },
-            { in: "query", key: "source_message_id" },
+            { in: "query", key: "cursor" },
           ],
         },
       ],
     )
     return (options?.client ?? this.client).get<
-      SessionCompactedRangeResponses,
-      SessionCompactedRangeErrors,
+      SessionCompactionCatalogResponses,
+      SessionCompactionCatalogErrors,
       ThrowOnError
     >({
-      url: "/session/{sessionID}/compacted_range",
-      ...options,
-      ...params,
-    })
-  }
-
-  /**
-   * Get bounded transcript window
-   *
-   * Return body-free compacted archive descriptors and the bounded current transcript tail without hydrating full history.
-   */
-  public transcriptWindow<ThrowOnError extends boolean = false>(
-    parameters: {
-      sessionID: string
-      directory?: string
-      workspace?: string
-    },
-    options?: Options<never, ThrowOnError>,
-  ) {
-    const params = buildClientParams(
-      [parameters],
-      [
-        {
-          args: [
-            { in: "path", key: "sessionID" },
-            { in: "query", key: "directory" },
-            { in: "query", key: "workspace" },
-          ],
-        },
-      ],
-    )
-    return (options?.client ?? this.client).get<
-      SessionTranscriptWindowResponses,
-      SessionTranscriptWindowErrors,
-      ThrowOnError
-    >({
-      url: "/session/{sessionID}/transcript_window",
+      url: "/session/{sessionID}/compaction",
       ...options,
       ...params,
     })
@@ -6138,6 +6098,11 @@ export class OpencodeClient extends HeyApiClient {
   private _global?: Global
   get global(): Global {
     return (this._global ??= new Global({ client: this.client }))
+  }
+
+  private _debug?: Debug
+  get debug(): Debug {
+    return (this._debug ??= new Debug({ client: this.client }))
   }
 
   private _event?: Event

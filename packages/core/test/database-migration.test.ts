@@ -69,6 +69,22 @@ describe("DatabaseMigration", () => {
           yield* db.get(sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_context_epoch'`),
         ).toEqual({ name: "session_context_epoch" })
         expect(
+          yield* db.get(sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'compaction_region'`),
+        ).toEqual({ name: "compaction_region" })
+        expect(
+          yield* db.all(
+            sql`SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('compaction_region_session_marker_idx', 'compaction_region_session_start_idx') ORDER BY name`,
+          ),
+        ).toEqual([
+          { name: "compaction_region_session_marker_idx" },
+          { name: "compaction_region_session_start_idx" },
+        ])
+        expect(
+          yield* db.all(
+            sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('transcript_window', 'compacted_range', 'transcript_turn')`,
+          ),
+        ).toEqual([])
+        expect(
           yield* db.get(
             sql`SELECT name, dflt_value FROM pragma_table_info('session_context_epoch') WHERE name = 'agent'`,
           ),

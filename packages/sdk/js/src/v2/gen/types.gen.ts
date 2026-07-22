@@ -46,6 +46,7 @@ export type Event =
   | EventSessionNextCompactionDelta
   | EventSessionNextCompactionEnded
   | EventMessagePartDelta
+  | EventCompactionCatalogChanged
   | EventSessionDiff
   | EventSessionError
   | EventInstallationUpdated
@@ -74,7 +75,6 @@ export type Event =
   | EventTuiSessionSelect2
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
-  | EventSessionTranscriptReconciled
   | EventCommandExecuted
   | EventProjectDirectoriesUpdated
   | EventProjectUpdated
@@ -1195,6 +1195,13 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "compaction.catalog.changed"
+        properties: {
+          sessionID: string
+        }
+      }
+    | {
+        id: string
         type: "session.diff"
         properties: {
           sessionID: string
@@ -1457,13 +1464,6 @@ export type GlobalEvent = {
         properties: {
           mcpName: string
           url: string
-        }
-      }
-    | {
-        id: string
-        type: "session.transcript.reconciled"
-        properties: {
-          sessionID: string
         }
       }
     | {
@@ -2057,6 +2057,36 @@ export type Config = {
   }
 }
 
+export type StreamDiagnosticsSnapshot = {
+  schema: string
+  enabled: boolean
+  limit: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  summaryLimit: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  dropped: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  droppedSummaries: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  overflow: boolean
+  summaryOverflow: boolean
+  stageSummaries: Array<{
+    [key: string]: unknown
+  }>
+  events: Array<{
+    [key: string]: unknown
+  }>
+}
+
+export type CompactionIncidentSnapshot = {
+  schema: string
+  actionToken: string
+  available: boolean
+  persistenceFailed: boolean
+  firstSequence: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  lastSequence: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  persistedThroughSequence: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  records: Array<{
+    [key: string]: unknown
+  }>
+}
+
 export type Model = {
   id: string
   providerID: string
@@ -2591,34 +2621,6 @@ export type NotFoundError = {
   }
 }
 
-export type SessionTurnCompaction = {
-  compactionMessageID: string
-  summaryMessageID: string
-  summaryPreview: string
-  preCompactionMessageIDs: Array<string>
-  postCompactionMessageIDs: Array<string>
-  syntheticPromptMessageIDs: Array<string>
-  replayPromptMessageIDs: Array<string>
-  recallMarkerID?: string
-  recallTailStartMessageID?: string
-}
-
-export type SessionTurn = {
-  id: string
-  startMessageID: string
-  messageIDs: Array<string>
-  intermediateMessageIDs: Array<string>
-  compactionBoundaryMessageIDs: Array<string>
-  finalOutputMessageID?: string
-  status: "complete" | "incomplete"
-  compaction?: SessionTurnCompaction
-}
-
-export type SessionTurnsResponse = {
-  sessionID: string
-  turns: Array<SessionTurn>
-}
-
 export type StagedContextTextPartInput = {
   type: "text"
   text: string
@@ -2637,67 +2639,21 @@ export type StagedContextInfo = {
   }
 }
 
-export type CompactedRangeResponse = {
-  reference: {
-    markerID: string
-    tailStartID?: string
-    messageID?: string
-    sourceMessageID?: string
-  }
-  messages: Array<{
-    info: Message
-    parts: Array<Part>
-  }>
-  precedingSummary?: {
-    info: Message
-    parts: Array<Part>
-  }
-  turns: Array<SessionTurn>
-  complete: boolean
-  notice?: string
-  status: "complete" | "stale" | "unavailable" | "too_large"
-  sourceGeneration?: string
-  archiveID?: string
-  archiveRevision?: string
-}
-
-export type TranscriptArchiveDescriptor = {
-  archiveID: string
-  archiveRevision: string
+export type CompactionRegionDescriptor = {
+  startMessageID: string
   markerID: string
-  tailStartID?: string
-  sourceMessageID: string
+  endExclusiveCursor: string
+  physicalMessageCount: number
+  semanticMessageCount: number
+  partCount: number
   summaryMessageID: string
   summaryPreview: string
-  messageCount: number
-  partCount: number
-  textUnits: number
-  decodedBytes: number
+  precedingSummaryMessageID?: string
 }
 
-export type TranscriptWindowResponse = {
-  status: "complete" | "index_required" | "indexing" | "index_failed" | "stale" | "revert_unrepresentable" | "too_large"
-  sessionID: string
-  sourceGeneration?: string
-  windowRevision?: string
-  tailStartID?: string
-  archiveDescriptors: Array<TranscriptArchiveDescriptor>
-  tail: Array<{
-    info: Message
-    parts: Array<Part>
-  }>
-  turns: Array<SessionTurn>
-  counts: {
-    descriptors: number
-    messages: number
-    parts: number
-    textUnits: number
-    decodedBytes: number
-    turns: number
-    turnIdentities: number
-    turnTextUnits: number
-    turnDecodedBytes: number
-  }
+export type CompactionCatalogResponse = {
+  items: Array<CompactionRegionDescriptor>
+  nextCursor?: string
 }
 
 export type SessionBusyError = {
@@ -4847,6 +4803,14 @@ export type EventMessagePartDelta = {
   }
 }
 
+export type EventCompactionCatalogChanged = {
+  id: string
+  type: "compaction.catalog.changed"
+  properties: {
+    sessionID: string
+  }
+}
+
 export type EventSessionDiff = {
   id: string
   type: "session.diff"
@@ -5083,14 +5047,6 @@ export type EventMcpBrowserOpenFailed = {
   properties: {
     mcpName: string
     url: string
-  }
-}
-
-export type EventSessionTranscriptReconciled = {
-  id: string
-  type: "session.transcript.reconciled"
-  properties: {
-    sessionID: string
   }
 }
 
@@ -5433,7 +5389,9 @@ export type GlobalHealthResponse = GlobalHealthResponses[keyof GlobalHealthRespo
 export type GlobalEventData = {
   body?: never
   path?: never
-  query?: never
+  query?: {
+    oca_event_projection?: string
+  }
   url: "/global/event"
 }
 
@@ -5565,6 +5523,40 @@ export type GlobalUpgradeResponses = {
 
 export type GlobalUpgradeResponse = GlobalUpgradeResponses[keyof GlobalUpgradeResponses]
 
+export type DebugStreamDiagnosticsData = {
+  body?: never
+  path?: never
+  query?: never
+  url: "/debug/stream-diagnostics"
+}
+
+export type DebugStreamDiagnosticsResponses = {
+  /**
+   * Stream diagnostics snapshot
+   */
+  200: StreamDiagnosticsSnapshot
+}
+
+export type DebugStreamDiagnosticsResponse = DebugStreamDiagnosticsResponses[keyof DebugStreamDiagnosticsResponses]
+
+export type DebugCompactionIncidentData = {
+  body?: never
+  path?: never
+  query: {
+    action: string
+  }
+  url: "/debug/compaction-incident"
+}
+
+export type DebugCompactionIncidentResponses = {
+  /**
+   * Compaction incident fragment
+   */
+  200: CompactionIncidentSnapshot
+}
+
+export type DebugCompactionIncidentResponse = DebugCompactionIncidentResponses[keyof DebugCompactionIncidentResponses]
+
 export type EventSubscribeData = {
   body?: never
   path?: never
@@ -5573,6 +5565,7 @@ export type EventSubscribeData = {
     workspace?: string
     sessionID?: string
     type?: string
+    oca_event_projection?: string
   }
   url: "/event"
 }
@@ -8003,40 +7996,6 @@ export type SessionTodoResponses = {
 
 export type SessionTodoResponse = SessionTodoResponses[keyof SessionTodoResponses]
 
-export type SessionTurnsData = {
-  body?: never
-  path: {
-    sessionID: string
-  }
-  query?: {
-    directory?: string
-    workspace?: string
-  }
-  url: "/session/{sessionID}/turns"
-}
-
-export type SessionTurnsErrors = {
-  /**
-   * BadRequest | InvalidRequestError
-   */
-  400: EffectHttpApiErrorBadRequest | InvalidRequestError
-  /**
-   * NotFoundError
-   */
-  404: NotFoundError
-}
-
-export type SessionTurnsError = SessionTurnsErrors[keyof SessionTurnsErrors]
-
-export type SessionTurnsResponses = {
-  /**
-   * Session turn facts
-   */
-  200: SessionTurnsResponse
-}
-
-export type SessionTurnsResponse2 = SessionTurnsResponses[keyof SessionTurnsResponses]
-
 export type SessionDiffData = {
   body?: never
   path: {
@@ -8383,48 +8342,7 @@ export type SessionContextClearStagedItemResponses = {
 export type SessionContextClearStagedItemResponse =
   SessionContextClearStagedItemResponses[keyof SessionContextClearStagedItemResponses]
 
-export type SessionCompactedRangeData = {
-  body?: never
-  path: {
-    sessionID: string
-  }
-  query: {
-    directory?: string
-    workspace?: string
-    marker: string
-    tail_start_id?: string
-    message_id?: string
-    source_generation?: string
-    archive_id?: string
-    archive_revision?: string
-    source_message_id?: string
-  }
-  url: "/session/{sessionID}/compacted_range"
-}
-
-export type SessionCompactedRangeErrors = {
-  /**
-   * BadRequest | InvalidRequestError
-   */
-  400: EffectHttpApiErrorBadRequest | InvalidRequestError
-  /**
-   * NotFoundError
-   */
-  404: NotFoundError
-}
-
-export type SessionCompactedRangeError = SessionCompactedRangeErrors[keyof SessionCompactedRangeErrors]
-
-export type SessionCompactedRangeResponses = {
-  /**
-   * Compacted transcript range
-   */
-  200: CompactedRangeResponse
-}
-
-export type SessionCompactedRangeResponse = SessionCompactedRangeResponses[keyof SessionCompactedRangeResponses]
-
-export type SessionTranscriptWindowData = {
+export type SessionCompactionCatalogData = {
   body?: never
   path: {
     sessionID: string
@@ -8432,11 +8350,12 @@ export type SessionTranscriptWindowData = {
   query?: {
     directory?: string
     workspace?: string
+    cursor?: string
   }
-  url: "/session/{sessionID}/transcript_window"
+  url: "/session/{sessionID}/compaction"
 }
 
-export type SessionTranscriptWindowErrors = {
+export type SessionCompactionCatalogErrors = {
   /**
    * BadRequest | InvalidRequestError
    */
@@ -8447,16 +8366,17 @@ export type SessionTranscriptWindowErrors = {
   404: NotFoundError
 }
 
-export type SessionTranscriptWindowError = SessionTranscriptWindowErrors[keyof SessionTranscriptWindowErrors]
+export type SessionCompactionCatalogError = SessionCompactionCatalogErrors[keyof SessionCompactionCatalogErrors]
 
-export type SessionTranscriptWindowResponses = {
+export type SessionCompactionCatalogResponses = {
   /**
-   * Bounded transcript window
+   * Compaction region metadata catalog page
    */
-  200: TranscriptWindowResponse
+  200: CompactionCatalogResponse
 }
 
-export type SessionTranscriptWindowResponse = SessionTranscriptWindowResponses[keyof SessionTranscriptWindowResponses]
+export type SessionCompactionCatalogResponse =
+  SessionCompactionCatalogResponses[keyof SessionCompactionCatalogResponses]
 
 export type SessionForkData = {
   body?: {

@@ -325,7 +325,16 @@
       "get": {
         "tags": ["global"],
         "operationId": "global.event",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "oca_event_projection",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
         "responses": {
           "200": {
             "description": "Event stream",
@@ -573,6 +582,69 @@
         ]
       }
     },
+    "/debug/stream-diagnostics": {
+      "get": {
+        "tags": ["diagnostics"],
+        "operationId": "debug.streamDiagnostics",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Stream diagnostics snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamDiagnosticsSnapshot"
+                }
+              }
+            }
+          }
+        },
+        "description": "Return sanitized aggregate stream diagnostics when enabled for the custom sidecar.",
+        "summary": "Get stream diagnostics",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.debug.streamDiagnostics({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/debug/compaction-incident": {
+      "get": {
+        "tags": ["diagnostics"],
+        "operationId": "debug.compactionIncident",
+        "parameters": [
+          {
+            "name": "action",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Compaction incident fragment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompactionIncidentSnapshot"
+                }
+              }
+            }
+          }
+        },
+        "description": "Return one sanitized persisted sidecar fragment for a host-issued Compact action token.",
+        "summary": "Get a compaction incident fragment",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.debug.compactionIncident({\n  ...\n})"
+          }
+        ]
+      }
+    },
     "/event": {
       "get": {
         "tags": ["event"],
@@ -605,6 +677,14 @@
           },
           {
             "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "oca_event_projection",
             "in": "query",
             "schema": {
               "type": "string"
@@ -6276,86 +6356,6 @@
         ]
       }
     },
-    "/session/{sessionID}/turns": {
-      "get": {
-        "tags": ["session"],
-        "operationId": "session.turns",
-        "parameters": [
-          {
-            "name": "sessionID",
-            "in": "path",
-            "schema": {
-              "type": "string",
-              "pattern": "^ses"
-            },
-            "required": true
-          },
-          {
-            "name": "directory",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            },
-            "required": false
-          },
-          {
-            "name": "workspace",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            },
-            "required": false
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Session turn facts",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionTurnsResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "BadRequest | InvalidRequestError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/effect_HttpApiError_BadRequest"
-                    },
-                    {
-                      "$ref": "#/components/schemas/InvalidRequestError"
-                    }
-                  ]
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "NotFoundError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/NotFoundError"
-                }
-              }
-            }
-          }
-        },
-        "description": "Return authoritative session turn and compaction boundary facts derived from persisted messages.",
-        "summary": "Get session turns",
-        "x-codeSamples": [
-          {
-            "lang": "js",
-            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.turns({\n  ...\n})"
-          }
-        ]
-      }
-    },
     "/session/{sessionID}/diff": {
       "get": {
         "tags": ["session"],
@@ -7256,10 +7256,10 @@
         ]
       }
     },
-    "/session/{sessionID}/compacted_range": {
+    "/session/{sessionID}/compaction": {
       "get": {
         "tags": ["session"],
-        "operationId": "session.compactedRange",
+        "operationId": "session.compactionCatalog",
         "parameters": [
           {
             "name": "sessionID",
@@ -7287,73 +7287,21 @@
             "required": false
           },
           {
-            "name": "marker",
-            "in": "query",
-            "schema": {
-              "type": "string",
-              "pattern": "^msg"
-            },
-            "required": true
-          },
-          {
-            "name": "tail_start_id",
-            "in": "query",
-            "schema": {
-              "type": "string",
-              "pattern": "^msg"
-            },
-            "required": false
-          },
-          {
-            "name": "message_id",
-            "in": "query",
-            "schema": {
-              "type": "string",
-              "pattern": "^msg"
-            },
-            "required": false
-          },
-          {
-            "name": "source_generation",
+            "name": "cursor",
             "in": "query",
             "schema": {
               "type": "string"
-            },
-            "required": false
-          },
-          {
-            "name": "archive_id",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            },
-            "required": false
-          },
-          {
-            "name": "archive_revision",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            },
-            "required": false
-          },
-          {
-            "name": "source_message_id",
-            "in": "query",
-            "schema": {
-              "type": "string",
-              "pattern": "^msg"
             },
             "required": false
           }
         ],
         "responses": {
           "200": {
-            "description": "Compacted transcript range",
+            "description": "Compaction region metadata catalog page",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CompactedRangeResponse"
+                  "$ref": "#/components/schemas/CompactionCatalogResponse"
                 }
               }
             }
@@ -7386,92 +7334,12 @@
             }
           }
         },
-        "description": "Return the transcript messages summarized by a completed compaction marker without changing session state.",
-        "summary": "Recall compacted transcript range",
+        "description": "Return one fixed page of compact-region metadata without transcript bodies.",
+        "summary": "Get compaction region catalog",
         "x-codeSamples": [
           {
             "lang": "js",
-            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.compactedRange({\n  ...\n})"
-          }
-        ]
-      }
-    },
-    "/session/{sessionID}/transcript_window": {
-      "get": {
-        "tags": ["session"],
-        "operationId": "session.transcriptWindow",
-        "parameters": [
-          {
-            "name": "sessionID",
-            "in": "path",
-            "schema": {
-              "type": "string",
-              "pattern": "^ses"
-            },
-            "required": true
-          },
-          {
-            "name": "directory",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            },
-            "required": false
-          },
-          {
-            "name": "workspace",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            },
-            "required": false
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Bounded transcript window",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TranscriptWindowResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "BadRequest | InvalidRequestError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/effect_HttpApiError_BadRequest"
-                    },
-                    {
-                      "$ref": "#/components/schemas/InvalidRequestError"
-                    }
-                  ]
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "NotFoundError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/NotFoundError"
-                }
-              }
-            }
-          }
-        },
-        "description": "Return body-free compacted archive descriptors and the bounded current transcript tail without hydrating full history.",
-        "summary": "Get bounded transcript window",
-        "x-codeSamples": [
-          {
-            "lang": "js",
-            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.transcriptWindow({\n  ...\n})"
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.compactionCatalog({\n  ...\n})"
           }
         ]
       }
@@ -12980,6 +12848,9 @@
             "$ref": "#/components/schemas/EventMessagePartDelta"
           },
           {
+            "$ref": "#/components/schemas/EventCompactionCatalogChanged"
+          },
+          {
             "$ref": "#/components/schemas/EventSessionDiff"
           },
           {
@@ -13062,9 +12933,6 @@
           },
           {
             "$ref": "#/components/schemas/EventMcpBrowserOpenFailed"
-          },
-          {
-            "$ref": "#/components/schemas/EventSessionTranscriptReconciled"
           },
           {
             "$ref": "#/components/schemas/EventCommandExecuted"
@@ -16601,6 +16469,32 @@
                   },
                   "type": {
                     "type": "string",
+                    "enum": ["compaction.catalog.changed"]
+                  },
+                  "properties": {
+                    "type": "object",
+                    "properties": {
+                      "sessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      }
+                    },
+                    "required": ["sessionID"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["id", "type", "properties"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^evt_"
+                  },
+                  "type": {
+                    "type": "string",
                     "enum": ["session.diff"]
                   },
                   "properties": {
@@ -17486,32 +17380,6 @@
                       }
                     },
                     "required": ["mcpName", "url"],
-                    "additionalProperties": false
-                  }
-                },
-                "required": ["id", "type", "properties"],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "id": {
-                    "type": "string",
-                    "pattern": "^evt_"
-                  },
-                  "type": {
-                    "type": "string",
-                    "enum": ["session.transcript.reconciled"]
-                  },
-                  "properties": {
-                    "type": "object",
-                    "properties": {
-                      "sessionID": {
-                        "type": "string",
-                        "pattern": "^ses"
-                      }
-                    },
-                    "required": ["sessionID"],
                     "additionalProperties": false
                   }
                 },
@@ -19172,6 +19040,243 @@
         },
         "additionalProperties": false
       },
+      "StreamDiagnosticsSnapshot": {
+        "type": "object",
+        "properties": {
+          "schema": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["NaN"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["-Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "summaryLimit": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["NaN"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["-Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "dropped": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["NaN"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["-Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "droppedSummaries": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["NaN"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["-Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "overflow": {
+            "type": "boolean"
+          },
+          "summaryOverflow": {
+            "type": "boolean"
+          },
+          "stageSummaries": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "schema",
+          "enabled",
+          "limit",
+          "summaryLimit",
+          "dropped",
+          "droppedSummaries",
+          "overflow",
+          "summaryOverflow",
+          "stageSummaries",
+          "events"
+        ],
+        "additionalProperties": false
+      },
+      "CompactionIncidentSnapshot": {
+        "type": "object",
+        "properties": {
+          "schema": {
+            "type": "string"
+          },
+          "actionToken": {
+            "type": "string"
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "persistenceFailed": {
+            "type": "boolean"
+          },
+          "firstSequence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["NaN"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["-Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "lastSequence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["NaN"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["-Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "persistedThroughSequence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["NaN"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["-Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "schema",
+          "actionToken",
+          "available",
+          "persistenceFailed",
+          "firstSequence",
+          "lastSequence",
+          "persistedThroughSequence",
+          "records"
+        ],
+        "additionalProperties": false
+      },
       "Model": {
         "type": "object",
         "properties": {
@@ -20739,138 +20844,6 @@
           }
         }
       },
-      "SessionTurnCompaction": {
-        "type": "object",
-        "properties": {
-          "compactionMessageID": {
-            "type": "string",
-            "pattern": "^msg"
-          },
-          "summaryMessageID": {
-            "type": "string",
-            "pattern": "^msg"
-          },
-          "summaryPreview": {
-            "type": "string"
-          },
-          "preCompactionMessageIDs": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "pattern": "^msg"
-            }
-          },
-          "postCompactionMessageIDs": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "pattern": "^msg"
-            }
-          },
-          "syntheticPromptMessageIDs": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "pattern": "^msg"
-            }
-          },
-          "replayPromptMessageIDs": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "pattern": "^msg"
-            }
-          },
-          "recallMarkerID": {
-            "type": "string",
-            "pattern": "^msg"
-          },
-          "recallTailStartMessageID": {
-            "type": "string",
-            "pattern": "^msg"
-          }
-        },
-        "required": [
-          "compactionMessageID",
-          "summaryMessageID",
-          "summaryPreview",
-          "preCompactionMessageIDs",
-          "postCompactionMessageIDs",
-          "syntheticPromptMessageIDs",
-          "replayPromptMessageIDs"
-        ],
-        "additionalProperties": false
-      },
-      "SessionTurn": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "startMessageID": {
-            "type": "string",
-            "pattern": "^msg"
-          },
-          "messageIDs": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "pattern": "^msg"
-            }
-          },
-          "intermediateMessageIDs": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "pattern": "^msg"
-            }
-          },
-          "compactionBoundaryMessageIDs": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "pattern": "^msg"
-            }
-          },
-          "finalOutputMessageID": {
-            "type": "string",
-            "pattern": "^msg"
-          },
-          "status": {
-            "type": "string",
-            "enum": ["complete", "incomplete"]
-          },
-          "compaction": {
-            "$ref": "#/components/schemas/SessionTurnCompaction"
-          }
-        },
-        "required": [
-          "id",
-          "startMessageID",
-          "messageIDs",
-          "intermediateMessageIDs",
-          "compactionBoundaryMessageIDs",
-          "status"
-        ],
-        "additionalProperties": false
-      },
-      "SessionTurnsResponse": {
-        "type": "object",
-        "properties": {
-          "sessionID": {
-            "type": "string",
-            "pattern": "^ses"
-          },
-          "turns": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/SessionTurn"
-            }
-          }
-        },
-        "required": ["sessionID", "turns"],
-        "additionalProperties": false
-      },
       "StagedContextTextPartInput": {
         "type": "object",
         "properties": {
@@ -20950,113 +20923,31 @@
         "required": ["id", "sessionID", "mode", "visibility", "consume", "parts", "time"],
         "additionalProperties": false
       },
-      "CompactedRangeResponse": {
+      "CompactionRegionDescriptor": {
         "type": "object",
         "properties": {
-          "reference": {
-            "type": "object",
-            "properties": {
-              "markerID": {
-                "type": "string"
-              },
-              "tailStartID": {
-                "type": "string"
-              },
-              "messageID": {
-                "type": "string"
-              },
-              "sourceMessageID": {
-                "type": "string",
-                "pattern": "^msg"
-              }
-            },
-            "required": ["markerID"],
-            "additionalProperties": false
-          },
-          "messages": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "info": {
-                  "$ref": "#/components/schemas/Message"
-                },
-                "parts": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Part"
-                  }
-                }
-              },
-              "required": ["info", "parts"],
-              "additionalProperties": false
-            }
-          },
-          "precedingSummary": {
-            "type": "object",
-            "properties": {
-              "info": {
-                "$ref": "#/components/schemas/Message"
-              },
-              "parts": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/Part"
-                }
-              }
-            },
-            "required": ["info", "parts"],
-            "additionalProperties": false
-          },
-          "turns": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/SessionTurn"
-            }
-          },
-          "complete": {
-            "type": "boolean"
-          },
-          "notice": {
-            "type": "string"
-          },
-          "status": {
+          "startMessageID": {
             "type": "string",
-            "enum": ["complete", "stale", "unavailable", "too_large"]
-          },
-          "sourceGeneration": {
-            "type": "string"
-          },
-          "archiveID": {
-            "type": "string"
-          },
-          "archiveRevision": {
-            "type": "string"
-          }
-        },
-        "required": ["reference", "messages", "turns", "complete", "status"],
-        "additionalProperties": false
-      },
-      "TranscriptArchiveDescriptor": {
-        "type": "object",
-        "properties": {
-          "archiveID": {
-            "type": "string"
-          },
-          "archiveRevision": {
-            "type": "string"
+            "pattern": "^msg"
           },
           "markerID": {
             "type": "string",
             "pattern": "^msg"
           },
-          "tailStartID": {
-            "type": "string",
-            "pattern": "^msg"
+          "endExclusiveCursor": {
+            "type": "string"
           },
-          "sourceMessageID": {
-            "type": "string",
-            "pattern": "^msg"
+          "physicalMessageCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "semanticMessageCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "partCount": {
+            "type": "integer",
+            "minimum": 0
           },
           "summaryMessageID": {
             "type": "string",
@@ -21065,152 +20956,37 @@
           "summaryPreview": {
             "type": "string"
           },
-          "messageCount": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "partCount": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "textUnits": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "decodedBytes": {
-            "type": "integer",
-            "minimum": 0
+          "precedingSummaryMessageID": {
+            "type": "string",
+            "pattern": "^msg"
           }
         },
         "required": [
-          "archiveID",
-          "archiveRevision",
+          "startMessageID",
           "markerID",
-          "sourceMessageID",
-          "summaryMessageID",
-          "summaryPreview",
-          "messageCount",
+          "endExclusiveCursor",
+          "physicalMessageCount",
+          "semanticMessageCount",
           "partCount",
-          "textUnits",
-          "decodedBytes"
+          "summaryMessageID",
+          "summaryPreview"
         ],
         "additionalProperties": false
       },
-      "TranscriptWindowResponse": {
+      "CompactionCatalogResponse": {
         "type": "object",
         "properties": {
-          "status": {
-            "type": "string",
-            "enum": [
-              "complete",
-              "index_required",
-              "indexing",
-              "index_failed",
-              "stale",
-              "revert_unrepresentable",
-              "too_large"
-            ]
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompactionRegionDescriptor"
+            }
           },
-          "sessionID": {
-            "type": "string",
-            "pattern": "^ses"
-          },
-          "sourceGeneration": {
+          "nextCursor": {
             "type": "string"
-          },
-          "windowRevision": {
-            "type": "string"
-          },
-          "tailStartID": {
-            "type": "string",
-            "pattern": "^msg"
-          },
-          "archiveDescriptors": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/TranscriptArchiveDescriptor"
-            }
-          },
-          "tail": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "info": {
-                  "$ref": "#/components/schemas/Message"
-                },
-                "parts": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Part"
-                  }
-                }
-              },
-              "required": ["info", "parts"],
-              "additionalProperties": false
-            }
-          },
-          "turns": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/SessionTurn"
-            }
-          },
-          "counts": {
-            "type": "object",
-            "properties": {
-              "descriptors": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "messages": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "parts": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "textUnits": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "decodedBytes": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "turns": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "turnIdentities": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "turnTextUnits": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "turnDecodedBytes": {
-                "type": "integer",
-                "minimum": 0
-              }
-            },
-            "required": [
-              "descriptors",
-              "messages",
-              "parts",
-              "textUnits",
-              "decodedBytes",
-              "turns",
-              "turnIdentities",
-              "turnTextUnits",
-              "turnDecodedBytes"
-            ],
-            "additionalProperties": false
           }
         },
-        "required": ["status", "sessionID", "archiveDescriptors", "tail", "turns", "counts"],
+        "required": ["items"],
         "additionalProperties": false
       },
       "SessionBusyError": {
@@ -27767,6 +27543,32 @@
         "required": ["id", "type", "properties"],
         "additionalProperties": false
       },
+      "EventCompactionCatalogChanged": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^evt_"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["compaction.catalog.changed"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              }
+            },
+            "required": ["sessionID"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
+        "additionalProperties": false
+      },
       "EventSessionDiff": {
         "type": "object",
         "properties": {
@@ -28529,32 +28331,6 @@
         "required": ["id", "type", "properties"],
         "additionalProperties": false
       },
-      "EventSessionTranscriptReconciled": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "pattern": "^evt_"
-          },
-          "type": {
-            "type": "string",
-            "enum": ["session.transcript.reconciled"]
-          },
-          "properties": {
-            "type": "object",
-            "properties": {
-              "sessionID": {
-                "type": "string",
-                "pattern": "^ses"
-              }
-            },
-            "required": ["sessionID"],
-            "additionalProperties": false
-          }
-        },
-        "required": ["id", "type", "properties"],
-        "additionalProperties": false
-      },
       "EventCommandExecuted": {
         "type": "object",
         "properties": {
@@ -29121,6 +28897,10 @@
     {
       "name": "global",
       "description": "Global server routes."
+    },
+    {
+      "name": "diagnostics",
+      "description": "Debug diagnostics routes."
     },
     {
       "name": "event",

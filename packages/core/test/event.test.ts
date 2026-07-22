@@ -212,11 +212,14 @@ describe("EventV2", () => {
       const events = yield* EventV2.Service
       const { db } = yield* Database.Service
       const aggregateID = EventV2.ID.create()
+      const published = new Array<EventV2.Payload>()
       yield* db.run("CREATE TABLE IF NOT EXISTS event_commit_probe (value text NOT NULL)")
       yield* db.run("DELETE FROM event_commit_probe")
       yield* events.project(SyncMessage, () =>
         db.run("INSERT INTO event_commit_probe (value) VALUES ('projected')").pipe(Effect.orDie, Effect.asVoid),
       )
+      const unsubscribe = yield* events.listen((event) => Effect.sync(() => published.push(event)))
+      yield* Effect.addFinalizer(() => unsubscribe)
 
       const exit = yield* events
         .publish(SyncMessage, { id: aggregateID, text: "hello" }, { commit: () => Effect.die("commit failed") })
@@ -228,6 +231,7 @@ describe("EventV2", () => {
       expect(
         yield* db.select().from(EventSequenceTable).where(eq(EventSequenceTable.aggregate_id, aggregateID)).all(),
       ).toEqual([])
+      expect(published).toEqual([])
     }),
   )
 
