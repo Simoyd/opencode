@@ -20806,10 +20806,6 @@
             "type": "integer",
             "minimum": 0
           },
-          "partCount": {
-            "type": "integer",
-            "minimum": 0
-          },
           "summaryMessageID": {
             "type": "string",
             "pattern": "^msg"
@@ -20828,7 +20824,6 @@
           "endExclusiveCursor",
           "physicalMessageCount",
           "semanticMessageCount",
-          "partCount",
           "summaryMessageID",
           "summaryPreview"
         ],

@@ -494,6 +494,9 @@ export const layer = Layer.effect(
             tools: original.tools,
             system: original.system,
           })
+          const hasProtocolCarrier = replay.parts.some(
+            (part) => part.type === "text" || (part.type === "file" && MessageV2.isMedia(part.mime)),
+          )
           for (const part of replay.parts) {
             if (part.type === "compaction") continue
             const replayPart =
@@ -516,6 +519,25 @@ export const layer = Layer.effect(
               messageID: replayMsg.id,
               sessionID: input.sessionID,
               ...(metadata ? { metadata } : {}),
+            })
+          }
+          if (!hasProtocolCarrier) {
+            yield* session.updatePart({
+              id: PartID.ascending(),
+              messageID: replayMsg.id,
+              sessionID: input.sessionID,
+              type: "text",
+              text: "",
+              synthetic: true,
+              metadata: {
+                compaction_replay: true,
+                compaction_owner_marker_id: userMessage.id,
+                compaction_replay_source_message_id: original.id,
+              },
+              time: {
+                start: Date.now(),
+                end: Date.now(),
+              },
             })
           }
         }

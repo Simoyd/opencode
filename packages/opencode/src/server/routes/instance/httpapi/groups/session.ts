@@ -56,7 +56,6 @@ export const CompactionRegionDescriptor = Schema.Struct({
   endExclusiveCursor: Schema.String,
   physicalMessageCount: NonNegativeInt,
   semanticMessageCount: NonNegativeInt,
-  partCount: NonNegativeInt,
   summaryMessageID: MessageID,
   summaryPreview: Schema.String,
   precedingSummaryMessageID: Schema.optional(MessageID),

@@ -323,6 +323,70 @@ describe("compaction catalog invalidation", () => {
       yield* session.remove(info.id)
     }),
   )
+
+  it.instance("rejects replay whose outer and nested transcript owners disagree", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const outer = yield* session.create({})
+      const nested = yield* session.create({})
+      const messageID = MessageID.ascending()
+      const invalid = {
+        id: EventV2.ID.create(),
+        type: EventV2.versionedType(SessionV1.Event.MessageUpdated.type, SessionV1.Event.MessageUpdated.sync!.version),
+        seq: 1,
+        aggregateID: outer.id,
+        data: {
+          sessionID: outer.id,
+          info: {
+            id: messageID,
+            sessionID: nested.id,
+            role: "user" as const,
+            time: { created: 1 },
+            agent: "test",
+            model: { providerID: "test", modelID: "test" },
+            tools: {},
+          },
+        },
+      }
+
+      const exit = yield* events.replayAll([invalid], { publish: true }).pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect((yield* session.messages({ sessionID: nested.id })).some((item) => item.info.id === messageID)).toBe(false)
+
+      const valid = {
+        ...invalid,
+        id: EventV2.ID.create(),
+        data: { ...invalid.data, info: { ...invalid.data.info, sessionID: outer.id } },
+      }
+      yield* events.replayAll([valid], { publish: true })
+      const invalidPart = {
+        id: EventV2.ID.create(),
+        type: EventV2.versionedType(SessionV1.Event.PartUpdated.type, SessionV1.Event.PartUpdated.sync!.version),
+        seq: 2,
+        aggregateID: outer.id,
+        data: {
+          sessionID: outer.id,
+          part: {
+            id: PartID.ascending(),
+            sessionID: nested.id,
+            messageID,
+            type: "text" as const,
+            text: "wrong owner",
+          },
+          time: 1,
+        },
+      }
+      const partExit = yield* events.replayAll([invalidPart], { publish: true }).pipe(Effect.exit)
+      expect(Exit.isFailure(partExit)).toBe(true)
+      expect(
+        (yield* session.messages({ sessionID: outer.id })).find((item) => item.info.id === messageID)?.parts,
+      ).toEqual([])
+      yield* session.remove(outer.id)
+      yield* session.remove(nested.id)
+    }),
+  )
 })
 
 describe("step-finish token propagation via event", () => {

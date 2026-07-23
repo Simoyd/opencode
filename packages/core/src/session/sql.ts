@@ -190,7 +190,6 @@ export const CompactionRegionTable = sqliteTable(
     summary_preview: text().notNull(),
     physical_message_count: integer().notNull(),
     semantic_message_count: integer().notNull(),
-    part_count: integer().notNull(),
   },
   (table) => [
     primaryKey({ columns: [table.session_id, table.marker_id] }),

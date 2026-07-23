@@ -403,6 +403,36 @@ describe("session messages and compaction catalog", () => {
   )
 
   it.instance(
+    "uses only canonical text for completed summary previews",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const session = yield* sessionScoped
+        const prompt = yield* addUser(session.id, "visible summary")
+        const marker = yield* addCompaction(session.id, prompt, { auto: false })
+        yield* addAssistant(session.id, marker, "public summary", {
+          summary: true,
+          finish: "end_turn",
+          reasoning: "private reasoning",
+        })
+        const reasoningOnlyPrompt = yield* addUser(session.id, "reasoning-only summary")
+        const reasoningOnlyMarker = yield* addCompaction(session.id, reasoningOnlyPrompt, { auto: false })
+        yield* addAssistant(session.id, reasoningOnlyMarker, "", {
+          summary: true,
+          finish: "end_turn",
+          reasoning: "not a summary body",
+        })
+
+        const response = yield* request(`/session/${session.id}/compaction`)
+        const page = yield* json<{ items: Array<{ markerID: MessageID; summaryPreview: string }> }>(response)
+        expect(page.items).toHaveLength(1)
+        expect(page.items[0]).toMatchObject({ markerID: marker, summaryPreview: "public summary" })
+        expect(page.items.some((item) => item.markerID === reasoningOnlyMarker)).toBe(false)
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
     "classifies owned replay once while hiding summary and continuation protocol rows",
     withoutWatcher(
       Effect.gen(function* () {
@@ -446,13 +476,11 @@ describe("session messages and compaction catalog", () => {
             markerID: MessageID
             physicalMessageCount: number
             semanticMessageCount: number
-            partCount: number
           }>
         }>(response)
         const second = page.items.find((item) => item.markerID === secondMarker)!
         expect(second.physicalMessageCount).toBe(6)
         expect(second.semanticMessageCount).toBe(3)
-        expect(second.partCount).toBe(5)
 
         yield* service.removeMessage({ sessionID: session.id, messageID: source })
         const afterDelete = yield* request(`/session/${session.id}/compaction`).pipe(

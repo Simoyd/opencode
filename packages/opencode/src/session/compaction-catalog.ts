@@ -72,7 +72,6 @@ export const page = Effect.fn("CompactionCatalog.page")(function* (input: { sess
       endExclusiveCursor: MessageV2.cursor.encode({ id: row.marker_id, time: markerTime }),
       physicalMessageCount: row.physical_message_count,
       semanticMessageCount: row.semantic_message_count,
-      partCount: row.part_count,
       summaryMessageID: row.summary_message_id,
       summaryPreview: row.summary_preview,
       ...(precedingSummaryMessageID ? { precedingSummaryMessageID } : {}),

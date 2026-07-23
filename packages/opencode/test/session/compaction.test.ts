@@ -1176,6 +1176,51 @@ describe("session.compaction.process", () => {
   )
 
   it.instance(
+    "adds replay ownership metadata when the prior turn has no text carrier",
+    Effect.gen(function* () {
+      const ssn = yield* SessionNs.Service
+      const session = yield* ssn.create({})
+      yield* createUserMessage(session.id, "root")
+      const replay = yield* ssn.updateMessage({
+        id: MessageID.ascending(),
+        role: "user",
+        sessionID: session.id,
+        agent: "build",
+        model: ref,
+        time: { created: Date.now() },
+      })
+      const msg = yield* createUserMessage(session.id, "current")
+      const messages = yield* ssn.messages({ sessionID: session.id })
+
+      const result = yield* SessionCompaction.use.process({
+        parentID: msg.id,
+        messages,
+        sessionID: session.id,
+        auto: true,
+        overflow: true,
+      })
+
+      const replayed = (yield* ssn.messages({ sessionID: session.id })).find(
+        (item) =>
+          item.info.role === "user" &&
+          item.parts.some(
+            (part) =>
+              part.type === "text" &&
+              part.metadata?.compaction_replay === true &&
+              part.metadata.compaction_replay_source_message_id === replay.id,
+          ),
+      )
+      const carrier = replayed?.parts.find(
+        (part): part is SessionV1.TextPart => part.type === "text" && part.metadata?.compaction_replay === true,
+      )
+
+      expect(result).toBe("continue")
+      expect(carrier).toMatchObject({ text: "", synthetic: true })
+      expect(carrier?.metadata?.compaction_owner_marker_id).toBe(msg.id)
+    }),
+  )
+
+  it.instance(
     "falls back to overflow guidance when no replayable turn exists",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service

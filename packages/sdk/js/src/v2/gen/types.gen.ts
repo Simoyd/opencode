@@ -2632,7 +2632,6 @@ export type CompactionRegionDescriptor = {
   endExclusiveCursor: string
   physicalMessageCount: number
   semanticMessageCount: number
-  partCount: number
   summaryMessageID: string
   summaryPreview: string
   precedingSummaryMessageID?: string

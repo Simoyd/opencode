@@ -358,9 +358,9 @@ function deriveCompletedRegion(
     }
     const summary = declaredSummaries[0]
     if (!summary) return undefined
-    if (!summary.info.finish || summary.info.error || messageText(summary).length === 0) return undefined
+    if (!summary.info.finish || summary.info.error || summaryText(summary).length === 0) return undefined
 
-    const normalized = messageText(summary).split(/\s+/).filter(Boolean).join(" ")
+    const normalized = summaryText(summary).split(/\s+/).filter(Boolean).join(" ")
     return {
       session_id: sessionID,
       marker_id: marker.info.id,
@@ -369,7 +369,6 @@ function deriveCompletedRegion(
       summary_preview: normalized.length <= 80 ? normalized : `${normalized.slice(0, 77)}...`,
       physical_message_count: body.length,
       semantic_message_count: semanticCount(body, previousMarkerID, existingMessageIDs),
-      part_count: body.reduce((count, message) => count + message.parts.length, 0),
     } satisfies typeof CompactionRegionTable.$inferInsert
   })
 }
@@ -380,9 +379,12 @@ function semanticCount(
   existingMessageIDs: ReadonlySet<MessageID>,
 ) {
   const canonicalReplaySources = new Set<MessageID>()
+  const replaySourcesByMessageID = new Map<MessageID, MessageID>()
   for (const message of messages) {
     const value = protocol(message)
-    if (value.replay && existingMessageIDs.has(value.replay.source)) canonicalReplaySources.add(value.replay.source)
+    if (!value.replay) continue
+    replaySourcesByMessageID.set(message.info.id, value.replay.source)
+    if (existingMessageIDs.has(value.replay.source)) canonicalReplaySources.add(value.replay.source)
   }
   const identities = new Set<string>()
   for (const message of messages) {
@@ -399,6 +401,13 @@ function semanticCount(
       if (!ownerMarkerID || value.continuation.owner !== ownerMarkerID) {
         throw new Error(`Compaction continuation ${message.info.id} has contradictory marker ownership`)
       }
+      continue
+    }
+    if (
+      message.info.role === "assistant" &&
+      replaySourcesByMessageID.has(message.info.parentID) &&
+      !canonicalReplaySources.has(replaySourcesByMessageID.get(message.info.parentID)!)
+    ) {
       continue
     }
     if (!canonicalReplaySources.has(message.info.id)) identities.add(`message:${message.info.id}`)
@@ -454,11 +463,9 @@ function isMarker(message: SessionV1.WithParts) {
   return message.info.role === "user" && message.parts.some((part) => part.type === "compaction")
 }
 
-function messageText(message: SessionV1.WithParts) {
+function summaryText(message: SessionV1.WithParts) {
   return message.parts
-    .filter(
-      (part): part is SessionV1.TextPart | SessionV1.ReasoningPart => part.type === "text" || part.type === "reasoning",
-    )
+    .filter((part): part is SessionV1.TextPart => part.type === "text")
     .map((part) => part.text.trim())
     .filter(Boolean)
     .join("\n")
@@ -509,7 +516,6 @@ function replaceRow(
           summary_preview: next.summary_preview,
           physical_message_count: next.physical_message_count,
           semantic_message_count: next.semantic_message_count,
-          part_count: next.part_count,
         },
       })
       .run()
@@ -534,7 +540,6 @@ function sameRow(row: typeof CompactionRegionTable.$inferSelect, candidate: type
     row.summary_message_id === candidate.summary_message_id &&
     row.summary_preview === candidate.summary_preview &&
     row.physical_message_count === candidate.physical_message_count &&
-    row.semantic_message_count === candidate.semantic_message_count &&
-    row.part_count === candidate.part_count
+    row.semantic_message_count === candidate.semantic_message_count
   )
 }

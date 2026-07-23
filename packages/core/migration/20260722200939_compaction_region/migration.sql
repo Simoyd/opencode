@@ -6,7 +6,6 @@ CREATE TABLE `compaction_region` (
 	`summary_preview` text NOT NULL,
 	`physical_message_count` integer NOT NULL,
 	`semantic_message_count` integer NOT NULL,
-	`part_count` integer NOT NULL,
 	CONSTRAINT `compaction_region_pk` PRIMARY KEY(`session_id`, `marker_id`),
 	CONSTRAINT `fk_compaction_region_session_id_session_id_fk` FOREIGN KEY (`session_id`) REFERENCES `session`(`id`) ON DELETE CASCADE
 );

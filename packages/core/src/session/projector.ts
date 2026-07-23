@@ -317,6 +317,7 @@ export const layer = Layer.effectDiscard(
     )
     yield* events.project(SessionV1.Event.MessageUpdated, (event) =>
       Effect.gen(function* () {
+        requireMatchingSessionOwner(event.type, event.data.sessionID, event.data.info.sessionID)
         const time_created = event.data.info.time.created
         const id = event.data.info.id
         const sessionID = event.data.info.sessionID
@@ -394,6 +395,7 @@ export const layer = Layer.effectDiscard(
     )
     yield* events.project(SessionV1.Event.PartUpdated, (event) =>
       Effect.gen(function* () {
+        requireMatchingSessionOwner(event.type, event.data.sessionID, event.data.part.sessionID)
         const id = event.data.part.id
         const messageID = event.data.part.messageID
         const sessionID = event.data.part.sessionID
@@ -532,5 +534,11 @@ export const layer = Layer.effectDiscard(
     })
   }),
 )
+
+function requireMatchingSessionOwner(type: string, outerSessionID: string, nestedSessionID: string) {
+  if (outerSessionID !== nestedSessionID) {
+    throw new Error(`${type} contains contradictory outer and nested session ownership`)
+  }
+}
 
 export const defaultLayer = layer.pipe(Layer.provide(EventV2.defaultLayer), Layer.provide(Database.defaultLayer))
