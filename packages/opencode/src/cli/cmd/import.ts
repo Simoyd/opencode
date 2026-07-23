@@ -95,15 +95,40 @@ export const persistImportedSession = Effect.fn("Cli.import.persist")(function* 
   }) as Session.Info
   const row = Session.toRow(info)
   const writeImportedRows = Effect.gen(function* () {
+    const messageIDs = new Set<string>()
+    const partIDs = new Set<string>()
+    let previousPosition: { id: string; time: number } | undefined
     for (const msg of exportData.messages) {
       const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
+      if (msgInfo.sessionID !== exportData.info.id || msgInfo.time?.created === undefined) {
+        return yield* Effect.die("Imported message owner and physical time must match its containing session")
+      }
       const { id, sessionID: _, ...msgData } = msgInfo
+      const timeCreated = msgInfo.time.created
+      if (
+        !messageIDs.add(id) ||
+        (previousPosition &&
+          (timeCreated < previousPosition.time ||
+            (timeCreated === previousPosition.time && id <= previousPosition.id)))
+      ) {
+        return yield* Effect.die("Imported messages contradict canonical physical order")
+      }
+      previousPosition = { id, time: timeCreated }
+      const existingMessage = yield* db
+        .select({ sessionID: MessageTable.session_id, timeCreated: MessageTable.time_created })
+        .from(MessageTable)
+        .where(eq(MessageTable.id, id))
+        .get()
+        .pipe(Effect.orDie)
+      if (existingMessage && (existingMessage.sessionID !== row.id || existingMessage.timeCreated !== timeCreated)) {
+        return yield* Effect.die(`Imported message ${id} collides with a different persisted owner or position`)
+      }
       yield* db
         .insert(MessageTable)
         .values({
           id,
           session_id: row.id,
-          time_created: msgInfo.time?.created ?? Date.now(),
+          time_created: timeCreated,
           data: msgData as never,
         })
         .onConflictDoNothing()
@@ -112,7 +137,23 @@ export const persistImportedSession = Effect.fn("Cli.import.persist")(function* 
 
       for (const part of msg.parts) {
         const partInfo = decodePart(part) as SessionV1.Part
+        if (
+          partInfo.sessionID !== exportData.info.id ||
+          partInfo.messageID !== id ||
+          !partIDs.add(partInfo.id)
+        ) {
+          return yield* Effect.die("Imported part ownership must match its containing message and session")
+        }
         const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
+        const existingPart = yield* db
+          .select({ sessionID: PartTable.session_id, messageID: PartTable.message_id })
+          .from(PartTable)
+          .where(eq(PartTable.id, partId))
+          .get()
+          .pipe(Effect.orDie)
+        if (existingPart && (existingPart.sessionID !== row.id || existingPart.messageID !== messageID)) {
+          return yield* Effect.die(`Imported part ${partId} collides with a different persisted owner`)
+        }
         yield* db
           .insert(PartTable)
           .values({

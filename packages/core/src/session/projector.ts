@@ -323,11 +323,14 @@ export const layer = Layer.effectDiscard(
         const sessionID = event.data.info.sessionID
         const data = messageData(event.data.info)
         const prior = yield* db
-          .select({ data: MessageTable.data })
+          .select({ session_id: MessageTable.session_id, time_created: MessageTable.time_created, data: MessageTable.data })
           .from(MessageTable)
           .where(eq(MessageTable.id, id))
           .get()
           .pipe(Effect.orDie)
+        if (prior && (prior.session_id !== sessionID || prior.time_created !== time_created)) {
+          return yield* Effect.die(`Message ${id} collides with a different persisted owner or physical position`)
+        }
         yield* db
           .insert(MessageTable)
           .values({ id, session_id: sessionID, time_created, data })
@@ -374,7 +377,13 @@ export const layer = Layer.effectDiscard(
         const row = yield* db
           .select()
           .from(PartTable)
-          .where(and(eq(PartTable.id, event.data.partID), eq(PartTable.session_id, event.data.sessionID)))
+          .where(
+            and(
+              eq(PartTable.id, event.data.partID),
+              eq(PartTable.message_id, event.data.messageID),
+              eq(PartTable.session_id, event.data.sessionID),
+            ),
+          )
           .get()
           .pipe(Effect.orDie)
         const previous = row && usage(row.data)
@@ -401,6 +410,9 @@ export const layer = Layer.effectDiscard(
         const sessionID = event.data.part.sessionID
         const data = partData(event.data.part)
         const row = yield* db.select().from(PartTable).where(eq(PartTable.id, id)).get().pipe(Effect.orDie)
+        if (row && (row.session_id !== sessionID || row.message_id !== messageID)) {
+          return yield* Effect.die(`Part ${id} collides with a different persisted owner`)
+        }
         yield* db
           .insert(PartTable)
           .values({ id, message_id: messageID, session_id: sessionID, time_created: event.data.time, data })

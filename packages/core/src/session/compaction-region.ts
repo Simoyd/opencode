@@ -287,10 +287,14 @@ function hydrateMessages(db: DatabaseService, messageRows: (typeof MessageTable.
   return Effect.gen(function* () {
     if (messageRows.length === 0) return []
     const messageIDs = messageRows.map((row) => row.id)
+    const sessionID = messageRows[0]!.session_id
+    if (messageRows.some((row) => row.session_id !== sessionID)) {
+      return yield* Effect.die("Compaction hydration crossed persisted session owners")
+    }
     const partRows = yield* db
       .select()
       .from(PartTable)
-      .where(inArray(PartTable.message_id, messageIDs))
+      .where(and(eq(PartTable.session_id, sessionID), inArray(PartTable.message_id, messageIDs)))
       .orderBy(PartTable.message_id, PartTable.id)
       .all()
       .pipe(Effect.orDie)
@@ -349,7 +353,9 @@ function deriveCompletedRegion(
     if (!marker || !isMarker(marker) || markerIndex < 1) return undefined
     const body = messages.slice(0, markerIndex)
     const afterMarker = messages.slice(markerIndex + 1)
-    const declaredSummaries = afterMarker.filter(
+    const nextMarkerIndex = afterMarker.findIndex(isMarker)
+    const completedTail = nextMarkerIndex < 0 ? afterMarker : afterMarker.slice(0, nextMarkerIndex)
+    const declaredSummaries = completedTail.filter(
       (message): message is SessionV1.WithParts & { info: SessionV1.Assistant } =>
         message.info.role === "assistant" && message.info.summary === true && message.info.parentID === marker.info.id,
     )

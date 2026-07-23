@@ -46,9 +46,16 @@ function correlationForSessionEvent(sessionID: string | undefined, event?: unkno
   )
 }
 
-function sessionMatches(sessionID: string | undefined, event: InstanceEvent) {
+function sessionMatches(sessionID: string | undefined, event: InstanceEvent, selectedProjection: boolean) {
   if (!sessionID) return true
-  const properties = event.properties as { sessionID?: string }
+  if (event.type === "server.connected" || event.type === "server.heartbeat" || event.type === "server.instance.disposed") return true
+  const properties = event.properties as { sessionID?: unknown; sessionId?: unknown }
+  if (selectedProjection) {
+    if (typeof properties.sessionID !== "string" || properties.sessionId !== undefined) {
+      throw new Error(`Selected ${event.type} event omitted canonical sessionID ownership`)
+    }
+    return properties.sessionID === sessionID
+  }
   return !properties.sessionID || properties.sessionID === sessionID
 }
 
@@ -109,7 +116,7 @@ function eventResponse(events: EventV2.Interface) {
         (event) =>
           (selectedProjection || event.type !== SelectedEventProjection.CatalogChangedType) &&
           typeMatches(typeFilter, event) &&
-          sessionMatches(sessionID, event),
+          sessionMatches(sessionID, event, selectedProjection),
       ),
       Stream.tap((event) =>
         Effect.sync(() =>
