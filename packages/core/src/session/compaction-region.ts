@@ -29,10 +29,6 @@ export function takeInvalidation(data: unknown) {
   return true
 }
 
-export function create(_db: DatabaseService, _input: { sessionID: SessionSchema.ID }) {
-  return Effect.void
-}
-
 export const reconcile = Effect.fn("CompactionRegionProjection.reconcile")(function* (
   db: DatabaseService,
   input: ReconcileInput,
