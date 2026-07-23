@@ -38,7 +38,11 @@ describe("Environment", () => {
 
     expect(result.stderr).toBe("")
     expect(result.code).toBe(0)
-    const output = JSON.parse(result.stdout) as { path: Record<string, string>; make: Record<string, string>; db: string }
+    const output = JSON.parse(result.stdout) as {
+      path: Record<string, string>
+      make: Record<string, string>
+      db: string
+    }
     expect(output.path.config).toBe(path.join(root, "config"))
     expect(output.path.data).toBe(path.join(root, "data"))
     expect(output.path.cache).toBe(path.join(root, "cache"))
@@ -55,14 +59,11 @@ describe("Environment", () => {
 
   test("fails closed when legacy path or content overrides conflict with isolated-root mode", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-isolated-root-"))
-    const result = await run(
-      `await import("@opencode-ai/core/global")`,
-      {
-        ...cleanEnv(root),
-        OPENCODE_DB: "legacy.db",
-        OPENCODE_CONFIG_CONTENT: "{}",
-      },
-    )
+    const result = await run(`await import("@opencode-ai/core/global")`, {
+      ...cleanEnv(root),
+      OPENCODE_DB: "legacy.db",
+      OPENCODE_CONFIG_CONTENT: "{}",
+    })
 
     expect(result.code).not.toBe(0)
     expect(result.stderr).toContain(Environment.ISOLATED_ROOT_ENV)

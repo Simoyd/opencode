@@ -157,6 +157,7 @@ export interface Interface {
   }) => Stream.Stream<CursorEvent>
   readonly sync: (handler: Sync) => Effect.Effect<Unsubscribe>
   readonly listen: (listener: Listener) => Effect.Effect<Unsubscribe>
+  readonly afterNotify: (listener: Listener) => Effect.Effect<Unsubscribe>
   readonly beforeCommit: (guard: CommitGuard) => Effect.Effect<void>
   readonly project: <D extends Definition>(definition: D, projector: Projector<D>) => Effect.Effect<void>
   readonly replay: (
@@ -192,6 +193,7 @@ export const layerWith = (options?: LayerOptions) =>
         inFlight: number
         closed: boolean
       }>()
+      const afterListeners: typeof listeners = []
       const syncHandlers = new Array<Sync>()
       const { db } = yield* Database.Service
 
@@ -423,32 +425,37 @@ export const layerWith = (options?: LayerOptions) =>
 
       function notify(event: Payload) {
         return Effect.gen(function* () {
-          yield* Effect.acquireUseRelease(
-            Effect.sync(() =>
-              listeners.map((entry) => {
-                entry.inFlight++
-                return entry
-              }),
-            ),
-            (selected) =>
-              Effect.forEach(selected, (entry) => observe(event, "listener", entry.listener), { discard: true }),
-            (selected) =>
-              Effect.gen(function* () {
-                const drained = yield* Effect.sync(() => {
-                  const result = new Array<Deferred.Deferred<void>>()
-                  for (const entry of selected) {
-                    entry.inFlight--
-                    if (entry.closed && entry.inFlight === 0) result.push(entry.drained)
-                  }
-                  return result
-                })
-                yield* Effect.forEach(drained, (entry) => Deferred.succeed(entry, undefined), { discard: true })
-              }),
-          )
+          yield* notifyListeners(listeners, event)
           const pubsub = typed.get(event.type)
           if (pubsub) yield* PubSub.publish(pubsub, event)
           yield* PubSub.publish(all, event)
+          yield* notifyListeners(afterListeners, event)
         })
+      }
+
+      function notifyListeners(selectedListeners: typeof listeners, event: Payload) {
+        return Effect.acquireUseRelease(
+          Effect.sync(() =>
+            selectedListeners.map((entry) => {
+              entry.inFlight++
+              return entry
+            }),
+          ),
+          (selected) =>
+            Effect.forEach(selected, (entry) => observe(event, "listener", entry.listener), { discard: true }),
+          (selected) =>
+            Effect.gen(function* () {
+              const drained = yield* Effect.sync(() => {
+                const result = new Array<Deferred.Deferred<void>>()
+                for (const entry of selected) {
+                  entry.inFlight--
+                  if (entry.closed && entry.inFlight === 0) result.push(entry.drained)
+                }
+                return result
+              })
+              yield* Effect.forEach(drained, (entry) => Deferred.succeed(entry, undefined), { discard: true })
+            }),
+        )
       }
 
       function publish<D extends Definition>(definition: D, data: Data<D>, options?: PublishOptions) {
@@ -650,22 +657,25 @@ export const layerWith = (options?: LayerOptions) =>
           }),
         )
 
-      const listen = (listener: Listener): Effect.Effect<Unsubscribe> =>
+      const registerListener = (target: typeof listeners, listener: Listener): Effect.Effect<Unsubscribe> =>
         Effect.sync(() => {
           const entry = { listener, drained: Deferred.makeUnsafe<void>(), inFlight: 0, closed: false }
-          listeners.push(entry)
+          target.push(entry)
           return Effect.gen(function* () {
             const pending = yield* Effect.sync(() => {
               if (!entry.closed) {
                 entry.closed = true
-                const index = listeners.indexOf(entry)
-                if (index >= 0) listeners.splice(index, 1)
+                const index = target.indexOf(entry)
+                if (index >= 0) target.splice(index, 1)
               }
               return entry.inFlight > 0
             })
             if (pending) yield* Deferred.await(entry.drained)
           })
         })
+
+      const listen = (listener: Listener): Effect.Effect<Unsubscribe> => registerListener(listeners, listener)
+      const afterNotify = (listener: Listener): Effect.Effect<Unsubscribe> => registerListener(afterListeners, listener)
 
       const sync = (handler: Sync): Effect.Effect<Unsubscribe> =>
         Effect.sync(() => {
@@ -695,6 +705,7 @@ export const layerWith = (options?: LayerOptions) =>
         aggregateEvents: streamEvents,
         sync,
         listen,
+        afterNotify,
         beforeCommit,
         project,
         replay,

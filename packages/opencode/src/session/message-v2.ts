@@ -440,42 +440,44 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   before?: string
 }) {
   const { db } = yield* Database.Service
-  return yield* db.transaction(() =>
-    Effect.gen(function* () {
-      const before = input.before ? cursor.decode(input.before) : undefined
-      const where = before
-        ? and(eq(MessageTable.session_id, input.sessionID), older(before))
-        : eq(MessageTable.session_id, input.sessionID)
-      const rows = yield* db
-        .select()
-        .from(MessageTable)
-        .where(where)
-        .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
-        .limit(input.limit + 1)
-        .all()
-        .pipe(Effect.orDie)
-      if (rows.length === 0) {
-        const row = yield* db
-          .select({ id: SessionTable.id })
-          .from(SessionTable)
-          .where(eq(SessionTable.id, input.sessionID))
-          .get()
+  return yield* db
+    .transaction(() =>
+      Effect.gen(function* () {
+        const before = input.before ? cursor.decode(input.before) : undefined
+        const where = before
+          ? and(eq(MessageTable.session_id, input.sessionID), older(before))
+          : eq(MessageTable.session_id, input.sessionID)
+        const rows = yield* db
+          .select()
+          .from(MessageTable)
+          .where(where)
+          .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+          .limit(input.limit + 1)
+          .all()
           .pipe(Effect.orDie)
-        if (!row) return yield* new NotFoundError({ message: `Session not found: ${input.sessionID}` })
-        return { items: [] as WithParts[], more: false }
-      }
-      const more = rows.length > input.limit
-      const slice = more ? rows.slice(0, input.limit) : rows
-      const items = yield* hydrate(db, slice)
-      items.reverse()
-      const tail = slice.at(-1)
-      return {
-        items,
-        more,
-        cursor: more && tail ? cursor.encode({ id: tail.id, time: tail.time_created }) : undefined,
-      }
-    }),
-  ).pipe(Effect.orDie)
+        if (rows.length === 0) {
+          const row = yield* db
+            .select({ id: SessionTable.id })
+            .from(SessionTable)
+            .where(eq(SessionTable.id, input.sessionID))
+            .get()
+            .pipe(Effect.orDie)
+          if (!row) return yield* new NotFoundError({ message: `Session not found: ${input.sessionID}` })
+          return { items: [] as WithParts[], more: false }
+        }
+        const more = rows.length > input.limit
+        const slice = more ? rows.slice(0, input.limit) : rows
+        const items = yield* hydrate(db, slice)
+        items.reverse()
+        const tail = slice.at(-1)
+        return {
+          items,
+          more,
+          cursor: more && tail ? cursor.encode({ id: tail.id, time: tail.time_created }) : undefined,
+        }
+      }),
+    )
+    .pipe(Effect.orDie)
 })
 
 export function stream(sessionID: SessionID) {
@@ -517,18 +519,20 @@ export function parts(messageID: MessageID) {
 
 export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: SessionID; messageID: MessageID }) {
   const { db } = yield* Database.Service
-  return yield* db.transaction(() =>
-    Effect.gen(function* () {
-      const row = yield* db
-        .select()
-        .from(MessageTable)
-        .where(and(eq(MessageTable.id, input.messageID), eq(MessageTable.session_id, input.sessionID)))
-        .get()
-        .pipe(Effect.orDie)
-      if (!row) return yield* new NotFoundError({ message: `Message not found: ${input.messageID}` })
-      return { info: info(row), parts: yield* parts(input.messageID) }
-    }),
-  ).pipe(Effect.orDie)
+  return yield* db
+    .transaction(() =>
+      Effect.gen(function* () {
+        const row = yield* db
+          .select()
+          .from(MessageTable)
+          .where(and(eq(MessageTable.id, input.messageID), eq(MessageTable.session_id, input.sessionID)))
+          .get()
+          .pipe(Effect.orDie)
+        if (!row) return yield* new NotFoundError({ message: `Message not found: ${input.messageID}` })
+        return { info: info(row), parts: yield* parts(input.messageID) }
+      }),
+    )
+    .pipe(Effect.orDie)
 })
 
 export function filterCompacted(msgs: Iterable<WithParts>) {

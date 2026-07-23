@@ -1657,20 +1657,23 @@ export const layer = Layer.effect(
     return Service.of({
       cancel: (sessionID) => SessionMaintenance.withAdmission(db, { sessionID, kind: "cancel" }, cancel(sessionID)),
       prompt: (input, committed) =>
-        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "prompt" }, prompt(input, committed)).pipe(
-        ),
+        SessionMaintenance.withAdmission(
+          db,
+          { sessionID: input.sessionID, kind: "prompt" },
+          prompt(input, committed),
+        ).pipe(),
       loop: (input) =>
-        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "loop" }, loop(input)).pipe(
-        ),
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "loop" }, loop(input)).pipe(),
       shell: (input) =>
-        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "shell" }, shell(input)).pipe(
-        ),
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "shell" }, shell(input)).pipe(),
       command: (input) =>
-        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "command" }, command(input)).pipe(
-        ),
+        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "command" }, command(input)).pipe(),
       summarize: (input) =>
-        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "summarize" }, summarize(input)).pipe(
-        ),
+        SessionMaintenance.withAdmission(
+          db,
+          { sessionID: input.sessionID, kind: "summarize" },
+          summarize(input),
+        ).pipe(),
       resolvePromptParts,
     })
   }),

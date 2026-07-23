@@ -1,7 +1,6 @@
 import { EventEmitter } from "events"
 import { Identifier } from "@/id/id"
 import { StreamDiagnostics } from "@/diagnostic/stream"
-import { CompactionDiagnostics } from "@/diagnostic/compaction"
 import { Log } from "@opencode-ai/core/util/log"
 
 const log = Log.create({ service: "global-bus" })
@@ -29,7 +28,6 @@ class GlobalBusEmitter extends EventEmitter<{
       correlation: StreamDiagnostics.correlationForPayload(event),
     })
     const listeners = this.rawListeners(eventName)
-    CompactionDiagnostics.recordPayload(event, "global.bus", "emit", { listeners: listeners.length })
     for (const listener of listeners) {
       try {
         listener.call(this, event)
@@ -40,7 +38,6 @@ class GlobalBusEmitter extends EventEmitter<{
         })
       }
     }
-    CompactionDiagnostics.recordPayload(event, "global.bus", "emitted", { listeners: listeners.length })
     return listeners.length > 0
   }
 }

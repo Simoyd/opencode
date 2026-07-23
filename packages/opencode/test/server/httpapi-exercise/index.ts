@@ -117,15 +117,7 @@ const scenarios: Scenario[] = [
       },
       "status",
     ),
-  http.protected
-    .get("/debug/stream-diagnostics", "debug.streamDiagnostics")
-    .global()
-    .status(404, undefined, "status"),
-  http.protected
-    .get("/debug/compaction-incident", "debug.compactionIncident")
-    .global()
-    .at(() => ({ path: "/debug/compaction-incident?action=ocac-0123456789abcdef01234567" }))
-    .status(404, undefined, "status"),
+  http.protected.get("/debug/stream-diagnostics", "debug.streamDiagnostics").global().status(404, undefined, "status"),
   http.protected.get("/path", "path.get").json(200, (body, ctx) => {
     object(body)
     check(body.directory === ctx.directory, "directory should resolve from x-opencode-directory")

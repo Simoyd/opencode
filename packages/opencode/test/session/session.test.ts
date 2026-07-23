@@ -7,7 +7,7 @@ import { Deferred, Effect, Exit, Layer } from "effect"
 import { Session as SessionNs } from "@/session/session"
 import * as Log from "@opencode-ai/core/util/log"
 import { MessageV2 } from "../../src/session/message-v2"
-import { MessageID, PartID, type SessionID } from "../../src/session/schema"
+import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { provideInstance, testInstanceStoreLayer, tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -17,6 +17,9 @@ import { BackgroundJob } from "@/background/job"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { GlobalBus } from "@/bus/global"
 import { CompactionCatalog } from "@/session/compaction-catalog"
+import { CompactionRegionTable, MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { persistImportedSession, type ExportData } from "@/cli/cmd/import"
+import { InstanceRef } from "@/effect/instance-ref"
 
 void Log.init({ print: false })
 
@@ -30,6 +33,7 @@ const it = testEffect(
       Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces: false })),
       Layer.provide(BackgroundJob.defaultLayer),
     ),
+    Database.defaultLayer,
     CrossSpawnSpawner.defaultLayer,
     testInstanceStoreLayer,
   ),
@@ -197,6 +201,17 @@ describe("compaction catalog invalidation", () => {
         cost: 0,
         tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
       } as unknown as SessionV1.Info)
+      const order: string[] = []
+      const unsubscribeOrder = yield* events.listen((event) => {
+        if (
+          event.type === MessageV2.Event.PartUpdated.type &&
+          (event.data as typeof MessageV2.Event.PartUpdated.data.Type).part.messageID === summary
+        )
+          order.push("mutation")
+        if (event.type === CompactionCatalog.Event.Changed.type) order.push("catalog")
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsubscribeOrder)
       yield* session.updatePart({
         id: PartID.ascending(),
         sessionID: info.id,
@@ -206,6 +221,7 @@ describe("compaction catalog invalidation", () => {
       })
 
       expect(yield* awaitDeferred(received, "timed out waiting for catalog invalidation")).toBe(info.id)
+      expect(order).toEqual(["mutation", "catalog"])
       yield* session.remove(info.id)
     }),
   )
@@ -327,6 +343,108 @@ describe("Session", () => {
 
       expect(created.metadata).toBeUndefined()
       expect(saved.metadata).toBeUndefined()
+    }),
+  )
+})
+
+describe("session import persistence", () => {
+  it.instance("persists compact catalog truth atomically for existing and new sessions", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const { db } = yield* Database.Service
+      const ctx = yield* InstanceRef
+      if (!ctx) return yield* Effect.die("InstanceRef not provided")
+
+      const existing = yield* session.create({ title: "existing import" })
+      const fresh = { ...existing, id: SessionID.descending(), title: "new import" }
+      const rollback = { ...existing, id: SessionID.descending(), title: "rollback import" }
+
+      const makeData = (info: SessionNs.Info, prefix: string): ExportData => {
+        const start = MessageID.ascending()
+        const marker = MessageID.ascending()
+        const summary = MessageID.ascending()
+        const user = (id: MessageID, created: number) => ({
+          id,
+          sessionID: info.id,
+          role: "user",
+          time: { created },
+          agent: "test",
+          model: { providerID: "test", modelID: "test" },
+          tools: {},
+          mode: "",
+        })
+        return {
+          info: Object.fromEntries(Object.entries(info).filter(([, value]) => value !== undefined)) as never,
+          messages: [
+            {
+              info: user(start, 1) as never,
+              parts: [{ id: PartID.ascending(), sessionID: info.id, messageID: start, type: "text", text: `${prefix} body` } as never],
+            },
+            {
+              info: user(marker, 2) as never,
+              parts: [
+                {
+                  id: PartID.ascending(),
+                  sessionID: info.id,
+                  messageID: marker,
+                  type: "compaction",
+                  auto: true,
+                  tail_start_id: start,
+                } as never,
+              ],
+            },
+            {
+              info: {
+                id: summary,
+                sessionID: info.id,
+                role: "assistant",
+                time: { created: 3 },
+                parentID: marker,
+                modelID: "test",
+                providerID: "test",
+                mode: "",
+                agent: "test",
+                path: { cwd: ctx.directory, root: ctx.directory },
+                cost: 0,
+                tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                summary: true,
+                finish: "end_turn",
+              } as never,
+              parts: [
+                { id: PartID.ascending(), sessionID: info.id, messageID: summary, type: "text", text: `${prefix} summary` } as never,
+              ],
+            },
+          ],
+        }
+      }
+
+      yield* persistImportedSession(makeData(existing, "existing"), ctx)
+      yield* persistImportedSession(makeData(fresh, "new"), ctx)
+
+      const rows = yield* db.select().from(CompactionRegionTable).all().pipe(Effect.orDie)
+      const importedRows = rows.filter((row) => row.session_id === existing.id || row.session_id === fresh.id)
+      expect(importedRows).toHaveLength(2)
+      expect(importedRows.map((row) => row.summary_preview).sort()).toEqual(["existing summary", "new summary"])
+      expect(importedRows.every((row) => row.physical_message_count === 1 && row.semantic_message_count === 1)).toBe(true)
+
+      const rollbackData = makeData(rollback, "rollback")
+      rollbackData.messages[1]!.parts.push({
+        id: PartID.ascending(),
+        sessionID: rollback.id,
+        messageID: rollbackData.messages[1]!.info.id,
+        type: "invalid-import-part",
+      } as never)
+      const rollbackExit = yield* persistImportedSession(rollbackData, ctx).pipe(Effect.exit)
+      expect(Exit.isFailure(rollbackExit)).toBe(true)
+
+      const sessions = yield* db.select().from(SessionTable).all().pipe(Effect.orDie)
+      const messages = yield* db.select().from(MessageTable).all().pipe(Effect.orDie)
+      const parts = yield* db.select().from(PartTable).all().pipe(Effect.orDie)
+      const regions = yield* db.select().from(CompactionRegionTable).all().pipe(Effect.orDie)
+      expect(sessions.some((row) => row.id === rollback.id)).toBe(false)
+      expect(messages.some((row) => row.session_id === rollback.id)).toBe(false)
+      expect(parts.some((row) => row.session_id === rollback.id)).toBe(false)
+      expect(regions.some((row) => row.session_id === rollback.id)).toBe(false)
     }),
   )
 })

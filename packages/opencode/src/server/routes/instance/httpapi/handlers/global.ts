@@ -3,7 +3,6 @@ import { GlobalBus, type GlobalEvent as GlobalBusEvent } from "@/bus/global"
 import { EffectBridge } from "@/effect/bridge"
 import { EventV2 } from "@opencode-ai/core/event"
 import { StreamDiagnostics } from "@/diagnostic/stream"
-import { CompactionDiagnostics } from "@/diagnostic/compaction"
 import { Installation } from "@/installation"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -20,7 +19,6 @@ import * as SelectedEventProjection from "@/server/shared/selected-event-project
 const log = Log.create({ service: "server" })
 
 function eventData(data: unknown): Sse.Event {
-  CompactionDiagnostics.recordPayload(data, "route.global", "write")
   StreamDiagnostics.record({
     stage: "route.global",
     action: "write",
@@ -52,16 +50,12 @@ export function globalEventStream(beforeConnected: Effect.Effect<void> = Effect.
     // lost while the response body starts or emits server.connected.
     const queue = yield* Queue.unbounded<GlobalBusEvent>()
     const handler = (event: GlobalBusEvent) => {
-      const offered = Queue.offerUnsafe(queue, event)
-      CompactionDiagnostics.recordPayload(event, "route.global", "enqueue", { offered })
-      return offered
+      return Queue.offerUnsafe(queue, event)
     }
     GlobalBus.on("event", handler)
     yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", handler)))
     const events = Stream.fromQueue(queue).pipe(
-      Stream.filter(
-        (event) => selectedProjection || event.payload.type !== SelectedEventProjection.CatalogChangedType,
-      ),
+      Stream.filter((event) => selectedProjection || event.payload.type !== SelectedEventProjection.CatalogChangedType),
     )
     const heartbeat = Stream.tick("10 seconds").pipe(
       Stream.drop(1),
@@ -103,7 +97,6 @@ export function globalEventStream(beforeConnected: Effect.Effect<void> = Effect.
         events.pipe(
           Stream.tap((event) =>
             Effect.sync(() => {
-              CompactionDiagnostics.recordPayload(event, "route.global", "dequeue")
               StreamDiagnostics.record({
                 stage: "route.global",
                 action: "queue",

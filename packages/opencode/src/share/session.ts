@@ -53,8 +53,7 @@ export const layer = Layer.effect(
     return Service.of({
       create,
       share: (sessionID) => SessionMaintenance.withAdmission(db, { sessionID, kind: "share" }, share(sessionID)),
-      unshare: (sessionID) =>
-        SessionMaintenance.withAdmission(db, { sessionID, kind: "unshare" }, unshare(sessionID)),
+      unshare: (sessionID) => SessionMaintenance.withAdmission(db, { sessionID, kind: "unshare" }, unshare(sessionID)),
     })
   }),
 )

@@ -75,7 +75,10 @@ export const list = Effect.fn("SessionStagedContext.list")(function* (input: { s
   return [...(contexts.get(input.sessionID) ?? [])]
 })
 
-export const clear = Effect.fn("SessionStagedContext.clear")(function* (input: { sessionID: SessionID; contextID?: string }) {
+export const clear = Effect.fn("SessionStagedContext.clear")(function* (input: {
+  sessionID: SessionID
+  contextID?: string
+}) {
   if (!input.contextID) {
     contexts.delete(input.sessionID)
     return

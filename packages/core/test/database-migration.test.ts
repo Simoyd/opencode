@@ -75,10 +75,7 @@ describe("DatabaseMigration", () => {
           yield* db.all(
             sql`SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('compaction_region_session_marker_idx', 'compaction_region_session_start_idx') ORDER BY name`,
           ),
-        ).toEqual([
-          { name: "compaction_region_session_marker_idx" },
-          { name: "compaction_region_session_start_idx" },
-        ])
+        ).toEqual([{ name: "compaction_region_session_marker_idx" }, { name: "compaction_region_session_start_idx" }])
         expect(
           yield* db.all(
             sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('transcript_window', 'compacted_range', 'transcript_turn')`,

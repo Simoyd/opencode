@@ -2074,19 +2074,6 @@ export type StreamDiagnosticsSnapshot = {
   }>
 }
 
-export type CompactionIncidentSnapshot = {
-  schema: string
-  actionToken: string
-  available: boolean
-  persistenceFailed: boolean
-  firstSequence: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-  lastSequence: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-  persistedThroughSequence: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-  records: Array<{
-    [key: string]: unknown
-  }>
-}
-
 export type Model = {
   id: string
   providerID: string
@@ -5538,24 +5525,6 @@ export type DebugStreamDiagnosticsResponses = {
 }
 
 export type DebugStreamDiagnosticsResponse = DebugStreamDiagnosticsResponses[keyof DebugStreamDiagnosticsResponses]
-
-export type DebugCompactionIncidentData = {
-  body?: never
-  path?: never
-  query: {
-    action: string
-  }
-  url: "/debug/compaction-incident"
-}
-
-export type DebugCompactionIncidentResponses = {
-  /**
-   * Compaction incident fragment
-   */
-  200: CompactionIncidentSnapshot
-}
-
-export type DebugCompactionIncidentResponse = DebugCompactionIncidentResponses[keyof DebugCompactionIncidentResponses]
 
 export type EventSubscribeData = {
   body?: never

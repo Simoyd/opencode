@@ -266,7 +266,8 @@ function correlationForSession(sessionID: string | undefined) {
 function sessionIDFromPayload(value: unknown) {
   if (!value || typeof value !== "object") return undefined
   const record = value as Record<string, any>
-  const properties = record.payload && typeof record.payload === "object" ? record.payload.properties : record.properties
+  const properties =
+    record.payload && typeof record.payload === "object" ? record.payload.properties : record.properties
   if (!properties || typeof properties !== "object") return undefined
   return typeof properties.sessionID === "string" ? properties.sessionID : undefined
 }
@@ -290,7 +291,8 @@ function shape(value: unknown) {
   if (!value || typeof value !== "object") return "unknown"
   const record = value as Record<string, any>
   if (record.payload && typeof record.payload === "object") return "global-envelope"
-  if (typeof record.type === "string" && record.properties && typeof record.properties === "object") return "bus-payload"
+  if (typeof record.type === "string" && record.properties && typeof record.properties === "object")
+    return "bus-payload"
   if (typeof record.type === "string") return "event-label"
   return "unknown"
 }

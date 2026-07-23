@@ -80,7 +80,88 @@ export function transformShareData(shareData: ShareData[]): {
   }
 }
 
-type ExportData = { info: SDKSession; messages: Array<{ info: Message; parts: Part[] }> }
+export type ExportData = { info: SDKSession; messages: Array<{ info: Message; parts: Part[] }> }
+
+export const persistImportedSession = Effect.fn("Cli.import.persist")(function* (
+  exportData: ExportData,
+  ctx: InstanceContext,
+) {
+  const { db } = yield* Database.Service
+  const info = Schema.decodeUnknownSync(Session.Info)({
+    ...exportData.info,
+    projectID: ctx.project.id,
+    directory: ctx.directory,
+    path: path.relative(path.resolve(ctx.worktree), ctx.directory).replaceAll("\\", "/"),
+  }) as Session.Info
+  const row = Session.toRow(info)
+  const writeImportedRows = Effect.gen(function* () {
+    for (const msg of exportData.messages) {
+      const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
+      const { id, sessionID: _, ...msgData } = msgInfo
+      yield* db
+        .insert(MessageTable)
+        .values({
+          id,
+          session_id: row.id,
+          time_created: msgInfo.time?.created ?? Date.now(),
+          data: msgData as never,
+        })
+        .onConflictDoNothing()
+        .run()
+        .pipe(Effect.orDie)
+
+      for (const part of msg.parts) {
+        const partInfo = decodePart(part) as SessionV1.Part
+        const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
+        yield* db
+          .insert(PartTable)
+          .values({
+            id: partId,
+            message_id: messageID,
+            session_id: row.id,
+            data: partData,
+          })
+          .onConflictDoNothing()
+          .run()
+          .pipe(Effect.orDie)
+      }
+    }
+    yield* CompactionRegionProjection.reconcile(db, { sessionID: row.id })
+  })
+  const upsertSession = db
+    .insert(SessionTable)
+    .values(row)
+    .onConflictDoUpdate({
+      target: SessionTable.id,
+      set: { project_id: row.project_id, directory: row.directory, path: row.path },
+    })
+    .run()
+    .pipe(Effect.orDie)
+  const existing = yield* db
+    .select({ id: SessionTable.id })
+    .from(SessionTable)
+    .where(eq(SessionTable.id, row.id))
+    .get()
+    .pipe(Effect.orDie)
+  if (existing) {
+    yield* db
+      .transaction(() => upsertSession.pipe(Effect.andThen(writeImportedRows)), { behavior: "immediate" })
+      .pipe(Effect.orDie)
+  } else {
+    yield* db
+      .transaction(
+        () =>
+          Effect.gen(function* () {
+            yield* db.insert(SessionTable).values(row).run().pipe(Effect.orDie)
+            yield* writeImportedRows
+          }),
+        { behavior: "immediate" },
+      )
+      .pipe(Effect.orDie)
+  }
+
+  return info
+})
 
 export const ImportCommand = effectCmd({
   command: "import <file>",
@@ -101,7 +182,6 @@ export const ImportCommand = effectCmd({
 const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: InstanceContext) {
   const share = yield* ShareNext.Service
   const fs = yield* FSUtil.Service
-  const { db } = yield* Database.Service
 
   let exportData: ExportData | undefined
 
@@ -172,79 +252,7 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
     return
   }
 
-  const info = Schema.decodeUnknownSync(Session.Info)({
-    ...exportData.info,
-    projectID: ctx.project.id,
-    directory: ctx.directory,
-    path: path.relative(path.resolve(ctx.worktree), ctx.directory).replaceAll("\\", "/"),
-  }) as Session.Info
-  const row = Session.toRow(info)
-  const writeImportedRows = Effect.gen(function* () {
-    for (const msg of exportData.messages) {
-      const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
-      const { id, sessionID: _, ...msgData } = msgInfo
-      yield* db
-        .insert(MessageTable)
-        .values({
-          id,
-          session_id: row.id,
-          time_created: msgInfo.time?.created ?? Date.now(),
-          data: msgData as never,
-        })
-        .onConflictDoNothing()
-        .run()
-        .pipe(Effect.orDie)
-
-      for (const part of msg.parts) {
-        const partInfo = decodePart(part) as SessionV1.Part
-        const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
-        yield* db
-          .insert(PartTable)
-          .values({
-            id: partId,
-            message_id: messageID,
-            session_id: row.id,
-            data: partData,
-          })
-          .onConflictDoNothing()
-          .run()
-          .pipe(Effect.orDie)
-      }
-    }
-    yield* CompactionRegionProjection.reconcile(db, { sessionID: row.id })
-  })
-  const upsertSession = db
-    .insert(SessionTable)
-    .values(row)
-    .onConflictDoUpdate({
-      target: SessionTable.id,
-      set: { project_id: row.project_id, directory: row.directory, path: row.path },
-    })
-    .run()
-    .pipe(Effect.orDie)
-  const persistExisting = db.transaction(
-    () => upsertSession.pipe(Effect.andThen(writeImportedRows)),
-    { behavior: "immediate" },
-  ).pipe(Effect.orDie)
-  const existing = yield* db
-    .select({ id: SessionTable.id })
-    .from(SessionTable)
-    .where(eq(SessionTable.id, row.id))
-    .get()
-    .pipe(Effect.orDie)
-  if (existing) {
-    yield* persistExisting
-  } else {
-    yield* db
-      .transaction(
-        () => Effect.gen(function* () {
-          yield* db.insert(SessionTable).values(row).run().pipe(Effect.orDie)
-          yield* writeImportedRows
-        }),
-        { behavior: "immediate" },
-      )
-      .pipe(Effect.orDie)
-  }
+  yield* persistImportedSession(exportData, ctx)
 
   process.stdout.write(`Imported session: ${exportData.info.id}`)
   process.stdout.write(EOL)

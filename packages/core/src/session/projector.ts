@@ -5,7 +5,7 @@ import { DateTime, Effect, Layer, Schema } from "effect"
 import { Database } from "../database/database"
 import { EventV2 } from "../event"
 import { SessionEvent } from "./event"
-import { SessionV1 } from "../v1/session"
+import { SessionV1, type MessageID } from "../v1/session"
 import { WorkspaceTable } from "../control-plane/workspace.sql"
 import { SessionMessage } from "./message"
 import { SessionMessageUpdater } from "./message-updater"
@@ -130,8 +130,16 @@ function applyUsage(
     .pipe(Effect.orDie)
 }
 
-function reconcileRegions(db: DatabaseService, event: EventV2.Payload, sessionID: SessionSchema.ID) {
-  return CompactionRegionProjection.reconcile(db, { sessionID }).pipe(
+function reconcileRegions(
+  db: DatabaseService,
+  event: EventV2.Payload,
+  sessionID: SessionSchema.ID,
+  input: {
+    messageID?: MessageID
+    removed?: { id: MessageID; time_created: number; marker: boolean }
+  },
+) {
+  return CompactionRegionProjection.reconcile(db, { sessionID, ...input }).pipe(
     Effect.tap((changed) =>
       changed ? Effect.sync(() => CompactionRegionProjection.markInvalidation(event.data)) : Effect.void,
     ),
@@ -325,7 +333,7 @@ export const layer = Layer.effectDiscard(
           .onConflictDoUpdate({ target: MessageTable.id, set: { data } })
           .run()
           .pipe(Effect.orDie)
-        yield* reconcileRegions(db, event, sessionID)
+        yield* reconcileRegions(db, event, sessionID, { messageID: id })
       }),
     )
     yield* events.project(SessionV1.Event.MessageRemoved, (event) =>
@@ -351,7 +359,13 @@ export const layer = Layer.effectDiscard(
           .where(and(eq(MessageTable.id, event.data.messageID), eq(MessageTable.session_id, event.data.sessionID)))
           .run()
           .pipe(Effect.orDie)
-        yield* reconcileRegions(db, event, event.data.sessionID)
+        yield* reconcileRegions(db, event, event.data.sessionID, {
+          removed: message && {
+            id: event.data.messageID,
+            time_created: message.time,
+            marker: rows.some((row) => row.data.type === "compaction"),
+          },
+        })
       }),
     )
     yield* events.project(SessionV1.Event.PartRemoved, (event) =>
@@ -369,7 +383,13 @@ export const layer = Layer.effectDiscard(
           .where(and(eq(PartTable.id, event.data.partID), eq(PartTable.session_id, event.data.sessionID)))
           .run()
           .pipe(Effect.orDie)
-        yield* reconcileRegions(db, event, event.data.sessionID)
+        yield* reconcileRegions(db, event, event.data.sessionID, {
+          messageID: event.data.messageID,
+          removed:
+            row?.data.type === "compaction"
+              ? { id: event.data.messageID, time_created: row.time_created, marker: true }
+              : undefined,
+        })
       }),
     )
     yield* events.project(SessionV1.Event.PartUpdated, (event) =>
@@ -389,7 +409,13 @@ export const layer = Layer.effectDiscard(
         const next = usage(event.data.part)
         if (previous) yield* applyUsage(db, row.session_id, previous, -1)
         if (next) yield* applyUsage(db, sessionID, next)
-        yield* reconcileRegions(db, event, sessionID)
+        yield* reconcileRegions(db, event, sessionID, {
+          messageID,
+          removed:
+            row?.data.type === "compaction" && event.data.part.type !== "compaction"
+              ? { id: messageID, time_created: row.time_created, marker: true }
+              : undefined,
+        })
       }),
     )
     yield* events.project(SessionEvent.AgentSwitched, (event) => {

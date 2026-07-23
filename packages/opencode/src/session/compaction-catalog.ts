@@ -17,10 +17,7 @@ const CatalogCursor = Schema.Struct({ markerID: MessageID })
 const decodeCursor = Schema.decodeUnknownSync(CatalogCursor)
 const PageSize = 50
 
-export const page = Effect.fn("CompactionCatalog.page")(function* (input: {
-  sessionID: SessionID
-  cursor?: string
-}) {
+export const page = Effect.fn("CompactionCatalog.page")(function* (input: { sessionID: SessionID; cursor?: string }) {
   const { db } = yield* Database.Service
   const after = input.cursor
     ? decodeCursor(JSON.parse(Buffer.from(input.cursor, "base64url").toString("utf8"))).markerID

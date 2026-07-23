@@ -24,7 +24,6 @@ import type {
   ConfigProvidersResponses,
   ConfigUpdateErrors,
   ConfigUpdateResponses,
-  DebugCompactionIncidentResponses,
   DebugStreamDiagnosticsResponses,
   EventSubscribeResponses,
   EventTuiCommandExecute,
@@ -1387,25 +1386,6 @@ export class Debug extends HeyApiClient {
     return (options?.client ?? this.client).get<DebugStreamDiagnosticsResponses, unknown, ThrowOnError>({
       url: "/debug/stream-diagnostics",
       ...options,
-    })
-  }
-
-  /**
-   * Get a compaction incident fragment
-   *
-   * Return one sanitized persisted sidecar fragment for a host-issued Compact action token.
-   */
-  public compactionIncident<ThrowOnError extends boolean = false>(
-    parameters: {
-      action: string
-    },
-    options?: Options<never, ThrowOnError>,
-  ) {
-    const params = buildClientParams([parameters], [{ args: [{ in: "query", key: "action" }] }])
-    return (options?.client ?? this.client).get<DebugCompactionIncidentResponses, unknown, ThrowOnError>({
-      url: "/debug/compaction-incident",
-      ...options,
-      ...params,
     })
   }
 }

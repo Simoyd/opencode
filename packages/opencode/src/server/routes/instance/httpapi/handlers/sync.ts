@@ -51,7 +51,7 @@ export const syncHandlers = HttpApiBuilder.group(InstanceHttpApi, "sync", (handl
         directory: ctx.payload.directory,
       })
       const ownerID = yield* InstanceState.workspaceID
-      yield* events.replayAll(payload, { ownerID, strictOwner: true })
+      yield* events.replayAll(payload, { ownerID, strictOwner: true, publish: true })
       log.info("sync replay complete", {
         sessionID: source,
         events: payload.length,

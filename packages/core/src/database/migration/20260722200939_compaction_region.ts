@@ -19,8 +19,12 @@ export default {
           CONSTRAINT \`fk_compaction_region_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
         );
       `)
-      yield* tx.run(`CREATE INDEX \`compaction_region_session_marker_idx\` ON \`compaction_region\` (\`session_id\`,\`marker_id\`);`)
-      yield* tx.run(`CREATE INDEX \`compaction_region_session_start_idx\` ON \`compaction_region\` (\`session_id\`,\`start_message_id\`);`)
+      yield* tx.run(
+        `CREATE INDEX \`compaction_region_session_marker_idx\` ON \`compaction_region\` (\`session_id\`,\`marker_id\`);`,
+      )
+      yield* tx.run(
+        `CREATE INDEX \`compaction_region_session_start_idx\` ON \`compaction_region\` (\`session_id\`,\`start_message_id\`);`,
+      )
     })
   },
 } satisfies DatabaseMigration.Migration
