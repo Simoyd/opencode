@@ -356,6 +356,82 @@ describe("EventV2", () => {
     }),
   )
 
+  it.effect("cancels replay before commit", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const aggregateID = EventV2.ID.create()
+      yield* events.beforeCommit(() => Effect.interrupt)
+
+      const exit = yield* events
+        .replay(
+          {
+            id: EventV2.ID.create(),
+            type: EventV2.versionedType(SyncMessage.type, 1),
+            seq: 0,
+            aggregateID,
+            data: { id: aggregateID, text: "cancel before commit" },
+          },
+          { publish: true },
+        )
+        .pipe(Effect.exit)
+
+      const rows = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, aggregateID))
+        .all()
+        .pipe(Effect.orDie)
+      expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBeTrue()
+      expect(rows).toHaveLength(0)
+    }),
+  )
+
+  it.effect("stops replayAll before the next commit after finishing committed notification", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const aggregateID = EventV2.ID.create()
+      const notifications = new Array<string>()
+      yield* events.listen((event) =>
+        Effect.sync(() => notifications.push(event.id)).pipe(
+          Effect.andThen(Effect.suspend(() => (notifications.length === 1 ? Effect.interrupt : Effect.void))),
+        ),
+      )
+
+      const exit = yield* events
+        .replayAll(
+          [
+            {
+              id: EventV2.ID.create(),
+              type: EventV2.versionedType(SyncMessage.type, 1),
+              seq: 0,
+              aggregateID,
+              data: { id: aggregateID, text: "first" },
+            },
+            {
+              id: EventV2.ID.create(),
+              type: EventV2.versionedType(SyncMessage.type, 1),
+              seq: 1,
+              aggregateID,
+              data: { id: aggregateID, text: "second" },
+            },
+          ],
+          { publish: true },
+        )
+        .pipe(Effect.exit)
+
+      const rows = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, aggregateID))
+        .all()
+        .pipe(Effect.orDie)
+      expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBeTrue()
+      expect(rows.map((row) => row.seq)).toEqual([0])
+    }),
+  )
+
   it.effect("isolates live-only listener defects", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service

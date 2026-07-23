@@ -406,9 +406,9 @@ export const layerWith = (options?: LayerOptions) =>
               }),
             )
           if (durable)
-            return yield* Effect.uninterruptible(
+            return yield* Effect.uninterruptibleMask((restore) =>
               Effect.gen(function* () {
-                const committed = yield* commitSyncEvent(event as Payload, undefined, commit)
+                const committed = yield* restore(commitSyncEvent(event as Payload, undefined, commit))
                 if (committed) {
                   event = { ...event, seq: committed.seq }
                   yield* Effect.forEach(syncHandlers, (sync) => observe(event as Payload, "sync", sync), {
@@ -496,7 +496,7 @@ export const layerWith = (options?: LayerOptions) =>
         event: SerializedEvent,
         options?: ReplayOptions,
       ) {
-        const run = Effect.gen(function* () {
+        const prepare = Effect.gen(function* () {
           const definition = syncRegistry.get(event.type)
           if (!definition) {
             return yield* Effect.die(
@@ -517,17 +517,30 @@ export const layerWith = (options?: LayerOptions) =>
             data: definition.decode(event.data),
             replay: true,
           } as Payload
-          const committed = yield* commitSyncEvent(payload, {
+          return payload
+        })
+        const commit = (payload: Payload) =>
+          commitSyncEvent(payload, {
             seq: event.seq,
             aggregateID: event.aggregateID,
             ownerID: options?.ownerID,
             strictOwner: options?.strictOwner,
           })
-          if (committed && options?.publish) {
-            yield* notify({ ...payload, seq: committed.seq })
+
+        return Effect.gen(function* () {
+          const payload = yield* prepare
+          if (!options?.publish) {
+            yield* commit(payload)
+            return
           }
+
+          yield* Effect.uninterruptibleMask((restore) =>
+            Effect.gen(function* () {
+              const committed = yield* restore(commit(payload))
+              if (committed) yield* notify({ ...payload, seq: committed.seq })
+            }),
+          )
         })
-        return options?.publish ? Effect.uninterruptible(run) : run
       }
 
       function replayAll(events: SerializedEvent[], options?: ReplayOptions) {
@@ -559,7 +572,7 @@ export const layerWith = (options?: LayerOptions) =>
           }
           return source
         })
-        return options?.publish ? Effect.uninterruptible(run) : run
+        return run
       }
 
       function remove(aggregateID: string) {
