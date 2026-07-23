@@ -387,6 +387,55 @@ describe("EventV2", () => {
     }),
   )
 
+  it.effect("cancels externally interrupted replay before commit", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const aggregateID = EventV2.ID.create()
+      const eventID = EventV2.ID.create()
+      const entered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const notifications = new Array<string>()
+      yield* events.beforeCommit(() =>
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      )
+      yield* events.listen((event) => Effect.sync(() => notifications.push(event.id)))
+
+      const replay = yield* events
+        .replay(
+          {
+            id: eventID,
+            type: EventV2.versionedType(SyncMessage.type, 1),
+            seq: 0,
+            aggregateID,
+            data: { id: aggregateID, text: "externally cancel before commit" },
+          },
+          { publish: true },
+        )
+        .pipe(Effect.forkScoped)
+      yield* Deferred.await(entered)
+      yield* Fiber.interrupt(replay)
+      const exit = yield* Fiber.await(replay)
+
+      const rows = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, aggregateID))
+        .all()
+        .pipe(Effect.orDie)
+      const sequence = yield* db
+        .select()
+        .from(EventSequenceTable)
+        .where(eq(EventSequenceTable.aggregate_id, aggregateID))
+        .get()
+        .pipe(Effect.orDie)
+      expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBeTrue()
+      expect(rows).toHaveLength(0)
+      expect(sequence).toBeUndefined()
+      expect(notifications).toEqual([])
+    }),
+  )
+
   it.effect("stops replayAll before the next commit after finishing committed notification", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service
