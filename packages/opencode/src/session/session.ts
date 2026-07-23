@@ -771,6 +771,20 @@ export const layer: Layer.Layer<
           if (p.type === "compaction" && p.tail_start_id) {
             p.tail_start_id = idMap.get(p.tail_start_id)
           }
+          if (p.type === "text" && p.metadata) {
+            const metadata = structuredClone(p.metadata)
+            for (const key of [
+              "compaction_owner_marker_id",
+              "compaction_replay_source_message_id",
+              "source_message_id",
+            ] as const) {
+              const sourceID = metadata[key]
+              if (typeof sourceID !== "string") continue
+              const mapped = idMap.get(sourceID)
+              if (mapped) metadata[key] = mapped
+            }
+            p.metadata = metadata
+          }
           yield* updatePart(p)
         }
       }

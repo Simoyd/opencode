@@ -53,12 +53,14 @@ export const reconcile = Effect.fn("CompactionRegionProjection.reconcile")(funct
   const markers = new Set<MessageID>()
   const before = yield* markerAtOrBefore(db, input.sessionID, anchor)
   const after = yield* markerAfter(db, input.sessionID, anchor)
+  const completedAfter = yield* completedMarkerAfter(db, input.sessionID, anchor)
   if (before) markers.add(before.id)
   if (after) {
     markers.add(after.id)
     const neighbor = yield* markerAfter(db, input.sessionID, after)
     if (neighbor) markers.add(neighbor.id)
   }
+  if (completedAfter) markers.add(completedAfter.id)
 
   let didChange = false
   if (input.removed?.marker) {
@@ -152,21 +154,20 @@ function markerAfter(db: DatabaseService, sessionID: SessionSchema.ID, position:
     .pipe(Effect.orDie)
 }
 
-function markerBefore(db: DatabaseService, sessionID: SessionSchema.ID, position: Position) {
+function completedMarkerBefore(db: DatabaseService, sessionID: SessionSchema.ID, position: Position) {
   return db
     .select({ id: MessageTable.id, time_created: MessageTable.time_created })
-    .from(MessageTable)
+    .from(CompactionRegionTable)
     .innerJoin(
-      PartTable,
+      MessageTable,
       and(
-        eq(PartTable.message_id, MessageTable.id),
-        eq(PartTable.session_id, MessageTable.session_id),
-        sql`json_extract(${PartTable.data}, '$.type') = 'compaction'`,
+        eq(MessageTable.id, CompactionRegionTable.marker_id),
+        eq(MessageTable.session_id, CompactionRegionTable.session_id),
       ),
     )
     .where(
       and(
-        eq(MessageTable.session_id, sessionID),
+        eq(CompactionRegionTable.session_id, sessionID),
         or(
           lt(MessageTable.time_created, position.time_created),
           and(eq(MessageTable.time_created, position.time_created), lt(MessageTable.id, position.id)),
@@ -175,6 +176,32 @@ function markerBefore(db: DatabaseService, sessionID: SessionSchema.ID, position
     )
     .groupBy(MessageTable.id, MessageTable.time_created)
     .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+    .limit(1)
+    .get()
+    .pipe(Effect.orDie)
+}
+
+function completedMarkerAfter(db: DatabaseService, sessionID: SessionSchema.ID, position: Position) {
+  return db
+    .select({ id: MessageTable.id, time_created: MessageTable.time_created })
+    .from(CompactionRegionTable)
+    .innerJoin(
+      MessageTable,
+      and(
+        eq(MessageTable.id, CompactionRegionTable.marker_id),
+        eq(MessageTable.session_id, CompactionRegionTable.session_id),
+      ),
+    )
+    .where(
+      and(
+        eq(CompactionRegionTable.session_id, sessionID),
+        or(
+          gt(MessageTable.time_created, position.time_created),
+          and(eq(MessageTable.time_created, position.time_created), gt(MessageTable.id, position.id)),
+        ),
+      ),
+    )
+    .orderBy(asc(MessageTable.time_created), asc(MessageTable.id))
     .limit(1)
     .get()
     .pipe(Effect.orDie)
@@ -199,8 +226,8 @@ function deriveMarker(db: DatabaseService, sessionID: SessionSchema.ID, markerID
       .pipe(Effect.orDie)
     if (!marker) return undefined
 
-    const previous = yield* markerBefore(db, sessionID, marker)
-    const next = yield* markerAfter(db, sessionID, marker)
+    const previous = yield* completedMarkerBefore(db, sessionID, marker)
+    const next = yield* completedMarkerAfter(db, sessionID, marker)
     const rows = yield* db
       .select()
       .from(MessageTable)
@@ -300,9 +327,11 @@ function derive(sessionID: SessionSchema.ID, messages: SessionV1.WithParts[]) {
         previousMarkerID,
         existingMessageIDs,
       )
-      if (row) rows.push(row)
-      start = markerIndex + 1
-      previousMarkerID = marker.info.id
+      if (row) {
+        rows.push(row)
+        start = markerIndex + 1
+        previousMarkerID = marker.info.id
+      }
     }
     return rows
   })
@@ -322,16 +351,13 @@ function deriveCompletedRegion(
     const afterMarker = messages.slice(markerIndex + 1)
     const declaredSummaries = afterMarker.filter(
       (message): message is SessionV1.WithParts & { info: SessionV1.Assistant } =>
-        message.info.role === "assistant" && message.info.summary === true,
+        message.info.role === "assistant" && message.info.summary === true && message.info.parentID === marker.info.id,
     )
     if (declaredSummaries.length > 1) {
       throw new Error(`Compaction region ${marker.info.id} has contradictory terminal summaries`)
     }
     const summary = declaredSummaries[0]
     if (!summary) return undefined
-    if (summary.info.parentID !== marker.info.id) {
-      throw new Error(`Compaction region ${marker.info.id} has a summary owned by another marker`)
-    }
     if (!summary.info.finish || summary.info.error || messageText(summary).length === 0) return undefined
 
     const normalized = messageText(summary).split(/\s+/).filter(Boolean).join(" ")

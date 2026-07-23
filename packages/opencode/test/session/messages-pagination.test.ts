@@ -789,6 +789,31 @@ describe("MessageV2.filterCompacted", () => {
         text: "summary",
       })
 
+      const replay = yield* addUser(created.id)
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID: created.id,
+        messageID: replay,
+        type: "text",
+        text: "replayed prompt",
+        metadata: {
+          compaction_replay: true,
+          compaction_owner_marker_id: c1,
+          compaction_replay_source_message_id: u1,
+          source_message_id: u1,
+        },
+      })
+      const continuation = yield* addUser(created.id)
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID: created.id,
+        messageID: continuation,
+        type: "text",
+        text: "continue",
+        synthetic: true,
+        metadata: { compaction_continue: true, compaction_owner_marker_id: c1 },
+      })
+
       const u3 = yield* addUser(created.id, "third")
       const a3 = yield* addAssistant(created.id, u3, { finish: "end_turn" })
       yield* session.updatePart({
@@ -800,11 +825,29 @@ describe("MessageV2.filterCompacted", () => {
       })
 
       const parentFiltered = MessageV2.filterCompacted(yield* MessageV2.stream(created.id))
-      expect(parentFiltered.map((item) => item.info.id)).toEqual([c1, s1, u2, a2, u3, a3])
+      expect(parentFiltered.map((item) => item.info.id)).toEqual([c1, s1, u2, a2, replay, continuation, u3, a3])
 
       const forked = yield* session.fork({ sessionID: created.id })
       const childFiltered = MessageV2.filterCompacted(yield* MessageV2.stream(forked.id))
       expect(childFiltered).toHaveLength(parentFiltered.length)
+
+      const childMessages = yield* session.messages({ sessionID: forked.id })
+      const childIDs = new Set(childMessages.map((message) => message.info.id))
+      const protocol = childMessages
+        .flatMap((message) => message.parts)
+        .filter((part): part is SessionV1.TextPart => part.type === "text" && part.metadata !== undefined)
+        .map((part) => part.metadata!)
+        .filter((metadata) => metadata.compaction_replay === true || metadata.compaction_continue === true)
+      expect(protocol).toHaveLength(2)
+      for (const metadata of protocol) {
+        expect(childIDs.has(metadata.compaction_owner_marker_id as MessageID)).toBe(true)
+        expect(metadata.compaction_owner_marker_id).not.toBe(c1)
+        if (metadata.compaction_replay !== true) continue
+        expect(childIDs.has(metadata.compaction_replay_source_message_id as MessageID)).toBe(true)
+        expect(childIDs.has(metadata.source_message_id as MessageID)).toBe(true)
+        expect(metadata.compaction_replay_source_message_id).not.toBe(u1)
+        expect(metadata.source_message_id).not.toBe(u1)
+      }
 
       const tailPart = childFiltered.flatMap((m) => m.parts).find((p) => p.type === "compaction")
       expect(tailPart?.type).toBe("compaction")

@@ -225,6 +225,104 @@ describe("compaction catalog invalidation", () => {
       yield* session.remove(info.id)
     }),
   )
+
+  it.instance("routes replay-derived catalog invalidation with the active instance location", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const ctx = yield* InstanceRef
+      if (!ctx) return yield* Effect.die("InstanceRef not provided")
+      const info = yield* session.create({})
+      const changed = yield* Deferred.make<EventV2.Payload>()
+      const unsubscribe = yield* events.listen((event) =>
+        event.type === CompactionCatalog.Event.Changed.type
+          ? Deferred.succeed(changed, event).pipe(Effect.asVoid)
+          : Effect.void,
+      )
+      yield* Effect.addFinalizer(() => unsubscribe)
+
+      const prompt = MessageID.ascending()
+      const marker = MessageID.ascending()
+      const summary = MessageID.ascending()
+      const user = (id: MessageID, created: number) => ({
+        id,
+        sessionID: info.id,
+        role: "user" as const,
+        time: { created },
+        agent: "test",
+        model: { providerID: "test", modelID: "test" },
+        tools: {},
+        mode: "",
+      })
+      const serialized = [
+        {
+          type: SessionV1.Event.MessageUpdated,
+          data: { sessionID: info.id, info: user(prompt, 1) },
+        },
+        {
+          type: SessionV1.Event.PartUpdated,
+          data: {
+            sessionID: info.id,
+            part: { id: PartID.ascending(), sessionID: info.id, messageID: prompt, type: "text", text: "prompt" },
+            time: 1,
+          },
+        },
+        {
+          type: SessionV1.Event.MessageUpdated,
+          data: { sessionID: info.id, info: user(marker, 2) },
+        },
+        {
+          type: SessionV1.Event.PartUpdated,
+          data: {
+            sessionID: info.id,
+            part: { id: PartID.ascending(), sessionID: info.id, messageID: marker, type: "compaction", auto: false },
+            time: 2,
+          },
+        },
+        {
+          type: SessionV1.Event.MessageUpdated,
+          data: {
+            sessionID: info.id,
+            info: {
+              id: summary,
+              sessionID: info.id,
+              role: "assistant" as const,
+              parentID: marker,
+              summary: true,
+              finish: "end_turn",
+              time: { created: 3 },
+              modelID: "test",
+              providerID: "test",
+              agent: "test",
+              mode: "",
+              path: { cwd: ctx.directory, root: ctx.directory },
+              cost: 0,
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            },
+          },
+        },
+        {
+          type: SessionV1.Event.PartUpdated,
+          data: {
+            sessionID: info.id,
+            part: { id: PartID.ascending(), sessionID: info.id, messageID: summary, type: "text", text: "summary" },
+            time: 3,
+          },
+        },
+      ].map((event, index) => ({
+        id: EventV2.ID.create(),
+        type: EventV2.versionedType(event.type.type, event.type.sync!.version),
+        seq: index + 1,
+        aggregateID: info.id,
+        data: event.data as Record<string, unknown>,
+      }))
+
+      yield* events.replayAll(serialized, { publish: true })
+
+      expect(String((yield* Deferred.await(changed)).location?.directory)).toBe(ctx.directory)
+      yield* session.remove(info.id)
+    }),
+  )
 })
 
 describe("step-finish token propagation via event", () => {
@@ -418,14 +516,73 @@ describe("session import persistence", () => {
         }
       }
 
+      const makeMultiRegionData = (info: SessionNs.Info, prefix: string): ExportData => {
+        const data = makeData(info, `${prefix} first`)
+        const start = MessageID.ascending()
+        const marker = MessageID.ascending()
+        const summary = MessageID.ascending()
+        data.messages.push(
+          {
+            info: {
+              id: start,
+              sessionID: info.id,
+              role: "user",
+              time: { created: 4 },
+              agent: "test",
+              model: { providerID: "test", modelID: "test" },
+              tools: {},
+              mode: "",
+            } as never,
+            parts: [{ id: PartID.ascending(), sessionID: info.id, messageID: start, type: "text", text: `${prefix} second body` } as never],
+          },
+          {
+            info: {
+              id: marker,
+              sessionID: info.id,
+              role: "user",
+              time: { created: 5 },
+              agent: "test",
+              model: { providerID: "test", modelID: "test" },
+              tools: {},
+              mode: "",
+            } as never,
+            parts: [{ id: PartID.ascending(), sessionID: info.id, messageID: marker, type: "compaction", auto: true, tail_start_id: start } as never],
+          },
+          {
+            info: {
+              id: summary,
+              sessionID: info.id,
+              role: "assistant",
+              time: { created: 6 },
+              parentID: marker,
+              modelID: "test",
+              providerID: "test",
+              mode: "",
+              agent: "test",
+              path: { cwd: ctx.directory, root: ctx.directory },
+              cost: 0,
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+              summary: true,
+              finish: "end_turn",
+            } as never,
+            parts: [{ id: PartID.ascending(), sessionID: info.id, messageID: summary, type: "text", text: `${prefix} second summary` } as never],
+          },
+        )
+        return data
+      }
+
       yield* persistImportedSession(makeData(existing, "existing"), ctx)
-      yield* persistImportedSession(makeData(fresh, "new"), ctx)
+      yield* persistImportedSession(makeMultiRegionData(fresh, "new"), ctx)
 
       const rows = yield* db.select().from(CompactionRegionTable).all().pipe(Effect.orDie)
       const importedRows = rows.filter((row) => row.session_id === existing.id || row.session_id === fresh.id)
-      expect(importedRows).toHaveLength(2)
-      expect(importedRows.map((row) => row.summary_preview).sort()).toEqual(["existing summary", "new summary"])
-      expect(importedRows.every((row) => row.physical_message_count === 1 && row.semantic_message_count === 1)).toBe(true)
+      expect(importedRows).toHaveLength(3)
+      expect(importedRows.map((row) => row.summary_preview).sort()).toEqual([
+        "existing summary",
+        "new first summary",
+        "new second summary",
+      ])
+      expect(importedRows.every((row) => row.physical_message_count >= 1 && row.semantic_message_count >= 1)).toBe(true)
 
       const rollbackData = makeData(rollback, "rollback")
       rollbackData.messages[1]!.parts.push({

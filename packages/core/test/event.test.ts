@@ -331,6 +331,31 @@ describe("EventV2", () => {
     }),
   )
 
+  it.effect("finishes durable notification after external interruption", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const entered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const delivered = new Array<string>()
+      yield* events.listen(() => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))))
+      yield* events.afterNotify((event) =>
+        Effect.sync(() => {
+          delivered.push(event.type)
+        }),
+      )
+
+      const publish = yield* events.publish(SyncMessage, { id: "interrupt-after-commit", text: "hello" }).pipe(
+        Effect.forkScoped,
+      )
+      yield* Deferred.await(entered)
+      const interrupt = yield* Fiber.interrupt(publish).pipe(Effect.forkChild)
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(interrupt)
+
+      expect(delivered).toEqual([SyncMessage.type])
+    }),
+  )
+
   it.effect("isolates live-only listener defects", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service
@@ -629,6 +654,38 @@ describe("EventV2", () => {
 
       expect(received[0]?.type).toBe(SyncMessage.type)
       expect(received[0]?.data).toEqual({ id: aggregateID, text: "hello" })
+    }),
+  )
+
+  it.effect("publishes replay with its selected location", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const aggregateID = EventV2.ID.create()
+      const replayed = yield* Deferred.make<EventV2.Payload>()
+      const unsubscribe = yield* events.listen((event) => Deferred.succeed(replayed, event).pipe(Effect.asVoid))
+      yield* Effect.addFinalizer(() => unsubscribe)
+
+      yield* events.replay(
+        {
+          id: EventV2.ID.create(),
+          type: EventV2.versionedType(SyncMessage.type, 1),
+          seq: 0,
+          aggregateID,
+          data: { id: aggregateID, text: "located replay" },
+        },
+        {
+          publish: true,
+          location: {
+            directory: AbsolutePath.make("replay-project"),
+            workspaceID: WorkspaceV2.ID.make("wrk_replay"),
+          },
+        },
+      )
+
+      expect((yield* Deferred.await(replayed)).location).toEqual({
+        directory: AbsolutePath.make("replay-project"),
+        workspaceID: WorkspaceV2.ID.make("wrk_replay"),
+      })
     }),
   )
 

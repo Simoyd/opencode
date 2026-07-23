@@ -523,6 +523,60 @@ describe("session messages and compaction catalog", () => {
   )
 
   it.instance(
+    "uses only completed markers as region boundaries",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const session = yield* sessionScoped
+        const first = yield* addUser(session.id, "before failed compaction")
+        const failedMarker = yield* addCompaction(session.id, first, { auto: false })
+        yield* addAssistant(session.id, failedMarker, "failed summary", { summary: true })
+        const current = yield* addUser(session.id, "after failed compaction")
+        const validMarker = yield* addCompaction(session.id, current, { auto: false })
+        yield* addAssistant(session.id, validMarker, "valid summary", { summary: true, finish: "end_turn" })
+
+        const response = yield* request(`/session/${session.id}/compaction`).pipe(
+          Effect.flatMap(
+            json<{
+              items: Array<{ markerID: MessageID; startMessageID: MessageID; physicalMessageCount: number }>
+            }>,
+          ),
+        )
+        expect(response.items).toHaveLength(1)
+        expect(response.items[0]).toMatchObject({
+          markerID: validMarker,
+          startMessageID: first,
+          physicalMessageCount: 4,
+        })
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
+    "deletes a later marker without treating its orphaned summary as an earlier contradiction",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const session = yield* sessionScoped
+        const service = yield* SessionNs.Service
+        const first = yield* addUser(session.id, "first region")
+        const firstMarker = yield* addCompaction(session.id, first, { auto: false })
+        yield* addAssistant(session.id, firstMarker, "first summary", { summary: true, finish: "end_turn" })
+        const second = yield* addUser(session.id, "second region")
+        const secondMarker = yield* addCompaction(session.id, second, { auto: false })
+        yield* addAssistant(session.id, secondMarker, "second summary", { summary: true, finish: "end_turn" })
+
+        yield* service.removeMessage({ sessionID: session.id, messageID: secondMarker })
+
+        const response = yield* request(`/session/${session.id}/compaction`).pipe(
+          Effect.flatMap(json<{ items: Array<{ markerID: MessageID }> }>),
+        )
+        expect(response.items.map((item) => item.markerID)).toEqual([firstMarker])
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
     "cascades compact-region metadata when the session is removed",
     withoutWatcher(
       Effect.gen(function* () {

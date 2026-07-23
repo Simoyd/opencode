@@ -37,6 +37,29 @@ export const layer = Layer.effect(
         })
       })
 
+    const replayLocation = Effect.gen(function* () {
+      const ctx = yield* InstanceRef
+      if (!ctx) return undefined
+      const workspaceID = yield* WorkspaceRef
+      return new Location.Info({
+        directory: AbsolutePath.make(ctx.directory),
+        ...(workspaceID ? { workspaceID } : {}),
+        project: { id: Project.ID.make(ctx.project.id), directory: AbsolutePath.make(ctx.worktree) },
+      })
+    })
+    const replay: EventV2.Interface["replay"] = (event, options) =>
+      Effect.gen(function* () {
+        if (options?.location) return yield* events.replay(event, options)
+        const location = yield* replayLocation
+        return yield* events.replay(event, { ...options, ...(location ? { location } : {}) })
+      })
+    const replayAll: EventV2.Interface["replayAll"] = (serialized, options) =>
+      Effect.gen(function* () {
+        if (options?.location) return yield* events.replayAll(serialized, options)
+        const location = yield* replayLocation
+        return yield* events.replayAll(serialized, { ...options, ...(location ? { location } : {}) })
+      })
+
     const unsubscribe = yield* events.listen((event) =>
       Effect.gen(function* () {
         const ctx = yield* InstanceRef
@@ -83,7 +106,7 @@ export const layer = Layer.effect(
     )
     yield* Effect.addFinalizer(() => Effect.all([unsubscribe, unsubscribeInvalidation], { discard: true }))
 
-    return Service.of({ ...events, publish })
+    return Service.of({ ...events, publish, replay, replayAll })
   }),
 )
 

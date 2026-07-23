@@ -143,6 +143,13 @@ export interface PublishOptions {
   readonly commit?: (seq: number) => Effect.Effect<void>
 }
 
+export interface ReplayOptions {
+  readonly publish?: boolean
+  readonly ownerID?: string
+  readonly strictOwner?: boolean
+  readonly location?: Location.Ref
+}
+
 export interface Interface {
   readonly publish: <D extends Definition>(
     definition: D,
@@ -162,11 +169,11 @@ export interface Interface {
   readonly project: <D extends Definition>(definition: D, projector: Projector<D>) => Effect.Effect<void>
   readonly replay: (
     event: SerializedEvent,
-    options?: { readonly publish?: boolean; readonly ownerID?: string; readonly strictOwner?: boolean },
+    options?: ReplayOptions,
   ) => Effect.Effect<void>
   readonly replayAll: (
     events: SerializedEvent[],
-    options?: { readonly publish?: boolean; readonly ownerID?: string; readonly strictOwner?: boolean },
+    options?: ReplayOptions,
   ) => Effect.Effect<string | undefined>
   readonly remove: (aggregateID: string) => Effect.Effect<void>
   readonly claim: (aggregateID: string, ownerID: string) => Effect.Effect<void>
@@ -398,15 +405,20 @@ export const layerWith = (options?: LayerOptions) =>
                 message: "Local commit hooks require a synchronized event",
               }),
             )
-          if (durable) {
-            const committed = yield* commitSyncEvent(event as Payload, undefined, commit)
-            if (committed) {
-              event = { ...event, seq: committed.seq }
-              yield* Effect.forEach(syncHandlers, (sync) => observe(event as Payload, "sync", sync), { discard: true })
-              yield* notify(event as Payload)
-              return event
-            }
-          }
+          if (durable)
+            return yield* Effect.uninterruptible(
+              Effect.gen(function* () {
+                const committed = yield* commitSyncEvent(event as Payload, undefined, commit)
+                if (committed) {
+                  event = { ...event, seq: committed.seq }
+                  yield* Effect.forEach(syncHandlers, (sync) => observe(event as Payload, "sync", sync), {
+                    discard: true,
+                  })
+                }
+                yield* notify(event as Payload)
+                return event
+              }),
+            )
           yield* notify(event as Payload)
           return event
         })
@@ -482,40 +494,44 @@ export const layerWith = (options?: LayerOptions) =>
 
       function replay(
         event: SerializedEvent,
-        options?: { readonly publish?: boolean; readonly ownerID?: string; readonly strictOwner?: boolean },
+        options?: ReplayOptions,
       ) {
-        return Effect.gen(function* () {
+        const run = Effect.gen(function* () {
           const definition = syncRegistry.get(event.type)
           if (!definition) {
-            yield* Effect.die(
+            return yield* Effect.die(
               new InvalidSyncEventError({ type: event.type, message: `Unknown sync event type ${event.type}` }),
             )
-          } else {
-            const payload = {
-              id: event.id,
-              type: definition.type,
-              version: definition.sync.version,
-              data: definition.decode(event.data),
-              replay: true,
-            } as Payload
-            const committed = yield* commitSyncEvent(payload, {
-              seq: event.seq,
-              aggregateID: event.aggregateID,
-              ownerID: options?.ownerID,
-              strictOwner: options?.strictOwner,
-            })
-            if (committed && options?.publish) {
-              yield* notify({ ...payload, seq: committed.seq })
-            }
+          }
+          const serviceLocation = Option.getOrUndefined(yield* Effect.serviceOption(Location.Service))
+          const location =
+            options?.location ??
+            (serviceLocation
+              ? { directory: serviceLocation.directory, workspaceID: serviceLocation.workspaceID }
+              : undefined)
+          const payload = {
+            id: event.id,
+            type: definition.type,
+            version: definition.sync.version,
+            ...(location ? { location } : {}),
+            data: definition.decode(event.data),
+            replay: true,
+          } as Payload
+          const committed = yield* commitSyncEvent(payload, {
+            seq: event.seq,
+            aggregateID: event.aggregateID,
+            ownerID: options?.ownerID,
+            strictOwner: options?.strictOwner,
+          })
+          if (committed && options?.publish) {
+            yield* notify({ ...payload, seq: committed.seq })
           }
         })
+        return options?.publish ? Effect.uninterruptible(run) : run
       }
 
-      function replayAll(
-        events: SerializedEvent[],
-        options?: { readonly publish?: boolean; readonly ownerID?: string; readonly strictOwner?: boolean },
-      ) {
-        return Effect.gen(function* () {
+      function replayAll(events: SerializedEvent[], options?: ReplayOptions) {
+        const run = Effect.gen(function* () {
           const source = events[0]?.aggregateID
           if (!source) return undefined
           if (events.some((event) => event.aggregateID !== source)) {
@@ -543,6 +559,7 @@ export const layerWith = (options?: LayerOptions) =>
           }
           return source
         })
+        return options?.publish ? Effect.uninterruptible(run) : run
       }
 
       function remove(aggregateID: string) {
