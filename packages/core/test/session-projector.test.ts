@@ -3,6 +3,7 @@ import { DateTime, Effect, Layer, Schema } from "effect"
 import { asc, eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
 import { EventV2 } from "@opencode-ai/core/event"
+import { EventSequenceTable } from "@opencode-ai/core/event/sql"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Project } from "@opencode-ai/core/project"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
@@ -17,7 +18,15 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionInput } from "@opencode-ai/core/session/input"
 import { SessionStore } from "@opencode-ai/core/session/store"
-import { SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+import {
+  CompactionRegionTable,
+  MessageTable,
+  PartTable,
+  SessionInputTable,
+  SessionMessageTable,
+  SessionTable,
+} from "@opencode-ai/core/session/sql"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { testEffect } from "./lib/effect"
 
 const database = Database.layerFromPath(":memory:")
@@ -590,4 +599,129 @@ describe("SessionProjector", () => {
       ])
     }),
   )
+
+  it.effect("rejects an agreed outer and nested part owner when the canonical parent belongs to another session", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const sessionA = SessionV2.ID.make("ses_projector_owner_a")
+      const sessionB = SessionV2.ID.make("ses_projector_owner_b")
+      const messageID = SessionV1.MessageID.ascending("msg_projector_owner_a")
+      const partID = SessionV1.PartID.ascending("prt_projector_wrong_parent")
+      yield* insertOwnerFixture(db, sessionA, sessionB)
+      const service = yield* EventV2.Service
+      yield* service.publish(SessionV1.Event.MessageUpdated, {
+        sessionID: sessionA,
+        info: userMessage(sessionA, messageID),
+      })
+      const sequenceBefore = yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)
+      const sessionsBefore = yield* db.select().from(SessionTable).orderBy(asc(SessionTable.id)).all().pipe(Effect.orDie)
+      const catalogBefore = yield* db.select().from(CompactionRegionTable).all().pipe(Effect.orDie)
+
+      const exit = yield* service
+        .publish(SessionV1.Event.PartUpdated, {
+          sessionID: sessionB,
+          part: { id: partID, sessionID: sessionB, messageID, type: "text", text: "must not persist" },
+          time: 2,
+        })
+        .pipe(Effect.exit)
+
+      expect(exit._tag).toBe("Failure")
+      expect(String(exit)).toContain("no canonical parent")
+      expect(yield* db.select().from(PartTable).where(eq(PartTable.id, partID)).get().pipe(Effect.orDie)).toBeUndefined()
+      expect(yield* db.select().from(MessageTable).where(eq(MessageTable.id, messageID)).get().pipe(Effect.orDie)).toMatchObject({
+        session_id: sessionA,
+      })
+      expect(yield* db.select().from(SessionTable).orderBy(asc(SessionTable.id)).all().pipe(Effect.orDie)).toEqual(
+        sessionsBefore,
+      )
+      expect(yield* db.select().from(CompactionRegionTable).all().pipe(Effect.orDie)).toEqual(catalogBefore)
+      expect(yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)).toEqual(sequenceBefore)
+    }),
+  )
+
+  it.effect("wrong-owner PartRemoved preserves the part usage catalog and event sequence", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const sessionA = SessionV2.ID.make("ses_projector_remove_a")
+      const sessionB = SessionV2.ID.make("ses_projector_remove_b")
+      const messageID = SessionV1.MessageID.ascending("msg_projector_remove_a")
+      const partID = SessionV1.PartID.ascending("prt_projector_remove_a")
+      yield* insertOwnerFixture(db, sessionA, sessionB)
+      const service = yield* EventV2.Service
+      yield* service.publish(SessionV1.Event.MessageUpdated, {
+        sessionID: sessionA,
+        info: userMessage(sessionA, messageID),
+      })
+      yield* service.publish(SessionV1.Event.PartUpdated, {
+        sessionID: sessionA,
+        part: {
+          id: partID,
+          sessionID: sessionA,
+          messageID,
+          type: "step-finish",
+          reason: "stop",
+          cost: 5,
+          tokens: { total: 21, input: 11, output: 7, reasoning: 3, cache: { read: 2, write: 1 } },
+        },
+        time: 2,
+      })
+      const partBefore = yield* db.select().from(PartTable).where(eq(PartTable.id, partID)).get().pipe(Effect.orDie)
+      const sessionBefore = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionA)).get().pipe(Effect.orDie)
+      const catalogBefore = yield* db.select().from(CompactionRegionTable).all().pipe(Effect.orDie)
+      const sequenceBefore = yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)
+
+      const exit = yield* service
+        .publish(SessionV1.Event.PartRemoved, { sessionID: sessionB, messageID, partID })
+        .pipe(Effect.exit)
+
+      expect(exit._tag).toBe("Failure")
+      expect(String(exit)).toContain("different persisted owner")
+      expect(yield* db.select().from(PartTable).where(eq(PartTable.id, partID)).get().pipe(Effect.orDie)).toEqual(
+        partBefore,
+      )
+      expect(yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionA)).get().pipe(Effect.orDie)).toEqual(
+        sessionBefore,
+      )
+      expect(yield* db.select().from(CompactionRegionTable).all().pipe(Effect.orDie)).toEqual(catalogBefore)
+      expect(yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)).toEqual(sequenceBefore)
+    }),
+  )
+})
+
+const insertOwnerFixture = (
+  db: Database.Interface["db"],
+  sessionA: SessionV2.ID,
+  sessionB: SessionV2.ID,
+) =>
+  Effect.gen(function* () {
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+      .pipe(Effect.orDie)
+    yield* db
+      .insert(SessionTable)
+      .values(
+        [sessionA, sessionB].map((id) => ({
+          id,
+          project_id: Project.ID.global,
+          slug: String(id),
+          directory: "/project",
+          title: String(id),
+          version: "test",
+        })),
+      )
+      .run()
+      .pipe(Effect.orDie)
+  })
+
+const userMessage = (sessionID: SessionV2.ID, id: SessionV1.MessageID) => ({
+  id,
+  sessionID,
+  role: "user" as const,
+  time: { created: 1 },
+  agent: "test",
+  model: { providerID: "test", modelID: "test" },
+  tools: {},
+  mode: "",
 })
