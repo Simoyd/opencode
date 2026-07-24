@@ -3,7 +3,7 @@ import { DateTime, Effect, Layer, Schema } from "effect"
 import { asc, eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
 import { EventV2 } from "@opencode-ai/core/event"
-import { EventSequenceTable } from "@opencode-ai/core/event/sql"
+import { EventSequenceTable, EventTable } from "@opencode-ai/core/event/sql"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Project } from "@opencode-ai/core/project"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
@@ -615,7 +615,10 @@ describe("SessionProjector", () => {
       })
       const sequenceBefore = yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)
       const sessionsBefore = yield* db.select().from(SessionTable).orderBy(asc(SessionTable.id)).all().pipe(Effect.orDie)
+      const messagesBefore = yield* db.select().from(MessageTable).orderBy(asc(MessageTable.id)).all().pipe(Effect.orDie)
+      const partsBefore = yield* db.select().from(PartTable).orderBy(asc(PartTable.id)).all().pipe(Effect.orDie)
       const catalogBefore = yield* db.select().from(CompactionRegionTable).all().pipe(Effect.orDie)
+      const eventsBefore = yield* db.select().from(EventTable).orderBy(asc(EventTable.id)).all().pipe(Effect.orDie)
 
       const exit = yield* service
         .publish(SessionV1.Event.PartUpdated, {
@@ -627,14 +630,15 @@ describe("SessionProjector", () => {
 
       expect(exit._tag).toBe("Failure")
       expect(String(exit)).toContain("no canonical parent")
-      expect(yield* db.select().from(PartTable).where(eq(PartTable.id, partID)).get().pipe(Effect.orDie)).toBeUndefined()
-      expect(yield* db.select().from(MessageTable).where(eq(MessageTable.id, messageID)).get().pipe(Effect.orDie)).toMatchObject({
-        session_id: sessionA,
-      })
       expect(yield* db.select().from(SessionTable).orderBy(asc(SessionTable.id)).all().pipe(Effect.orDie)).toEqual(
         sessionsBefore,
       )
+      expect(yield* db.select().from(MessageTable).orderBy(asc(MessageTable.id)).all().pipe(Effect.orDie)).toEqual(
+        messagesBefore,
+      )
+      expect(yield* db.select().from(PartTable).orderBy(asc(PartTable.id)).all().pipe(Effect.orDie)).toEqual(partsBefore)
       expect(yield* db.select().from(CompactionRegionTable).all().pipe(Effect.orDie)).toEqual(catalogBefore)
+      expect(yield* db.select().from(EventTable).orderBy(asc(EventTable.id)).all().pipe(Effect.orDie)).toEqual(eventsBefore)
       expect(yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)).toEqual(sequenceBefore)
     }),
   )
@@ -665,9 +669,11 @@ describe("SessionProjector", () => {
         },
         time: 2,
       })
-      const partBefore = yield* db.select().from(PartTable).where(eq(PartTable.id, partID)).get().pipe(Effect.orDie)
-      const sessionBefore = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionA)).get().pipe(Effect.orDie)
+      const sessionsBefore = yield* db.select().from(SessionTable).orderBy(asc(SessionTable.id)).all().pipe(Effect.orDie)
+      const messagesBefore = yield* db.select().from(MessageTable).orderBy(asc(MessageTable.id)).all().pipe(Effect.orDie)
+      const partsBefore = yield* db.select().from(PartTable).orderBy(asc(PartTable.id)).all().pipe(Effect.orDie)
       const catalogBefore = yield* db.select().from(CompactionRegionTable).all().pipe(Effect.orDie)
+      const eventsBefore = yield* db.select().from(EventTable).orderBy(asc(EventTable.id)).all().pipe(Effect.orDie)
       const sequenceBefore = yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)
 
       const exit = yield* service
@@ -676,13 +682,15 @@ describe("SessionProjector", () => {
 
       expect(exit._tag).toBe("Failure")
       expect(String(exit)).toContain("different persisted owner")
-      expect(yield* db.select().from(PartTable).where(eq(PartTable.id, partID)).get().pipe(Effect.orDie)).toEqual(
-        partBefore,
+      expect(yield* db.select().from(SessionTable).orderBy(asc(SessionTable.id)).all().pipe(Effect.orDie)).toEqual(
+        sessionsBefore,
       )
-      expect(yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionA)).get().pipe(Effect.orDie)).toEqual(
-        sessionBefore,
+      expect(yield* db.select().from(MessageTable).orderBy(asc(MessageTable.id)).all().pipe(Effect.orDie)).toEqual(
+        messagesBefore,
       )
+      expect(yield* db.select().from(PartTable).orderBy(asc(PartTable.id)).all().pipe(Effect.orDie)).toEqual(partsBefore)
       expect(yield* db.select().from(CompactionRegionTable).all().pipe(Effect.orDie)).toEqual(catalogBefore)
+      expect(yield* db.select().from(EventTable).orderBy(asc(EventTable.id)).all().pipe(Effect.orDie)).toEqual(eventsBefore)
       expect(yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)).toEqual(sequenceBefore)
     }),
   )
