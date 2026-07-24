@@ -721,7 +721,7 @@ const userMessage = (sessionID: SessionV2.ID, id: SessionV1.MessageID) => ({
   role: "user" as const,
   time: { created: 1 },
   agent: "test",
-  model: { providerID: "test", modelID: "test" },
+  model: { providerID: model.providerID, modelID: model.id },
   tools: {},
   mode: "",
 })
