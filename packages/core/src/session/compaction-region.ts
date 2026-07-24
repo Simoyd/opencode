@@ -46,25 +46,27 @@ export const reconcile = Effect.fn("CompactionRegionProjection.reconcile")(funct
   const anchor = currentPosition ?? input.removed
   if (!anchor) return false
 
-  const markers = new Set<MessageID>()
+  const markers = new Map<MessageID, Position>()
   const before = yield* markerAtOrBefore(db, input.sessionID, anchor)
+  const predecessor = currentPosition ? yield* markerBefore(db, input.sessionID, anchor) : undefined
   const after = yield* markerAfter(db, input.sessionID, anchor)
   const completedAfter = yield* completedMarkerAfter(db, input.sessionID, anchor)
-  if (before) markers.add(before.id)
+  if (before) markers.set(before.id, before)
+  if (predecessor) markers.set(predecessor.id, predecessor)
   if (after) {
-    markers.add(after.id)
+    markers.set(after.id, after)
     const neighbor = yield* markerAfter(db, input.sessionID, after)
-    if (neighbor) markers.add(neighbor.id)
+    if (neighbor) markers.set(neighbor.id, neighbor)
   }
-  if (completedAfter) markers.add(completedAfter.id)
+  if (completedAfter) markers.set(completedAfter.id, completedAfter)
 
   let didChange = false
   if (input.removed?.marker) {
     didChange = (yield* deleteRow(db, input.sessionID, input.removed.id)) || didChange
   }
-  for (const markerID of markers) {
-    const next = yield* deriveMarker(db, input.sessionID, markerID)
-    didChange = (yield* replaceRow(db, input.sessionID, markerID, next)) || didChange
+  for (const marker of [...markers.values()].sort(comparePosition)) {
+    const next = yield* deriveMarker(db, input.sessionID, marker.id)
+    didChange = (yield* replaceRow(db, input.sessionID, marker.id, next)) || didChange
   }
   return didChange
 })
@@ -77,7 +79,6 @@ function reconcileAll(db: DatabaseService, sessionID: SessionSchema.ID) {
       .select()
       .from(CompactionRegionTable)
       .where(eq(CompactionRegionTable.session_id, sessionID))
-      .orderBy(CompactionRegionTable.marker_id)
       .all()
       .pipe(Effect.orDie)
     if (same(current, next)) return false
@@ -148,6 +149,39 @@ function markerAfter(db: DatabaseService, sessionID: SessionSchema.ID, position:
     .limit(1)
     .get()
     .pipe(Effect.orDie)
+}
+
+function markerBefore(db: DatabaseService, sessionID: SessionSchema.ID, position: Position) {
+  return db
+    .select({ id: MessageTable.id, time_created: MessageTable.time_created })
+    .from(MessageTable)
+    .innerJoin(
+      PartTable,
+      and(
+        eq(PartTable.message_id, MessageTable.id),
+        eq(PartTable.session_id, MessageTable.session_id),
+        sql`json_extract(${PartTable.data}, '$.type') = 'compaction'`,
+      ),
+    )
+    .where(
+      and(
+        eq(MessageTable.session_id, sessionID),
+        or(
+          lt(MessageTable.time_created, position.time_created),
+          and(eq(MessageTable.time_created, position.time_created), lt(MessageTable.id, position.id)),
+        ),
+      ),
+    )
+    .groupBy(MessageTable.id, MessageTable.time_created)
+    .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+    .limit(1)
+    .get()
+    .pipe(Effect.orDie)
+}
+
+function comparePosition(left: Position, right: Position) {
+  const time = left.time_created - right.time_created
+  return time !== 0 ? time : Buffer.compare(Buffer.from(left.id), Buffer.from(right.id))
 }
 
 function completedMarkerBefore(db: DatabaseService, sessionID: SessionSchema.ID, position: Position) {
@@ -531,7 +565,11 @@ function same(
   right: (typeof CompactionRegionTable.$inferInsert)[],
 ) {
   if (left.length !== right.length) return false
-  return left.every((row, index) => sameRow(row, right[index]!))
+  const rightByMarker = new Map(right.map((row) => [row.marker_id, row]))
+  return left.every((row) => {
+    const candidate = rightByMarker.get(row.marker_id)
+    return candidate !== undefined && sameRow(row, candidate)
+  })
 }
 
 function sameRow(row: typeof CompactionRegionTable.$inferSelect, candidate: typeof CompactionRegionTable.$inferInsert) {

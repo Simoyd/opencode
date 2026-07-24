@@ -55,12 +55,12 @@ export function transformShareData(shareData: ShareData[]): {
   const sessionItem = shareData.find((d) => d.type === "session")
   if (!sessionItem) return null
 
-  const messageMap = new Map<string, Message>()
+  const messages: Message[] = []
   const partMap = new Map<string, Part[]>()
 
   for (const item of shareData) {
     if (item.type === "message") {
-      messageMap.set(item.data.id, item.data)
+      messages.push(item.data)
     } else if (item.type === "part") {
       if (!partMap.has(item.data.messageID)) {
         partMap.set(item.data.messageID, [])
@@ -69,11 +69,11 @@ export function transformShareData(shareData: ShareData[]): {
     }
   }
 
-  if (messageMap.size === 0) return null
+  if (messages.length === 0) return null
 
   return {
     info: sessionItem.data,
-    messages: Array.from(messageMap.values()).map((msg) => ({
+    messages: messages.map((msg) => ({
       info: msg,
       parts: partMap.get(msg.id) ?? [],
     })),
@@ -97,7 +97,7 @@ export const persistImportedSession = Effect.fn("Cli.import.persist")(function* 
   const writeImportedRows = Effect.gen(function* () {
     const messageIDs = new Set<string>()
     const partIDs = new Set<string>()
-    let previousPosition: { id: string; time: number } | undefined
+    let previousMessage: SessionV1.Info | undefined
     for (const msg of exportData.messages) {
       const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
       if (msgInfo.sessionID !== exportData.info.id || msgInfo.time?.created === undefined) {
@@ -106,14 +106,13 @@ export const persistImportedSession = Effect.fn("Cli.import.persist")(function* 
       const { id, sessionID: _, ...msgData } = msgInfo
       const timeCreated = msgInfo.time.created
       if (
-        !messageIDs.add(id) ||
-        (previousPosition &&
-          (timeCreated < previousPosition.time ||
-            (timeCreated === previousPosition.time && id <= previousPosition.id)))
+        messageIDs.has(id) ||
+        (previousMessage && MessageV2.compareHydratedMessagePhysicalOrder(msgInfo, previousMessage) <= 0)
       ) {
         return yield* Effect.die("Imported messages contradict canonical physical order")
       }
-      previousPosition = { id, time: timeCreated }
+      messageIDs.add(id)
+      previousMessage = msgInfo
       const existingMessage = yield* db
         .select({ sessionID: MessageTable.session_id, timeCreated: MessageTable.time_created })
         .from(MessageTable)
@@ -137,13 +136,10 @@ export const persistImportedSession = Effect.fn("Cli.import.persist")(function* 
 
       for (const part of msg.parts) {
         const partInfo = decodePart(part) as SessionV1.Part
-        if (
-          partInfo.sessionID !== exportData.info.id ||
-          partInfo.messageID !== id ||
-          !partIDs.add(partInfo.id)
-        ) {
+        if (partInfo.sessionID !== exportData.info.id || partInfo.messageID !== id || partIDs.has(partInfo.id)) {
           return yield* Effect.die("Imported part ownership must match its containing message and session")
         }
+        partIDs.add(partInfo.id)
         const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
         const existingPart = yield* db
           .select({ sessionID: PartTable.session_id, messageID: PartTable.message_id })

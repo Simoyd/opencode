@@ -55,7 +55,14 @@ export function globalEventStream(beforeConnected: Effect.Effect<void> = Effect.
     GlobalBus.on("event", handler)
     yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", handler)))
     const events = Stream.fromQueue(queue).pipe(
-      Stream.filter((event) => selectedProjection || event.payload.type !== SelectedEventProjection.CatalogChangedType),
+      Stream.filter((event) =>
+        selectedProjection
+          ? SelectedEventProjection.includesInstanceEvent({
+              type: event.payload.type ?? "",
+              properties: event.payload.properties,
+            })
+          : event.payload.type !== SelectedEventProjection.CatalogChangedType,
+      ),
     )
     const heartbeat = Stream.tick("10 seconds").pipe(
       Stream.drop(1),

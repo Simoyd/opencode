@@ -540,7 +540,15 @@ describe("session import persistence", () => {
           messages: [
             {
               info: user(start, 1) as never,
-              parts: [{ id: PartID.ascending(), sessionID: info.id, messageID: start, type: "text", text: `${prefix} body` } as never],
+              parts: [
+                {
+                  id: PartID.ascending(),
+                  sessionID: info.id,
+                  messageID: start,
+                  type: "text",
+                  text: `${prefix} body`,
+                } as never,
+              ],
             },
             {
               info: user(marker, 2) as never,
@@ -573,7 +581,13 @@ describe("session import persistence", () => {
                 finish: "end_turn",
               } as never,
               parts: [
-                { id: PartID.ascending(), sessionID: info.id, messageID: summary, type: "text", text: `${prefix} summary` } as never,
+                {
+                  id: PartID.ascending(),
+                  sessionID: info.id,
+                  messageID: summary,
+                  type: "text",
+                  text: `${prefix} summary`,
+                } as never,
               ],
             },
           ],
@@ -597,7 +611,15 @@ describe("session import persistence", () => {
               tools: {},
               mode: "",
             } as never,
-            parts: [{ id: PartID.ascending(), sessionID: info.id, messageID: start, type: "text", text: `${prefix} second body` } as never],
+            parts: [
+              {
+                id: PartID.ascending(),
+                sessionID: info.id,
+                messageID: start,
+                type: "text",
+                text: `${prefix} second body`,
+              } as never,
+            ],
           },
           {
             info: {
@@ -610,7 +632,16 @@ describe("session import persistence", () => {
               tools: {},
               mode: "",
             } as never,
-            parts: [{ id: PartID.ascending(), sessionID: info.id, messageID: marker, type: "compaction", auto: true, tail_start_id: start } as never],
+            parts: [
+              {
+                id: PartID.ascending(),
+                sessionID: info.id,
+                messageID: marker,
+                type: "compaction",
+                auto: true,
+                tail_start_id: start,
+              } as never,
+            ],
           },
           {
             info: {
@@ -629,7 +660,15 @@ describe("session import persistence", () => {
               summary: true,
               finish: "end_turn",
             } as never,
-            parts: [{ id: PartID.ascending(), sessionID: info.id, messageID: summary, type: "text", text: `${prefix} second summary` } as never],
+            parts: [
+              {
+                id: PartID.ascending(),
+                sessionID: info.id,
+                messageID: summary,
+                type: "text",
+                text: `${prefix} second summary`,
+              } as never,
+            ],
           },
         )
         return data

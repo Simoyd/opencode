@@ -340,7 +340,7 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
         } satisfies LLM.StreamInput
 
         const value = yield* handle.process(input)
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: chat.id, messageID: msg.id })
         const calls = yield* llm.calls
 
         expect(value).toBe("continue")
@@ -461,7 +461,7 @@ it.live("session.processor effect tests preserve text start time", () =>
           .pipe(Effect.forkChild)
 
         yield* waitFor(
-          MessageV2.parts(msg.id).pipe(
+          MessageV2.parts({ sessionID: chat.id, messageID: msg.id }).pipe(
             Effect.map((parts) => parts.find((part): part is SessionV1.TextPart => part.type === "text")),
             Effect.provideService(Database.Service, database),
           ),
@@ -471,7 +471,9 @@ it.live("session.processor effect tests preserve text start time", () =>
         gate.resolve()
 
         const exit = yield* Fiber.await(run)
-        const text = (yield* MessageV2.parts(msg.id)).find((part): part is SessionV1.TextPart => part.type === "text")
+        const text = (yield* MessageV2.parts({ sessionID: chat.id, messageID: msg.id })).find(
+          (part): part is SessionV1.TextPart => part.type === "text",
+        )
 
         expect(Exit.isSuccess(exit)).toBe(true)
         expect(text?.text).toBe("hello")
@@ -521,7 +523,7 @@ it.live("session.processor effect tests stop after token overflow requests compa
           tools: {},
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: chat.id, messageID: msg.id })
 
         expect(value).toBe("compact")
         expect(parts.some((part) => part.type === "text" && part.text === "after")).toBe(true)
@@ -567,7 +569,7 @@ it.live("session.processor effect tests capture reasoning from http mock", () =>
           tools: {},
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: chat.id, messageID: msg.id })
         const reasoning = parts.find((part): part is SessionV1.ReasoningPart => part.type === "reasoning")
         const text = parts.find((part): part is SessionV1.TextPart => part.type === "text")
 
@@ -615,7 +617,7 @@ it.live("session.processor effect tests reset reasoning state across retries", (
           tools: {},
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: chat.id, messageID: msg.id })
         const reasoning = parts.filter((part): part is SessionV1.ReasoningPart => part.type === "reasoning")
 
         expect(value).toBe("continue")
@@ -706,7 +708,7 @@ it.live("session.processor effect tests retry recognized structured json errors"
           tools: {},
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: chat.id, messageID: msg.id })
 
         expect(value).toBe("continue")
         expect(yield* llm.calls).toBe(2)
@@ -859,7 +861,7 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
           },
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: chat.id, messageID: msg.id })
         const call = parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
 
         expect(value).toBe("continue")
@@ -919,7 +921,7 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
 
         yield* llm.wait(1)
         yield* waitFor(
-          MessageV2.parts(msg.id).pipe(
+          MessageV2.parts({ sessionID: chat.id, messageID: msg.id }).pipe(
             Effect.map((parts) => parts.find((part): part is SessionV1.ToolPart => part.type === "tool")),
             Effect.provideService(Database.Service, database),
           ),
@@ -928,7 +930,7 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
         yield* Fiber.interrupt(run)
 
         const exit = yield* Fiber.await(run)
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: chat.id, messageID: msg.id })
         const call = parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
 
         expect(Exit.isFailure(exit)).toBe(true)
@@ -1115,7 +1117,7 @@ itProviderError.live("session.processor effect tests fail provider-executed erro
         })
         yield* off
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: chat.id, messageID: msg.id })
         const call = parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
         expect(call?.state.status).toBe("error")
         if (call?.state.status === "error") expect(call.state.error).toBe("provider boom")

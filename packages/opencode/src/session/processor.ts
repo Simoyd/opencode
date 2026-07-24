@@ -559,9 +559,10 @@ export const layer = Layer.effect(
                 : value.providerMetadata,
             }))
 
-            const parts = yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
-              Effect.provideService(Database.Service, database),
-            )
+            const parts = yield* MessageV2.parts({
+              sessionID: ctx.assistantMessage.sessionID,
+              messageID: ctx.assistantMessage.id,
+            }).pipe(Effect.provideService(Database.Service, database))
             const recentParts = parts.slice(-DOOM_LOOP_THRESHOLD)
 
             if (

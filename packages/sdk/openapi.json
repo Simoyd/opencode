@@ -20791,9 +20791,55 @@
             "type": "string",
             "pattern": "^msg"
           },
+          "startTimeCreated": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["NaN"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["-Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
           "markerID": {
             "type": "string",
             "pattern": "^msg"
+          },
+          "markerTimeCreated": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["NaN"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["-Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
           },
           "endExclusiveCursor": {
             "type": "string"
@@ -20820,7 +20866,9 @@
         },
         "required": [
           "startMessageID",
+          "startTimeCreated",
           "markerID",
+          "markerTimeCreated",
           "endExclusiveCursor",
           "physicalMessageCount",
           "semanticMessageCount",

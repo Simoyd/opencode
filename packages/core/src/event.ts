@@ -167,14 +167,8 @@ export interface Interface {
   readonly afterNotify: (listener: Listener) => Effect.Effect<Unsubscribe>
   readonly beforeCommit: (guard: CommitGuard) => Effect.Effect<void>
   readonly project: <D extends Definition>(definition: D, projector: Projector<D>) => Effect.Effect<void>
-  readonly replay: (
-    event: SerializedEvent,
-    options?: ReplayOptions,
-  ) => Effect.Effect<void>
-  readonly replayAll: (
-    events: SerializedEvent[],
-    options?: ReplayOptions,
-  ) => Effect.Effect<string | undefined>
+  readonly replay: (event: SerializedEvent, options?: ReplayOptions) => Effect.Effect<void>
+  readonly replayAll: (events: SerializedEvent[], options?: ReplayOptions) => Effect.Effect<string | undefined>
   readonly remove: (aggregateID: string) => Effect.Effect<void>
   readonly claim: (aggregateID: string, ownerID: string) => Effect.Effect<void>
 }
@@ -494,10 +488,7 @@ export const layerWith = (options?: LayerOptions) =>
         })
       }
 
-      function replay(
-        event: SerializedEvent,
-        options?: ReplayOptions,
-      ) {
+      function replay(event: SerializedEvent, options?: ReplayOptions) {
         const prepare = Effect.gen(function* () {
           const definition = syncRegistry.get(event.type)
           if (!definition) {

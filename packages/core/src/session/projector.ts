@@ -323,7 +323,11 @@ export const layer = Layer.effectDiscard(
         const sessionID = event.data.info.sessionID
         const data = messageData(event.data.info)
         const prior = yield* db
-          .select({ session_id: MessageTable.session_id, time_created: MessageTable.time_created, data: MessageTable.data })
+          .select({
+            session_id: MessageTable.session_id,
+            time_created: MessageTable.time_created,
+            data: MessageTable.data,
+          })
           .from(MessageTable)
           .where(eq(MessageTable.id, id))
           .get()
@@ -377,27 +381,38 @@ export const layer = Layer.effectDiscard(
         const row = yield* db
           .select()
           .from(PartTable)
-          .where(
-            and(
-              eq(PartTable.id, event.data.partID),
-              eq(PartTable.message_id, event.data.messageID),
-              eq(PartTable.session_id, event.data.sessionID),
-            ),
-          )
+          .where(eq(PartTable.id, event.data.partID))
           .get()
           .pipe(Effect.orDie)
-        const previous = row && usage(row.data)
-        if (previous) yield* applyUsage(db, event.data.sessionID, previous, -1)
+        if (!row) return
+        if (row.message_id !== event.data.messageID || row.session_id !== event.data.sessionID) {
+          return yield* Effect.die(`Part ${event.data.partID} collides with a different persisted owner`)
+        }
+        const parent = yield* db
+          .select({ id: MessageTable.id, session_id: MessageTable.session_id, time_created: MessageTable.time_created })
+          .from(MessageTable)
+          .where(and(eq(MessageTable.id, row.message_id), eq(MessageTable.session_id, row.session_id)))
+          .get()
+          .pipe(Effect.orDie)
+        if (!parent) return yield* Effect.die(`Part ${row.id} has no canonical parent message owner`)
+        const previous = usage(row.data)
+        if (previous) yield* applyUsage(db, parent.session_id, previous, -1)
         yield* db
           .delete(PartTable)
-          .where(and(eq(PartTable.id, event.data.partID), eq(PartTable.session_id, event.data.sessionID)))
+          .where(
+            and(
+              eq(PartTable.id, row.id),
+              eq(PartTable.message_id, parent.id),
+              eq(PartTable.session_id, parent.session_id),
+            ),
+          )
           .run()
           .pipe(Effect.orDie)
-        yield* reconcileRegions(db, event, event.data.sessionID, {
-          messageID: event.data.messageID,
+        yield* reconcileRegions(db, event, parent.session_id, {
+          messageID: parent.id,
           removed:
-            row?.data.type === "compaction"
-              ? { id: event.data.messageID, time_created: row.time_created, marker: true }
+            row.data.type === "compaction"
+              ? { id: parent.id, time_created: parent.time_created, marker: true }
               : undefined,
         })
       }),
@@ -409,6 +424,15 @@ export const layer = Layer.effectDiscard(
         const messageID = event.data.part.messageID
         const sessionID = event.data.part.sessionID
         const data = partData(event.data.part)
+        const parent = yield* db
+          .select({ id: MessageTable.id, session_id: MessageTable.session_id, time_created: MessageTable.time_created })
+          .from(MessageTable)
+          .where(eq(MessageTable.id, messageID))
+          .get()
+          .pipe(Effect.orDie)
+        if (!parent || parent.session_id !== sessionID) {
+          return yield* Effect.die(`Part ${id} has no canonical parent in session ${sessionID}`)
+        }
         const row = yield* db.select().from(PartTable).where(eq(PartTable.id, id)).get().pipe(Effect.orDie)
         if (row && (row.session_id !== sessionID || row.message_id !== messageID)) {
           return yield* Effect.die(`Part ${id} collides with a different persisted owner`)
@@ -427,7 +451,7 @@ export const layer = Layer.effectDiscard(
           messageID,
           removed:
             row?.data.type === "compaction" && event.data.part.type !== "compaction"
-              ? { id: messageID, time_created: row.time_created, marker: true }
+              ? { id: parent.id, time_created: parent.time_created, marker: true }
               : undefined,
         })
       }),

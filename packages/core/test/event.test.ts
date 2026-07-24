@@ -344,9 +344,9 @@ describe("EventV2", () => {
         }),
       )
 
-      const publish = yield* events.publish(SyncMessage, { id: "interrupt-after-commit", text: "hello" }).pipe(
-        Effect.forkScoped,
-      )
+      const publish = yield* events
+        .publish(SyncMessage, { id: "interrupt-after-commit", text: "hello" })
+        .pipe(Effect.forkScoped)
       yield* Deferred.await(entered)
       const interrupt = yield* Fiber.interrupt(publish).pipe(Effect.forkChild)
       yield* Deferred.succeed(release, undefined)

@@ -26,7 +26,6 @@ import { NotFoundError } from "@/storage/storage"
 import { and } from "drizzle-orm"
 import { desc } from "drizzle-orm"
 import { eq } from "drizzle-orm"
-import { inArray } from "drizzle-orm"
 import { lt } from "drizzle-orm"
 import { or } from "drizzle-orm"
 import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
@@ -108,14 +107,15 @@ const older = (row: Cursor) =>
   or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
 
 function hydrate(db: Database.Interface["db"], rows: (typeof MessageTable.$inferSelect)[]) {
-  const ids = rows.map((row) => row.id)
   const partByMessage = new Map<string, Part[]>()
   return Effect.gen(function* () {
-    if (ids.length > 0) {
+    if (rows.length > 0) {
       const partRows = yield* db
         .select()
         .from(PartTable)
-        .where(inArray(PartTable.message_id, ids))
+        .where(
+          or(...rows.map((row) => and(eq(PartTable.message_id, row.id), eq(PartTable.session_id, row.session_id)))),
+        )
         .orderBy(PartTable.message_id, PartTable.id)
         .all()
         .pipe(Effect.orDie)
@@ -477,7 +477,12 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
         }
       }),
     )
-    .pipe(Effect.orDie)
+    .pipe(
+      Effect.catchIf(
+        (error) => !NotFoundError.isInstance(error),
+        (error) => Effect.die(error),
+      ),
+    )
 })
 
 export function stream(sessionID: SessionID) {
@@ -503,13 +508,13 @@ export function stream(sessionID: SessionID) {
   })
 }
 
-export function parts(messageID: MessageID) {
+export function parts(input: { sessionID: SessionID; messageID: MessageID }) {
   return Effect.gen(function* () {
     const { db } = yield* Database.Service
     const rows = yield* db
       .select()
       .from(PartTable)
-      .where(eq(PartTable.message_id, messageID))
+      .where(and(eq(PartTable.message_id, input.messageID), eq(PartTable.session_id, input.sessionID)))
       .orderBy(PartTable.id)
       .all()
       .pipe(Effect.orDie)
@@ -529,10 +534,15 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
           .get()
           .pipe(Effect.orDie)
         if (!row) return yield* new NotFoundError({ message: `Message not found: ${input.messageID}` })
-        return { info: info(row), parts: yield* parts(input.messageID) }
+        return { info: info(row), parts: yield* parts(input) }
       }),
     )
-    .pipe(Effect.orDie)
+    .pipe(
+      Effect.catchIf(
+        (error) => !NotFoundError.isInstance(error),
+        (error) => Effect.die(error),
+      ),
+    )
 })
 
 export function filterCompacted(msgs: Iterable<WithParts>) {
@@ -592,28 +602,49 @@ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: Ses
   return filterCompacted(yield* stream(sessionID))
 })
 
-// filterCompacted reorders messages for model consumption
-// ([compaction-user, summary, ...retained tail..., continue-user]), so array
-// position is not chronological. Derive each binding by max id (MessageID
-// is monotonic via MessageID.ascending) so a pre-compaction overflowing tail
-// assistant doesn't get mistaken for the most recent turn. tasks are
-// compaction/subtask parts attached to user messages newer than the latest
-// finished assistant — i.e. unprocessed work.
+const physicalOrderTextEncoder = new TextEncoder()
+
+function compareUtf8Binary(left: string, right: string) {
+  const leftBytes = physicalOrderTextEncoder.encode(left)
+  const rightBytes = physicalOrderTextEncoder.encode(right)
+  const length = Math.min(leftBytes.length, rightBytes.length)
+  for (let index = 0; index < length; index++) {
+    const order = leftBytes[index] - rightBytes[index]
+    if (order !== 0) return order
+  }
+  return leftBytes.length - rightBytes.length
+}
+
+export function compareHydratedMessagePhysicalOrder(left: Info | WithParts, right: Info | WithParts) {
+  const leftInfo = "info" in left ? left.info : left
+  const rightInfo = "info" in right ? right.info : right
+  const time = leftInfo.time.created - rightInfo.time.created
+  if (time !== 0) return time
+  return compareUtf8Binary(leftInfo.id, rightInfo.id)
+}
+
+// filterCompacted reorders messages for model consumption, so derive turn
+// bindings and pending work from a physically ordered copy.
 export function latest(msgs: WithParts[]) {
   let user: User | undefined
   let assistant: Assistant | undefined
   let finished: Assistant | undefined
-  for (const msg of msgs) {
+  let finishedIndex = -1
+  const ordered = [...msgs].sort(compareHydratedMessagePhysicalOrder)
+  for (const [index, msg] of ordered.entries()) {
     const info = msg.info
-    if (info.role === "user" && (!user || info.id > user.id)) user = info
-    if (info.role === "assistant" && (!assistant || info.id > assistant.id)) assistant = info
-    if (info.role === "assistant" && info.finish && (!finished || info.id > finished.id)) finished = info
+    if (info.role === "user") user = info
+    if (info.role === "assistant") assistant = info
+    if (info.role === "assistant" && info.finish) {
+      finished = info
+      finishedIndex = index
+    }
   }
-  const tasks = msgs.flatMap((m) =>
-    finished && m.info.id <= finished.id
-      ? []
-      : m.parts.filter((p): p is CompactionPart | SubtaskPart => p.type === "compaction" || p.type === "subtask"),
-  )
+  const tasks = ordered
+    .slice(finishedIndex + 1)
+    .flatMap((m) =>
+      m.parts.filter((p): p is CompactionPart | SubtaskPart => p.type === "compaction" || p.type === "subtask"),
+    )
   return { user, assistant, finished, tasks }
 }
 

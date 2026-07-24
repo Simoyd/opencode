@@ -2628,7 +2628,9 @@ export type StagedContextInfo = {
 
 export type CompactionRegionDescriptor = {
   startMessageID: string
+  startTimeCreated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
   markerID: string
+  markerTimeCreated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
   endExclusiveCursor: string
   physicalMessageCount: number
   semanticMessageCount: number

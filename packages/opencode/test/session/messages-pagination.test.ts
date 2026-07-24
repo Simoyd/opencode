@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
-import { Effect, Layer, Option } from "effect"
+import { Cause, Effect, Exit, Layer, Option } from "effect"
+import { SqlError, UnknownError } from "effect/unstable/sql/SqlError"
 import { Session as SessionNs } from "@/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
-import { MessageID, PartID, type SessionID } from "../../src/session/schema"
+import { MessageID, PartID, SessionID } from "../../src/session/schema"
 
 import { NotFoundError } from "@/storage/storage"
 import * as Log from "@opencode-ai/core/util/log"
@@ -30,13 +31,11 @@ const withSession = <A, E, R>(
   )
 
 // Helper functions using Effect.gen
-const fill = Effect.fn("Test.fill")(function* (
-  sessionID: SessionID,
-  count: number,
-  time = (i: number) => Date.now() + i,
-) {
+const fill = Effect.fn("Test.fill")(function* (sessionID: SessionID, count: number, time?: (i: number) => number) {
   const session = yield* SessionNs.Service
   const ids = [] as MessageID[]
+  const baseTime = Date.now()
+  const createdAt = time ?? ((i: number) => baseTime + i)
   for (let i = 0; i < count; i++) {
     const id = MessageID.ascending()
     ids.push(id)
@@ -44,7 +43,7 @@ const fill = Effect.fn("Test.fill")(function* (
       id,
       sessionID,
       role: "user",
-      time: { created: time(i) },
+      time: { created: createdAt(i) },
       agent: "test",
       model: { providerID: "test", modelID: "test" },
       tools: {},
@@ -59,6 +58,32 @@ const fill = Effect.fn("Test.fill")(function* (
     })
   }
   return ids
+})
+
+const fillExact = Effect.fn("Test.fillExact")(function* (
+  sessionID: SessionID,
+  rows: ReadonlyArray<{ id: MessageID; time: number }>,
+) {
+  const session = yield* SessionNs.Service
+  for (const [index, row] of rows.entries()) {
+    yield* session.updateMessage({
+      id: row.id,
+      sessionID,
+      role: "user",
+      time: { created: row.time },
+      agent: "test",
+      model: { providerID: "test", modelID: "test" },
+      tools: {},
+      mode: "",
+    } as unknown as SessionV1.Info)
+    yield* session.updatePart({
+      id: PartID.ascending(),
+      sessionID,
+      messageID: row.id,
+      type: "text",
+      text: `exact-${index}`,
+    })
+  }
 })
 
 const addUser = Effect.fn("Test.addUser")(function* (sessionID: SessionID, text?: string) {
@@ -273,6 +298,44 @@ describe("MessageV2.page", () => {
     ),
   )
 
+  it.instance("orders anti-correlated ids by timestamp before id", () =>
+    withSession(({ sessionID }) =>
+      Effect.gen(function* () {
+        const rows = [
+          { id: MessageID.make("msg_z-late-id-early-time"), time: 1000 },
+          { id: MessageID.make("msg_a-early-id-late-time"), time: 3000 },
+          { id: MessageID.make("msg_m-middle"), time: 2000 },
+        ]
+        yield* fillExact(sessionID, rows)
+
+        const result = yield* MessageV2.page({ sessionID, limit: 10 })
+        expect(result.items.map((item) => item.info.id)).toEqual([rows[0].id, rows[2].id, rows[1].id])
+      }),
+    ),
+  )
+
+  it.instance("paginates equal timestamps using binary id order", () =>
+    withSession(({ sessionID }) =>
+      Effect.gen(function* () {
+        const rows = [
+          MessageID.make("msg_z"),
+          MessageID.make("msg_A"),
+          MessageID.make("msg_a"),
+          MessageID.make("msg_Z"),
+        ].map((id) => ({ id, time: 1000 }))
+        yield* fillExact(sessionID, rows)
+
+        const newest = yield* MessageV2.page({ sessionID, limit: 2 })
+        expect(newest.items.map((item) => item.info.id)).toEqual([MessageID.make("msg_a"), MessageID.make("msg_z")])
+        expect(newest.cursor).toBeTruthy()
+
+        const oldest = yield* MessageV2.page({ sessionID, limit: 2, before: newest.cursor! })
+        expect(oldest.items.map((item) => item.info.id)).toEqual([MessageID.make("msg_A"), MessageID.make("msg_Z")])
+        expect(oldest.more).toBe(false)
+      }),
+    ),
+  )
+
   it.instance("does not return messages from other sessions", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service
@@ -386,7 +449,7 @@ describe("MessageV2.parts", () => {
       Effect.gen(function* () {
         const [id] = yield* fill(sessionID, 1)
 
-        const result = yield* MessageV2.parts(id)
+        const result = yield* MessageV2.parts({ sessionID, messageID: id })
         expect(result).toHaveLength(1)
         expect(result[0].type).toBe("text")
         expect((result[0] as SessionV1.TextPart).text).toBe("m0")
@@ -399,7 +462,7 @@ describe("MessageV2.parts", () => {
       Effect.gen(function* () {
         const id = yield* addUser(sessionID)
 
-        const result = yield* MessageV2.parts(id)
+        const result = yield* MessageV2.parts({ sessionID, messageID: id })
         expect(result).toEqual([])
       }),
     ),
@@ -425,7 +488,7 @@ describe("MessageV2.parts", () => {
           text: "third",
         })
 
-        const result = yield* MessageV2.parts(id)
+        const result = yield* MessageV2.parts({ sessionID, messageID: id })
         expect(result).toHaveLength(3)
         expect((result[0] as SessionV1.TextPart).text).toBe("m0")
         expect((result[1] as SessionV1.TextPart).text).toBe("second")
@@ -437,7 +500,10 @@ describe("MessageV2.parts", () => {
   it.instance("returns empty for non-existent message id", () =>
     Effect.gen(function* () {
       yield* SessionNs.Service
-      const result = yield* MessageV2.parts(MessageID.ascending())
+      const result = yield* MessageV2.parts({
+        sessionID: SessionID.make("ses_missing_message_parts"),
+        messageID: MessageID.ascending(),
+      })
       expect(result).toEqual([])
     }),
   )
@@ -447,7 +513,7 @@ describe("MessageV2.parts", () => {
       Effect.gen(function* () {
         const [id] = yield* fill(sessionID, 1)
 
-        const result = yield* MessageV2.parts(id)
+        const result = yield* MessageV2.parts({ sessionID, messageID: id })
         expect(result[0].sessionID).toBe(sessionID)
         expect(result[0].messageID).toBe(id)
       }),
@@ -467,6 +533,41 @@ describe("MessageV2.get", () => {
         expect(result.info.role).toBe("user")
         expect(result.parts).toHaveLength(1)
         expect((result.parts[0] as SessionV1.TextPart).text).toBe("m0")
+      }),
+    ),
+  )
+
+  it.instance("converts page and get transaction SQL failures to defects instead of typed not-found failures", () =>
+    withSession(({ sessionID }) =>
+      Effect.gen(function* () {
+        const database = yield* Database.Service
+        const sqlError = new SqlError({
+          reason: new UnknownError({ cause: new Error("injected transaction failure"), operation: "transaction" }),
+        })
+        const failingDb = new Proxy(database.db, {
+          get(target, property, receiver) {
+            if (property === "transaction") return () => Effect.fail(sqlError)
+            return Reflect.get(target, property, receiver)
+          },
+        }) as typeof database.db
+
+        const pageExit = yield* MessageV2.page({ sessionID, limit: 10 }).pipe(
+          Effect.provideService(Database.Service, { db: failingDb }),
+          Effect.exit,
+        )
+        const getExit = yield* MessageV2.get({ sessionID, messageID: MessageID.ascending() }).pipe(
+          Effect.provideService(Database.Service, { db: failingDb }),
+          Effect.exit,
+        )
+        const exits: ReadonlyArray<Exit.Exit<unknown, unknown>> = [pageExit, getExit]
+        for (const exit of exits) {
+          expect(Exit.isFailure(exit)).toBe(true)
+          if (!Exit.isFailure(exit)) continue
+          expect(exit.cause.reasons).toHaveLength(1)
+          expect(Cause.isDieReason(exit.cause.reasons[0])).toBe(true)
+          const reason = exit.cause.reasons[0]
+          if (Cause.isDieReason(reason)) expect(reason.defect).toBe(sqlError)
+        }
       }),
     ),
   )
@@ -1057,7 +1158,7 @@ describe("MessageV2 consistency", () => {
         const [id] = yield* fill(sessionID, 1)
 
         const got = yield* MessageV2.get({ sessionID, messageID: id })
-        const standalone = yield* MessageV2.parts(id)
+        const standalone = yield* MessageV2.parts({ sessionID, messageID: id })
         expect(got.parts).toEqual(standalone)
       }),
     ),

@@ -52,7 +52,9 @@ export const CompactionCatalogQuery = Schema.Struct({
 })
 export const CompactionRegionDescriptor = Schema.Struct({
   startMessageID: MessageID,
+  startTimeCreated: Schema.Number,
   markerID: MessageID,
+  markerTimeCreated: Schema.Number,
   endExclusiveCursor: Schema.String,
   physicalMessageCount: NonNegativeInt,
   semanticMessageCount: NonNegativeInt,

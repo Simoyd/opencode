@@ -738,6 +738,9 @@ export const layer: Layer.Layer<
       const ctx = yield* InstanceState.context
       const original = yield* get(input.sessionID)
       const title = getForkedTitle(original.title)
+      const msgs = yield* messages({ sessionID: input.sessionID })
+      const cutoffIndex = input.messageID ? msgs.findIndex((msg) => msg.info.id === input.messageID) : msgs.length
+      if (cutoffIndex < 0) return yield* new NotFoundError({ message: `Message not found: ${input.messageID}` })
       const session = yield* createNext({
         directory: ctx.directory,
         path: sessionPath(ctx.worktree, ctx.directory),
@@ -745,11 +748,9 @@ export const layer: Layer.Layer<
         title,
         metadata: structuredClone(original.metadata),
       })
-      const msgs = yield* messages({ sessionID: input.sessionID })
       const idMap = new Map<string, MessageID>()
 
-      for (const msg of msgs) {
-        if (input.messageID && msg.info.id >= input.messageID) break
+      for (const msg of msgs.slice(0, cutoffIndex)) {
         const newID = MessageID.ascending()
         idMap.set(msg.info.id, newID)
 
