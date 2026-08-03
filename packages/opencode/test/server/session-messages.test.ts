@@ -355,11 +355,19 @@ describe("session messages and compaction catalog", () => {
       Effect.gen(function* () {
         const session = yield* sessionScoped
         const markers: MessageID[] = []
+        const created = Date.now()
         for (let index = 0; index < 51; index++) {
-          const prompt = yield* addUser(session.id, `prompt ${index}`)
-          yield* addAssistant(session.id, prompt, `answer ${index}`, { finish: "end_turn" })
-          const marker = yield* addCompaction(session.id, prompt, { auto: false })
-          yield* addAssistant(session.id, marker, `summary ${index}`, { summary: true, finish: "end_turn" })
+          const prompt = yield* addUser(session.id, `prompt ${index}`, { created: created + index * 4 })
+          yield* addAssistant(session.id, prompt, `answer ${index}`, {
+            created: created + index * 4 + 1,
+            finish: "end_turn",
+          })
+          const marker = yield* addCompaction(session.id, prompt, { auto: false, created: created + index * 4 + 2 })
+          yield* addAssistant(session.id, marker, `summary ${index}`, {
+            created: created + index * 4 + 3,
+            summary: true,
+            finish: "end_turn",
+          })
           markers.push(marker)
         }
 
