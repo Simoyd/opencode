@@ -21,6 +21,7 @@ import { GlobalBus } from "@/bus/global"
 import { CompactionCatalog } from "@/session/compaction-catalog"
 import { CompactionRegionTable, MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { persistImportedSession, transformShareData, type ExportData, type ShareData } from "@/cli/cmd/import"
+import { collectExportData } from "@/cli/cmd/export"
 import { InstanceRef } from "@/effect/instance-ref"
 
 void Log.init({ print: false })
@@ -1090,6 +1091,9 @@ describe("session import persistence", () => {
           ),
         ),
       ).toEqual(["compaction-replay", "compaction-continuation", "subtask-output", "subtask-continuation"])
+      const cliExport = JSON.parse(JSON.stringify(yield* collectExportData(validID))) as ExportData
+      yield* persistImportedSession(cliExport, ctx)
+      expect(yield* sessions.messages({ sessionID: validID })).toEqual(imported)
       const jsonRoundTrip = JSON.parse(JSON.stringify(valid)) as ExportData
       const shared = transformShareData([
         { type: "session", data: jsonRoundTrip.info },
@@ -1121,7 +1125,77 @@ describe("session import persistence", () => {
         ),
       ).toBe(false)
 
+      const collisionSession = yield* sessions.create({ title: "persisted collision authority" })
+      const collisionUser = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        sessionID: collisionSession.id,
+        role: "user",
+        time: { created: 1 },
+        agent: "build",
+        model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
+      })
+      const persistedTopLevelID = PartID.ascending()
+      yield* sessions.updatePart({
+        id: persistedTopLevelID,
+        sessionID: collisionSession.id,
+        messageID: collisionUser.id,
+        type: "text",
+        text: "persisted top-level collision owner",
+      })
+      const collisionAssistant = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        sessionID: collisionSession.id,
+        role: "assistant",
+        parentID: collisionUser.id,
+        time: { created: 2, completed: 2 },
+        modelID: ModelV2.ID.make("test"),
+        providerID: ProviderV2.ID.make("test"),
+        mode: "build",
+        agent: "build",
+        path: { cwd: ctx.directory, root: ctx.directory },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        finish: "stop",
+      })
+      const persistedNestedID = PartID.ascending()
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: collisionSession.id,
+        messageID: collisionAssistant.id,
+        type: "tool",
+        callID: "persisted-collision-tool",
+        tool: "task",
+        state: {
+          status: "completed",
+          input: {},
+          output: "persisted nested collision owner",
+          title: "task",
+          metadata: {},
+          time: { start: 1, end: 2 },
+          attachments: [
+            {
+              id: persistedNestedID,
+              sessionID: collisionSession.id,
+              messageID: collisionAssistant.id,
+              type: "file",
+              mime: "text/plain",
+              url: "data:text/plain;base64,ZA==",
+            },
+          ],
+        },
+      })
+
       const invalidCases: Array<[string, (data: ExportData) => void]> = [
+        ["persisted top to nested collision", (data) => ((data.messages[0]!.parts[0] as any).id = persistedNestedID)],
+        [
+          "persisted nested to top collision",
+          (data) => ((data.messages[6]!.parts[0] as any).state.attachments[0].id = persistedTopLevelID),
+        ],
+        ["changed top to top collision", (data) => ((data.messages[0]!.parts[0] as any).id = persistedTopLevelID)],
+        [
+          "changed nested to nested cross-session collision",
+          (data) => ((data.messages[6]!.parts[0] as any).state.attachments[0].id = persistedNestedID),
+        ],
         ["malformed variant", (data) => ((data.messages[3]!.parts[0] as any).serverProvenance.type = "unknown")],
         [
           "dangling owner",

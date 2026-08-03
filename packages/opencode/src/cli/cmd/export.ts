@@ -237,6 +237,13 @@ export const ExportCommand = effectCmd({
   }),
 })
 
+export const collectExportData = Effect.fn("Cli.export.collect")(function* (sessionID: SessionID) {
+  const svc = yield* Session.Service
+  const info = yield* svc.get(sessionID)
+  const messages = yield* svc.messages({ sessionID: info.id })
+  return { info, messages }
+})
+
 const run = Effect.fn("Cli.export.body")(function* (args: { sessionID?: string; sanitize?: boolean }) {
   const svc = yield* Session.Service
   let sessionID = args.sessionID ? SessionID.make(args.sessionID) : undefined
@@ -281,10 +288,7 @@ const run = Effect.fn("Cli.export.body")(function* (args: { sessionID?: string; 
   // Match legacy try/catch — catches both typed failures and defects
   // (Session.Service.get throws NotFoundError as a defect, not a typed E).
   return yield* Effect.gen(function* () {
-    const sessionInfo = yield* svc.get(sessionID!)
-    const messages = yield* svc.messages({ sessionID: sessionInfo.id })
-
-    const exportData = { info: sessionInfo, messages }
+    const exportData = yield* collectExportData(sessionID!)
 
     process.stdout.write(JSON.stringify(args.sanitize ? sanitize(exportData) : exportData, null, 2))
     process.stdout.write(EOL)

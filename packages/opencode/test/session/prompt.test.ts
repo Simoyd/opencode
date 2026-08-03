@@ -26,7 +26,7 @@ import { Image } from "../../src/image/image"
 import { Question } from "../../src/question"
 import { Todo } from "../../src/session/todo"
 import { Session } from "@/session/session"
-import { SessionMessageTable } from "@opencode-ai/core/session/sql"
+import { CompactionRegionTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -1406,6 +1406,209 @@ it.instance(
 )
 
 it.instance(
+  "G3 real producers keep generated continuity beside M and carry B through the provider",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const { db } = yield* Database.Service
+      const scenarios = [
+        { name: "manual", auto: false, overflow: false },
+        { name: "ordinary-replay", auto: true, overflow: true },
+        { name: "continuation", auto: true, overflow: false },
+        { name: "repeated-predecessor", auto: false, overflow: false, predecessor: true },
+        { name: "unusable-summary", auto: false, overflow: false, summary: "   " },
+        { name: "failed-summary", auto: false, overflow: false, fail: true },
+      ]
+
+      for (const scenario of scenarios) {
+        const chat = yield* sessions.create({ title: `G3 producer ${scenario.name}` })
+        if (scenario.name === "ordinary-replay") yield* user(chat.id, `${scenario.name} root`)
+        if (scenario.predecessor) {
+          const predecessor = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            sessionID: chat.id,
+            role: "user",
+            agent: "build",
+            model: ref,
+            time: { created: Date.now() - 4 },
+          })
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            sessionID: chat.id,
+            messageID: predecessor.id,
+            type: "compaction",
+            auto: false,
+          })
+          const predecessorSummary = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            sessionID: chat.id,
+            role: "assistant",
+            parentID: predecessor.id,
+            mode: "compaction",
+            agent: "compaction",
+            providerID: ref.providerID,
+            modelID: ref.modelID,
+            path: { cwd: "/tmp", root: "/tmp" },
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            time: { created: Date.now() - 3, completed: Date.now() - 3 },
+            finish: "stop",
+            summary: true,
+          })
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            sessionID: chat.id,
+            messageID: predecessorSummary.id,
+            type: "text",
+            text: `${scenario.name} predecessor summary`,
+          })
+        }
+        const a = yield* user(chat.id, `${scenario.name} external A`)
+        if (scenario.name === "ordinary-replay") {
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            sessionID: chat.id,
+            messageID: a.id,
+            type: "file",
+            mime: "image/png",
+            filename: "g3.png",
+            url: "https://example.com/g3.png",
+          })
+        }
+        if (scenario.name !== "ordinary-replay") {
+          const answerA = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            sessionID: chat.id,
+            role: "assistant",
+            parentID: a.id,
+            mode: "build",
+            agent: "build",
+            providerID: ref.providerID,
+            modelID: ref.modelID,
+            path: { cwd: "/tmp", root: "/tmp" },
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            time: { created: Date.now() - 2, completed: Date.now() - 2 },
+            finish: "stop",
+          })
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            sessionID: chat.id,
+            messageID: answerA.id,
+            type: "text",
+            text: `${scenario.name} answer A`,
+          })
+        }
+        const marker = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          sessionID: chat.id,
+          role: "user",
+          agent: "build",
+          model: ref,
+          time: { created: Date.now() - 1 },
+        })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          sessionID: chat.id,
+          messageID: marker.id,
+          type: "compaction",
+          auto: scenario.auto,
+        })
+        const b = yield* user(chat.id, `${scenario.name} external B`)
+        const physicalBefore = (yield* sessions.messages({ sessionID: chat.id })).map((message) => message.info.id)
+        const callOffset = yield* llm.calls
+        if (scenario.fail) yield* llm.error(400, { error: `${scenario.name} summary failure` })
+        else yield* llm.text(scenario.summary ?? `${scenario.name} canonical summary`)
+        yield* llm.text(`${scenario.name} response B`)
+
+        yield* SessionCompaction.use.process({
+          parentID: marker.id,
+          messages: yield* sessions.messages({ sessionID: chat.id }),
+          sessionID: chat.id,
+          auto: scenario.auto,
+          overflow: scenario.overflow,
+        })
+        const result = yield* prompt.loop({ sessionID: chat.id })
+        expect(result.info.role, scenario.name).toBe("assistant")
+
+        const persisted = yield* sessions.messages({ sessionID: chat.id })
+        expect(
+          persisted.slice(0, physicalBefore.length).map((message) => message.info.id),
+          scenario.name,
+        ).toEqual(physicalBefore)
+        const summaries = persisted.filter(
+          (message) => message.info.role === "assistant" && message.info.parentID === marker.id && message.info.summary,
+        )
+        expect(summaries, scenario.name).toHaveLength(1)
+        const carriers = persisted.flatMap((message) =>
+          message.parts.flatMap((part) =>
+            part.type === "text" && part.serverProvenance ? [{ message, provenance: part.serverProvenance }] : [],
+          ),
+        )
+        const ownerCarrierMessages = persisted.filter((message) =>
+          message.parts.some((part) => part.type === "text" && part.serverProvenance?.ownerMessageID === marker.id),
+        )
+        expect(ownerCarrierMessages, scenario.name).toHaveLength(
+          scenario.name === "ordinary-replay" || scenario.name === "continuation" ? 1 : 0,
+        )
+        if (scenario.name === "ordinary-replay") {
+          expect(
+            ownerCarrierMessages[0]?.parts
+              .filter((part): part is SessionV1.TextPart => part.type === "text")
+              .map((part) => part.serverProvenance),
+            scenario.name,
+          ).toEqual(
+            ownerCarrierMessages[0]?.parts
+              .filter((part): part is SessionV1.TextPart => part.type === "text")
+              .map(() => ({ type: "compaction-replay", ownerMessageID: marker.id, sourceMessageID: a.id })),
+          )
+        }
+        if (scenario.name === "continuation") {
+          expect(
+            carriers.filter((carrier) => carrier.provenance.type === "compaction-continuation"),
+            scenario.name,
+          ).toHaveLength(1)
+        }
+        const view = MessageV2.modelTurn(persisted)
+        expect(
+          view.pendingExternal.map((message) => message.info.id),
+          scenario.name,
+        ).toEqual([])
+        expect(
+          view.messages.findIndex((message) => message.info.id === b.id),
+          scenario.name,
+        ).toBeGreaterThan(view.messages.findIndex((message) => message.info.id === summaries[0]?.info.id))
+        const responseB = persisted.find(
+          (message) =>
+            message.info.role === "assistant" && message.info.parentID === b.id && message.info.summary !== true,
+        )
+        expect(
+          responseB?.parts.some((part) => part.type === "text" && part.text === `${scenario.name} response B`),
+          scenario.name,
+        ).toBe(true)
+        const inputs = (yield* llm.inputs).slice(callOffset)
+        const bInput = JSON.stringify(
+          inputs.find((input) => JSON.stringify(input.messages).includes(`${scenario.name} external B`))?.messages,
+        )
+        expect(bInput, scenario.name).toContain(`${scenario.name} external B`)
+        if (!scenario.fail && scenario.summary?.trim() !== "") {
+          expect(bInput.indexOf(scenario.summary ?? `${scenario.name} canonical summary`), scenario.name).toBeLessThan(
+            bInput.indexOf(`${scenario.name} external B`),
+          )
+        }
+        expect(
+          (yield* db.select().from(CompactionRegionTable).where(eq(CompactionRegionTable.session_id, chat.id)).all())
+            .length,
+          scenario.name,
+        ).toBe(scenario.fail || scenario.summary?.trim() === "" ? 0 : 1)
+      }
+    }),
+  30_000,
+)
+
+it.instance(
   "G3 projects every reached compaction continuity form through persistence and provider response B",
   () =>
     Effect.gen(function* () {
@@ -2035,6 +2238,133 @@ it.instance(
       for (const output of exactOutputs) {
         expect(bInputText.indexOf(output.part.callID)).toBeLessThan(bInputText.indexOf("G4 external B"))
       }
+    }),
+  15_000,
+)
+
+it.instance(
+  "G4 real producer binds payload-identical ordinary and command Subtasks under one M before B",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "G4 real producer",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const owner = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        sessionID: chat.id,
+        role: "user",
+        agent: "build",
+        model: { ...ref, variant: "owner-variant" },
+        time: { created: Date.now() },
+      })
+      const completedTask = yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: chat.id,
+        messageID: owner.id,
+        type: "subtask",
+        prompt: "payload-identical",
+        description: "payload-identical",
+        agent: "general",
+        model: ref,
+      })
+      const errorTask = yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: chat.id,
+        messageID: owner.id,
+        type: "subtask",
+        prompt: "payload-identical",
+        description: "payload-identical",
+        agent: "general",
+        model: ref,
+        command: "delegated",
+      })
+      const b = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        sessionID: chat.id,
+        role: "user",
+        agent: "build",
+        model: { ...ref, variant: "later-variant" },
+        time: { created: Date.now() + 1 },
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: chat.id,
+        messageID: b.id,
+        type: "text",
+        text: "G4 real external B",
+      })
+
+      yield* llm.text("completed payload-identical output")
+      yield* llm.error(400, { error: "payload-identical provider failure" })
+      yield* llm.text("G4 real response B")
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      expect(result.info.role).toBe("assistant")
+
+      const persisted = yield* sessions.messages({ sessionID: chat.id })
+      const outputs = persisted.flatMap((message) =>
+        message.parts.flatMap((part) =>
+          part.type === "tool" && part.serverProvenance?.type === "subtask-output" ? [{ message, part }] : [],
+        ),
+      )
+      expect(outputs).toHaveLength(2)
+      expect(
+        outputs
+          .map(
+            (output) =>
+              output.part.serverProvenance?.type === "subtask-output" && output.part.serverProvenance.taskPartID,
+          )
+          .toSorted(),
+      ).toEqual([completedTask.id, errorTask.id].toSorted())
+      expect(outputs.map((output) => output.part.state.status).toSorted()).toEqual(["completed", "completed"])
+      expect(
+        outputs.every(
+          (output) =>
+            output.message.info.role === "assistant" &&
+            output.message.info.parentID === owner.id &&
+            output.message.info.providerID === ref.providerID &&
+            output.message.info.variant === "owner-variant",
+        ),
+      ).toBe(true)
+      const completedOutput = outputs.find(
+        (output) =>
+          output.part.serverProvenance?.type === "subtask-output" &&
+          output.part.serverProvenance.taskPartID === completedTask.id,
+      )
+      const errorOutput = outputs.find(
+        (output) =>
+          output.part.serverProvenance?.type === "subtask-output" &&
+          output.part.serverProvenance.taskPartID === errorTask.id,
+      )
+      expect(completedOutput?.message.info.role).toBe("assistant")
+      expect(errorOutput?.message.info.role).toBe("assistant")
+      if (completedOutput?.message.info.role !== "assistant" || errorOutput?.message.info.role !== "assistant") {
+        return yield* Effect.die("missing exact assistant Subtask output")
+      }
+      expect(completedOutput.message.info.modelID).toBe(ref.modelID)
+      expect(errorOutput.message.info.modelID).toBe(ref.modelID)
+
+      const view = MessageV2.modelTurn(persisted)
+      expect(view.messages.findIndex((message) => message.info.id === b.id)).toBeGreaterThan(
+        Math.max(
+          ...outputs.map((output) => view.messages.findIndex((message) => message.info.id === output.message.info.id)),
+        ),
+      )
+      const responseB = persisted.find(
+        (message) =>
+          message.info.role === "assistant" && message.info.parentID === b.id && message.info.summary !== true,
+      )
+      expect(responseB?.parts.some((part) => part.type === "text" && part.text === "G4 real response B")).toBe(true)
+      const bInput = JSON.stringify(
+        (yield* llm.inputs).findLast((input) => JSON.stringify(input.messages).includes("G4 real external B"))
+          ?.messages,
+      )
+      expect(bInput).toContain("G4 real external B")
+      for (const output of outputs)
+        expect(bInput.indexOf(output.part.callID)).toBeLessThan(bInput.indexOf("G4 real external B"))
     }),
   15_000,
 )
