@@ -66,6 +66,7 @@ import { referencePromptMetadata, referenceTextPart } from "./prompt/reference"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
+import { stripServerProvenance, toPluginTransformedModelMessages } from "./plugin-message-transform"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -90,59 +91,6 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
   // cleanup() marks abandoned tool_use blocks this way after retries/aborts.
   // They are not pending work and must not trigger an assistant-prefill request.
   return part.state.status === "error" && part.state.metadata?.interrupted === true
-}
-
-function stripPluginAuthoredServerProvenance<T>(part: T): T {
-  if (typeof part !== "object" || part === null) return part
-  const value = { ...part } as Record<string, unknown>
-  delete value.serverProvenance
-
-  if (value.type !== "tool" || typeof value.state !== "object" || value.state === null) return value as T
-  const state = value.state as Record<string, unknown>
-  if (state.status !== "completed" || !Array.isArray(state.attachments)) return value as T
-  value.state = {
-    ...state,
-    attachments: state.attachments.map((attachment) => {
-      if (typeof attachment !== "object" || attachment === null) return attachment
-      const nested = { ...attachment } as Record<string, unknown>
-      delete nested.serverProvenance
-      return nested
-    }),
-  }
-  return value as T
-}
-
-/** @internal Exported for testing */
-export function protectPluginTransformedServerProvenance(messages: SessionV1.WithParts[]) {
-  const trustedProvenance = new Map<string, SessionV1.ContinuityProvenance>(
-    messages.flatMap((message) =>
-      message.parts.flatMap((part) =>
-        (part.type === "text" || part.type === "tool") && part.serverProvenance
-          ? [[`${part.sessionID}\n${part.messageID}\n${part.id}`, { ...part.serverProvenance }] as const]
-          : [],
-      ),
-    ),
-  )
-  return () => {
-    const partIdentityCounts = new Map<string, number>()
-    for (const message of messages) {
-      for (const part of message.parts) {
-        const key = `${part.sessionID}\n${part.messageID}\n${part.id}`
-        partIdentityCounts.set(key, (partIdentityCounts.get(key) ?? 0) + 1)
-      }
-    }
-    return messages.map((message) => ({
-      ...message,
-      parts: message.parts.map((part) => {
-        const clean = stripPluginAuthoredServerProvenance(part)
-        const key = `${part.sessionID}\n${part.messageID}\n${part.id}`
-        const provenance = partIdentityCounts.get(key) === 1 ? trustedProvenance.get(key) : undefined
-        return provenance && (clean.type === "text" || clean.type === "tool")
-          ? { ...clean, serverProvenance: provenance }
-          : clean
-      }),
-    }))
-  }
 }
 
 export interface Interface {
@@ -1127,7 +1075,7 @@ export const layer = Layer.effect(
         { message: info, parts: resolvedParts },
       )
 
-      const trustedParts = resolvedParts.map(stripPluginAuthoredServerProvenance)
+      const trustedParts = resolvedParts.map(stripServerProvenance)
       const parts = yield* Effect.forEach(trustedParts, (part) =>
         part.type === "file" && part.mime.startsWith("image/")
           ? image.normalize(part).pipe(
@@ -1486,15 +1434,11 @@ export const layer = Layer.effect(
             }
 
             msgs = yield* SessionStagedContext.injectAndConsume({ sessionID, lastUser, messages: msgs })
-            const restoreServerProvenance = protectPluginTransformedServerProvenance(msgs)
-            yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-            msgs = restoreServerProvenance()
-
             const [skills, env, instructions, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
               sys.environment(model),
               instruction.system().pipe(Effect.orDie),
-              MessageV2.toModelMessagesEffect(msgs, model),
+              toPluginTransformedModelMessages({ messages: msgs, model, plugin }),
             ])
             const system = [...env, ...instructions, ...(skills ? [skills] : [])]
             const format = lastUser.format ?? { type: "text" as const }

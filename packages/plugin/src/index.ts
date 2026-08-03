@@ -286,7 +286,7 @@ export interface Hooks {
     output: {
       messages: {
         info: Message
-        parts: Part[]
+        parts: MutablePart[]
       }[]
     },
   ) => Promise<void>
