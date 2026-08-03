@@ -17,6 +17,8 @@ import { type ToolDefinition } from "./tool.js"
 
 export * from "./tool.js"
 
+type MutablePart<T = Part> = T extends unknown ? Omit<T, "serverProvenance"> : never
+
 export type ProviderContext = {
   source: "env" | "config" | "custom" | "api"
   info: Provider
@@ -239,7 +241,7 @@ export interface Hooks {
       messageID?: string
       variant?: string
     },
-    output: { message: UserMessage; parts: Part[] },
+    output: { message: UserMessage; parts: MutablePart[] },
   ) => Promise<void>
   /**
    * Modify parameters sent to LLM
@@ -261,7 +263,7 @@ export interface Hooks {
   "permission.ask"?: (input: Permission, output: { status: "ask" | "deny" | "allow" }) => Promise<void>
   "command.execute.before"?: (
     input: { command: string; sessionID: string; arguments: string },
-    output: { parts: Part[] },
+    output: { parts: MutablePart[] },
   ) => Promise<void>
   "tool.execute.before"?: (
     input: { tool: string; sessionID: string; callID: string },

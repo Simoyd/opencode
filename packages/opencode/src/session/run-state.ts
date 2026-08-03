@@ -36,6 +36,16 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionRunState") {}
 
+interface Entry {
+  runner: Runner.Runner<SessionV1.WithParts>
+  uses: number
+}
+
+interface Lease {
+  data: { runners: Map<SessionID, Entry> }
+  entry: Entry | undefined
+}
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -45,54 +55,87 @@ export const layer = Layer.effect(
     const state = yield* InstanceState.make(
       Effect.fn("SessionRunState.state")(function* () {
         const scope = yield* Scope.Scope
-        const runners = new Map<SessionID, Runner.Runner<SessionV1.WithParts>>()
+        const runners = new Map<SessionID, Entry>()
         yield* Effect.addFinalizer(
           Effect.fnUntraced(function* () {
-            yield* Effect.forEach(runners.values(), (runner) => runner.cancel, {
+            const entries = yield* Effect.sync(() => {
+              const current = [...runners.values()]
+              runners.clear()
+              return current
+            })
+            yield* Effect.forEach(entries, (entry) => entry.runner.cancel, {
               concurrency: "unbounded",
               discard: true,
             })
-            runners.clear()
           }),
         )
         return { runners, scope }
       }),
     )
 
-    const runner = Effect.fn("SessionRunState.runner")(function* (
+    const retire = (data: { runners: Map<SessionID, Entry> }, sessionID: SessionID, entry: Entry) => {
+      if (data.runners.get(sessionID) !== entry || entry.uses !== 0 || entry.runner.busy) return
+      data.runners.delete(sessionID)
+    }
+
+    const acquire = Effect.fn("SessionRunState.acquire")(function* (
       sessionID: SessionID,
       onInterrupt: Effect.Effect<SessionV1.WithParts>,
+      create: boolean,
     ) {
       const data = yield* InstanceState.get(state)
-      const existing = data.runners.get(sessionID)
-      if (existing) return existing
-      const next = Runner.make<SessionV1.WithParts>(data.scope, {
-        onIdle: Effect.gen(function* () {
-          data.runners.delete(sessionID)
-          yield* status.set(sessionID, { type: "idle" })
-        }),
-        onBusy: status.set(sessionID, { type: "busy" }),
-        onInterrupt,
+      const entry = yield* Effect.sync(() => {
+        const existing = data.runners.get(sessionID)
+        if (existing) {
+          existing.uses += 1
+          return existing
+        }
+        if (!create) return undefined
+        let created: Entry
+        const runner = Runner.make<SessionV1.WithParts>(data.scope, {
+          onIdle: status.set(sessionID, { type: "idle" }),
+          onBusy: status.set(sessionID, { type: "busy" }),
+          onInterrupt,
+          onRetire: () => retire(data, sessionID, created),
+        })
+        created = { runner, uses: 1 }
+        data.runners.set(sessionID, created)
+        return created
       })
-      data.runners.set(sessionID, next)
-      return next
+      return { data, entry } satisfies Lease
     })
+
+    const release = (sessionID: SessionID, lease: Lease) =>
+      Effect.sync(() => {
+        if (!lease.entry) return
+        if (lease.entry.uses <= 0) throw new Error(`Runner lease underflow: ${sessionID}`)
+        lease.entry.uses -= 1
+        retire(lease.data, sessionID, lease.entry)
+      })
+
+    const use = <A, E, R>(
+      sessionID: SessionID,
+      onInterrupt: Effect.Effect<SessionV1.WithParts>,
+      create: boolean,
+      operation: (entry: Entry | undefined) => Effect.Effect<A, E, R>,
+    ) =>
+      Effect.acquireUseRelease(
+        acquire(sessionID, onInterrupt, create),
+        (lease) => operation(lease.entry),
+        (lease) => release(sessionID, lease),
+      )
 
     const assertNotBusy = Effect.fn("SessionRunState.assertNotBusy")(function* (sessionID: SessionID) {
       const data = yield* InstanceState.get(state)
       const existing = data.runners.get(sessionID)
-      if (existing?.busy) yield* busyError(sessionID)
+      if (existing?.runner.busy) yield* busyError(sessionID)
     })
 
     const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
       yield* cancelBackgroundJobs(background, sessionID)
-      const data = yield* InstanceState.get(state)
-      const existing = data.runners.get(sessionID)
-      if (!existing) {
-        yield* status.set(sessionID, { type: "idle" })
-        return
-      }
-      yield* existing.cancel
+      yield* use(sessionID, Effect.die(new Error("Cancel cannot create a Runner")), false, (entry) =>
+        entry ? entry.runner.cancel : status.set(sessionID, { type: "idle" }),
+      )
     })
 
     const ensureRunning = Effect.fn("SessionRunState.ensureRunning")(function* (
@@ -100,7 +143,7 @@ export const layer = Layer.effect(
       onInterrupt: Effect.Effect<SessionV1.WithParts>,
       work: Effect.Effect<SessionV1.WithParts>,
     ) {
-      return yield* (yield* runner(sessionID, onInterrupt)).ensureRunning(work)
+      return yield* use(sessionID, onInterrupt, true, (entry) => entry!.runner.ensureRunning(work))
     })
 
     const commit = Effect.fn("SessionRunState.commit")(function* <B, E, R>(
@@ -108,9 +151,9 @@ export const layer = Layer.effect(
       onInterrupt: Effect.Effect<SessionV1.WithParts>,
       work: Effect.Effect<B, E, R>,
     ) {
-      return yield* (yield* runner(sessionID, onInterrupt))
-        .commit(work)
-        .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
+      return yield* use(sessionID, onInterrupt, true, (entry) =>
+        entry!.runner.commit(work).pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID)))),
+      )
     })
 
     const submit = Effect.fn("SessionRunState.submit")(function* <B, E, R>(
@@ -119,7 +162,7 @@ export const layer = Layer.effect(
       admission: Effect.Effect<B, E, R>,
       work: Effect.Effect<SessionV1.WithParts>,
     ) {
-      return yield* (yield* runner(sessionID, onInterrupt)).submit(admission, work)
+      return yield* use(sessionID, onInterrupt, true, (entry) => entry!.runner.submit(admission, work))
     })
 
     const startShell = Effect.fn("SessionRunState.startShell")(function* (
@@ -128,9 +171,11 @@ export const layer = Layer.effect(
       work: Effect.Effect<SessionV1.WithParts>,
       ready?: Latch.Latch,
     ) {
-      return yield* (yield* runner(sessionID, onInterrupt))
-        .startShell(work, ready)
-        .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
+      return yield* use(sessionID, onInterrupt, true, (entry) =>
+        entry!.runner
+          .startShell(work, ready)
+          .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID)))),
+      )
     })
 
     return Service.of({ assertNotBusy, cancel, commit, submit, ensureRunning, startShell })

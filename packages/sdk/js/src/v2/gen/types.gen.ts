@@ -366,6 +366,28 @@ export type AssistantMessage = {
 
 export type Message = UserMessage | AssistantMessage
 
+export type ContinuityProvenance =
+  | {
+      type: "compaction-replay"
+      ownerMessageID: string
+      sourceMessageID: string
+    }
+  | {
+      type: "compaction-continuation"
+      ownerMessageID: string
+    }
+  | {
+      type: "subtask-output"
+      ownerMessageID: string
+      taskPartID: string
+    }
+  | {
+      type: "subtask-continuation"
+      ownerMessageID: string
+      taskPartID: string
+      sourceMessageID: string
+    }
+
 export type TextPart = {
   id: string
   sessionID: string
@@ -381,6 +403,7 @@ export type TextPart = {
   metadata?: {
     [key: string]: unknown
   }
+  serverProvenance?: ContinuityProvenance
 }
 
 export type SubtaskPart = {
@@ -533,6 +556,7 @@ export type ToolPart = {
   metadata?: {
     [key: string]: unknown
   }
+  serverProvenance?: ContinuityProvenance
 }
 
 export type StepStartPart = {
@@ -2697,6 +2721,50 @@ export type SubtaskPartInput = {
   }
   command?: string
 }
+
+export type TextPartUpdateInput = {
+  id: string
+  sessionID: string
+  messageID: string
+  type: "text"
+  text: string
+  synthetic?: boolean
+  ignored?: boolean
+  time?: {
+    start: number
+    end?: number
+  }
+  metadata?: {
+    [key: string]: unknown
+  }
+}
+
+export type ToolPartUpdateInput = {
+  id: string
+  sessionID: string
+  messageID: string
+  type: "tool"
+  callID: string
+  tool: string
+  state: ToolState
+  metadata?: {
+    [key: string]: unknown
+  }
+}
+
+export type PartUpdateInput =
+  | TextPartUpdateInput
+  | SubtaskPart
+  | ReasoningPart
+  | FilePart
+  | ToolPartUpdateInput
+  | StepStartPart
+  | StepFinishPart
+  | SnapshotPart
+  | PatchPart
+  | AgentPart
+  | RetryPart
+  | CompactionPart
 
 export type EventTuiPromptAppend = {
   type: "tui.prompt.append"
@@ -8873,7 +8941,7 @@ export type PartDeleteResponses = {
 export type PartDeleteResponse = PartDeleteResponses[keyof PartDeleteResponses]
 
 export type PartUpdateData = {
-  body?: Part
+  body?: PartUpdateInput
   path: {
     sessionID: string
     messageID: string

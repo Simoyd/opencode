@@ -54,6 +54,7 @@ const fill = Effect.fn("SessionMessagesTest.fill")(function* (
   sessionID: SessionID,
   count: number,
   time = (i: number) => Date.now() + i,
+  includeParts = true,
 ) {
   const session = yield* SessionNs.Service
   return yield* Effect.forEach(
@@ -70,13 +71,15 @@ const fill = Effect.fn("SessionMessagesTest.fill")(function* (
           model,
           tools: {},
         } satisfies SessionV1.User)
-        yield* session.updatePart({
-          id: PartID.ascending(),
-          sessionID,
-          messageID: id,
-          type: "text",
-          text: `m${i}`,
-        } satisfies SessionV1.TextPart)
+        if (includeParts) {
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            sessionID,
+            messageID: id,
+            type: "text",
+            text: `m${i}`,
+          } satisfies SessionV1.TextPart)
+        }
         return id
       }),
   )
@@ -96,14 +99,14 @@ const addUser = Effect.fn("SessionMessagesTest.addUser")(function* (
 ) {
   const session = yield* SessionNs.Service
   const id = opts?.id ?? MessageID.ascending()
-  const metadata = opts?.replay
+  const serverProvenance = opts?.replay
     ? {
-        compaction_replay: true,
-        compaction_owner_marker_id: opts.ownerMarkerID,
-        compaction_replay_source_message_id: opts.replaySourceMessageID,
+        type: "compaction-replay" as const,
+        ownerMessageID: opts.ownerMarkerID!,
+        sourceMessageID: opts.replaySourceMessageID!,
       }
     : opts?.syntheticContinue
-      ? { compaction_continue: true, compaction_owner_marker_id: opts.ownerMarkerID }
+      ? { type: "compaction-continuation" as const, ownerMessageID: opts.ownerMarkerID! }
       : undefined
   yield* session.updateMessage({
     id,
@@ -122,7 +125,7 @@ const addUser = Effect.fn("SessionMessagesTest.addUser")(function* (
     type: "text",
     text,
     synthetic: opts?.syntheticContinue ? true : undefined,
-    metadata,
+    serverProvenance,
   } as any)
   return id
 })
@@ -269,7 +272,7 @@ describe("session messages and compaction catalog", () => {
     withoutWatcher(
       Effect.gen(function* () {
         const session = yield* sessionScoped
-        yield* fill(session.id, 520)
+        yield* fill(session.id, 520, undefined, false)
 
         const res = yield* request(`/session/${session.id}/message?limit=510`)
         expect(res.status).toBe(200)

@@ -176,6 +176,8 @@ export const TaskTool = Tool.define(
         Effect.orDie,
       )
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
+      const toolCallID = ctx.callID
+      if (!toolCallID) return yield* Effect.die(new Error("Task tool execution requires a tool-call identity"))
       const variant = msg.info.variant
 
       const model = next.model ?? {
@@ -187,7 +189,7 @@ export const TaskTool = Tool.define(
         existing: nextSession.metadata,
         parentSessionID: ctx.sessionID,
         sourceMessageID: ctx.messageID,
-        toolCallID: ctx.callID,
+        toolCallID,
         childSessionID: nextSession.id,
         childTurnMessageID,
         agent: next.name,

@@ -11,8 +11,11 @@ import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { Config } from "@/config/config"
 import { Provider } from "@/provider/provider"
 import { Session } from "@/session/session"
-import type { SessionID } from "../../src/session/schema"
+import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { ShareNext } from "@/share/share-next"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 import { SessionShareTable } from "@opencode-ai/core/share/sql"
 import { Database } from "@opencode-ai/core/database/database"
 import { eq } from "drizzle-orm"
@@ -189,6 +192,87 @@ describe("ShareNext", () => {
           expect(seen[0].method).toBe("POST")
           expect(seen[0].url).toBe("https://legacy-share.example.com/api/share")
         }),
+      { config: { enterprise: { url: "https://legacy-share.example.com" } } },
+    ),
+  )
+
+  it.live("full sync carries persisted server provenance without reconstruction", () =>
+    provideTmpdirInstance(
+      () => {
+        const seen: string[] = []
+        const client = HttpClient.make((req) => {
+          if (req.url.endsWith("/api/share")) {
+            return Effect.succeed(
+              json(req, {
+                id: "shr_continuity",
+                url: "https://legacy-share.example.com/share/continuity",
+                secret: "sec_continuity",
+              }),
+            )
+          }
+          if (req.url.endsWith("/sync") && req.body._tag === "Uint8Array") {
+            seen.push(new TextDecoder().decode(req.body.body))
+          }
+          return Effect.succeed(json(req, { ok: true }))
+        })
+
+        return Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const shareNext = yield* ShareNext.Service
+          const info = yield* sessions.create({ title: "continuity share" })
+          const owner = MessageID.ascending()
+          const task = PartID.ascending()
+          const output = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            sessionID: info.id,
+            role: "assistant",
+            parentID: owner,
+            mode: "build",
+            agent: "build",
+            providerID: ProviderV2.ID.make("test"),
+            modelID: ModelV2.ID.make("test-model"),
+            path: { cwd: "/tmp", root: "/tmp" },
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            time: { created: Date.now(), completed: Date.now() },
+            finish: "tool-calls",
+          })
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            sessionID: info.id,
+            messageID: output.id,
+            type: "tool",
+            callID: "task-call",
+            tool: "task",
+            serverProvenance: { type: "subtask-output", ownerMessageID: owner, taskPartID: task },
+            state: {
+              status: "completed",
+              input: {},
+              output: "done",
+              title: "task",
+              metadata: {},
+              time: { start: Date.now(), end: Date.now() },
+            },
+          } satisfies SessionV1.ToolPart)
+          yield* shareNext.create(info.id)
+          yield* pollWithTimeout(
+            Effect.sync(() => (seen.length === 1 ? true : undefined)),
+            "timed out waiting for full share sync",
+            "5 seconds",
+          )
+
+          expect(seen).toHaveLength(1)
+          const body = JSON.parse(seen[0]) as {
+            data: Array<{ type: string; data: { serverProvenance?: SessionV1.ContinuityProvenance } }>
+          }
+          const part = body.data.find((item) => item.type === "part")
+          expect(part?.data.serverProvenance).toEqual({
+            type: "subtask-output",
+            ownerMessageID: owner,
+            taskPartID: task,
+          })
+        }).pipe(Effect.provide(wired(client)))
+      },
       { config: { enterprise: { url: "https://legacy-share.example.com" } } },
     ),
   )

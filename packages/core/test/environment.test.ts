@@ -5,7 +5,7 @@ import path from "path"
 import { Environment } from "@opencode-ai/core/environment"
 
 function cleanEnv(root: string) {
-  const env = { ...process.env, [Environment.ISOLATED_ROOT_ENV]: root }
+  const env: NodeJS.ProcessEnv = { ...process.env, [Environment.ISOLATED_ROOT_ENV]: root }
   for (const key of Environment.ISOLATED_ROOT_CONFLICT_KEYS) delete env[key]
   return env
 }

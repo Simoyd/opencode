@@ -466,30 +466,20 @@ function protocol(message: SessionV1.WithParts) {
   let continuation: { owner: MessageID } | undefined
   for (const part of message.parts) {
     if (part.type !== "text") continue
-    const metadata = part.metadata as Record<string, unknown> | undefined
-    const isReplay = metadata?.compaction_replay === true
-    const isContinuation = metadata?.compaction_continue === true
-    if (!isReplay && !isContinuation) continue
-    if (isReplay && isContinuation)
-      throw new Error(`Compaction protocol row ${message.info.id} has contradictory roles`)
-    const owner = metadata?.compaction_owner_marker_id
-    if (typeof owner !== "string" || owner.length === 0) {
-      throw new Error(`Compaction protocol row ${message.info.id} is missing marker ownership`)
-    }
-    if (isReplay) {
-      const source = metadata?.compaction_replay_source_message_id
-      if (typeof source !== "string" || source.length === 0) {
-        throw new Error(`Compaction replay ${message.info.id} is missing its source identity`)
-      }
+    const provenance = part.serverProvenance
+    if (provenance?.type === "compaction-replay") {
+      const owner = provenance.ownerMessageID
+      const source = provenance.sourceMessageID
       if ((replay && (replay.owner !== owner || replay.source !== source)) || continuation) {
-        throw new Error(`Compaction replay ${message.info.id} has contradictory part metadata`)
+        throw new Error(`Compaction replay ${message.info.id} has contradictory server provenance`)
       }
-      replay = { owner: owner as MessageID, source: source as MessageID }
-    } else {
-      if (part.synthetic !== true || (continuation && continuation.owner !== owner) || replay) {
-        throw new Error(`Compaction continuation ${message.info.id} has contradictory part metadata`)
+      replay = { owner, source }
+    } else if (provenance?.type === "compaction-continuation") {
+      const owner = provenance.ownerMessageID
+      if ((continuation && continuation.owner !== owner) || replay) {
+        throw new Error(`Compaction continuation ${message.info.id} has contradictory server provenance`)
       }
-      continuation = { owner: owner as MessageID }
+      continuation = { owner }
     }
   }
   return { replay, continuation }

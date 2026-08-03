@@ -1171,6 +1171,102 @@ describe("session HttpApi", () => {
   )
 
   it.instance(
+    "public part updates cannot author or overwrite server provenance",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const session = yield* createSession({ title: "protected provenance" })
+        const message = yield* createTextMessage(session.id, "first")
+        const sessions = yield* Session.Service
+        const owner = MessageID.ascending()
+        yield* sessions.updatePart({
+          ...message.part,
+          serverProvenance: { type: "compaction-continuation", ownerMessageID: owner },
+        })
+
+        const updated = yield* requestJson<SessionV1.TextPart>(
+          pathFor(SessionPaths.updatePart, {
+            sessionID: session.id,
+            messageID: message.info.id,
+            partID: message.part.id,
+          }),
+          {
+            method: "PATCH",
+            headers,
+            body: JSON.stringify({
+              ...message.part,
+              text: "updated",
+              serverProvenance: {
+                type: "compaction-replay",
+                ownerMessageID: MessageID.ascending(),
+                sourceMessageID: MessageID.ascending(),
+              },
+            }),
+          },
+        )
+
+        expect(updated.text).toBe("updated")
+        expect(updated.serverProvenance).toEqual({ type: "compaction-continuation", ownerMessageID: owner })
+
+        const ordinary = yield* createTextMessage(session.id, "ordinary")
+        const attemptedAuthor = yield* requestJson<SessionV1.TextPart>(
+          pathFor(SessionPaths.updatePart, {
+            sessionID: session.id,
+            messageID: ordinary.info.id,
+            partID: ordinary.part.id,
+          }),
+          {
+            method: "PATCH",
+            headers,
+            body: JSON.stringify({
+              ...ordinary.part,
+              serverProvenance: { type: "compaction-continuation", ownerMessageID: owner },
+            }),
+          },
+        )
+        expect(attemptedAuthor.serverProvenance == null).toBe(true)
+
+        const tool = yield* sessions.updatePart({
+          id: PartID.ascending(),
+          sessionID: session.id,
+          messageID: ordinary.info.id,
+          type: "tool",
+          callID: "call-protected",
+          tool: "task",
+          serverProvenance: { type: "subtask-output", ownerMessageID: owner, taskPartID: PartID.ascending() },
+          state: {
+            status: "error",
+            input: {},
+            error: "failed",
+            time: { start: 1, end: 2 },
+          },
+        } satisfies SessionV1.ToolPart)
+        const attemptedToolOverwrite = yield* requestJson<SessionV1.ToolPart>(
+          pathFor(SessionPaths.updatePart, {
+            sessionID: session.id,
+            messageID: ordinary.info.id,
+            partID: tool.id,
+          }),
+          {
+            method: "PATCH",
+            headers,
+            body: JSON.stringify({
+              ...tool,
+              serverProvenance: {
+                type: "subtask-output",
+                ownerMessageID: MessageID.ascending(),
+                taskPartID: PartID.ascending(),
+              },
+            }),
+          },
+        )
+        expect(attemptedToolOverwrite.serverProvenance).toEqual(tool.serverProvenance)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
     "rejects part updates whose path and body ids disagree",
     () =>
       Effect.gen(function* () {

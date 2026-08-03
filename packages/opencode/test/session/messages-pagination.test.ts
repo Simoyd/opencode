@@ -699,13 +699,13 @@ describe("Session.findMessage", () => {
   )
 })
 
-describe("MessageV2.filterCompacted", () => {
+describe("MessageV2.modelTurn", () => {
   it.instance("returns all messages when no compaction", () =>
     withSession(({ sessionID }) =>
       Effect.gen(function* () {
         const ids = yield* fill(sessionID, 5)
 
-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
+        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
         expect(result).toHaveLength(5)
         // reversed from newest-first to chronological
         expect(result.map((item) => item.info.id)).toEqual(ids)
@@ -739,7 +739,7 @@ describe("MessageV2.filterCompacted", () => {
           text: "new response",
         })
 
-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
+        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
         // Includes compaction boundary: u1, a1, u2, a2
         expect(result[0].info.id).toBe(u1)
         expect(result.length).toBe(4)
@@ -749,7 +749,7 @@ describe("MessageV2.filterCompacted", () => {
 
   it.live("handles empty iterable", () =>
     Effect.sync(() => {
-      const result = MessageV2.filterCompacted([])
+      const result = MessageV2.modelTurn([]).messages
       expect(result).toEqual([])
     }),
   )
@@ -761,7 +761,7 @@ describe("MessageV2.filterCompacted", () => {
         yield* addCompactionPart(sessionID, u1)
         yield* addUser(sessionID, "world")
 
-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
+        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
         expect(result).toHaveLength(2)
       }),
     ),
@@ -780,7 +780,7 @@ describe("MessageV2.filterCompacted", () => {
         yield* addAssistant(sessionID, u1, { summary: true, finish: "end_turn", error })
         yield* addUser(sessionID, "retry")
 
-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
+        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
         // Error assistant doesn't add to completed, so compaction boundary never triggers
         expect(result).toHaveLength(3)
       }),
@@ -797,7 +797,7 @@ describe("MessageV2.filterCompacted", () => {
         yield* addAssistant(sessionID, u1, { summary: true })
         yield* addUser(sessionID, "next")
 
-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
+        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
         expect(result).toHaveLength(3)
       }),
     ),
@@ -847,7 +847,7 @@ describe("MessageV2.filterCompacted", () => {
           text: "third reply",
         })
 
-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
+        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
 
         expect(result.map((item) => item.info.id)).toEqual([c1, s1, u2, a2, u3, a3])
       }),
@@ -897,11 +897,10 @@ describe("MessageV2.filterCompacted", () => {
         messageID: replay,
         type: "text",
         text: "replayed prompt",
-        metadata: {
-          compaction_replay: true,
-          compaction_owner_marker_id: c1,
-          compaction_replay_source_message_id: u1,
-          source_message_id: u1,
+        serverProvenance: {
+          type: "compaction-replay",
+          ownerMessageID: c1,
+          sourceMessageID: u1,
         },
       })
       const continuation = yield* addUser(created.id)
@@ -912,7 +911,7 @@ describe("MessageV2.filterCompacted", () => {
         type: "text",
         text: "continue",
         synthetic: true,
-        metadata: { compaction_continue: true, compaction_owner_marker_id: c1 },
+        serverProvenance: { type: "compaction-continuation", ownerMessageID: c1 },
       })
 
       const u3 = yield* addUser(created.id, "third")
@@ -925,29 +924,29 @@ describe("MessageV2.filterCompacted", () => {
         text: "third reply",
       })
 
-      const parentFiltered = MessageV2.filterCompacted(yield* MessageV2.stream(created.id))
+      const parentFiltered = MessageV2.modelTurn(yield* MessageV2.stream(created.id)).messages
       expect(parentFiltered.map((item) => item.info.id)).toEqual([c1, s1, u2, a2, replay, continuation, u3, a3])
 
       const forked = yield* session.fork({ sessionID: created.id })
-      const childFiltered = MessageV2.filterCompacted(yield* MessageV2.stream(forked.id))
+      const childFiltered = MessageV2.modelTurn(yield* MessageV2.stream(forked.id)).messages
       expect(childFiltered).toHaveLength(parentFiltered.length)
 
       const childMessages = yield* session.messages({ sessionID: forked.id })
       const childIDs = new Set(childMessages.map((message) => message.info.id))
       const protocol = childMessages
         .flatMap((message) => message.parts)
-        .filter((part): part is SessionV1.TextPart => part.type === "text" && part.metadata !== undefined)
-        .map((part) => part.metadata!)
-        .filter((metadata) => metadata.compaction_replay === true || metadata.compaction_continue === true)
+        .filter((part): part is SessionV1.TextPart => part.type === "text" && part.serverProvenance !== undefined)
+        .map((part) => part.serverProvenance!)
+        .filter(
+          (provenance) => provenance.type === "compaction-replay" || provenance.type === "compaction-continuation",
+        )
       expect(protocol).toHaveLength(2)
-      for (const metadata of protocol) {
-        expect(childIDs.has(metadata.compaction_owner_marker_id as MessageID)).toBe(true)
-        expect(metadata.compaction_owner_marker_id).not.toBe(c1)
-        if (metadata.compaction_replay !== true) continue
-        expect(childIDs.has(metadata.compaction_replay_source_message_id as MessageID)).toBe(true)
-        expect(childIDs.has(metadata.source_message_id as MessageID)).toBe(true)
-        expect(metadata.compaction_replay_source_message_id).not.toBe(u1)
-        expect(metadata.source_message_id).not.toBe(u1)
+      for (const provenance of protocol) {
+        expect(childIDs.has(provenance.ownerMessageID)).toBe(true)
+        expect(provenance.ownerMessageID).not.toBe(c1)
+        if (provenance.type !== "compaction-replay") continue
+        expect(childIDs.has(provenance.sourceMessageID)).toBe(true)
+        expect(provenance.sourceMessageID).not.toBe(u1)
       }
 
       const tailPart = childFiltered.flatMap((m) => m.parts).find((p) => p.type === "compaction")
@@ -1013,7 +1012,7 @@ describe("MessageV2.filterCompacted", () => {
           text: "third reply",
         })
 
-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
+        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
 
         expect(result.map((item) => item.info.id)).toEqual([c1, s1, a3, u3, a4])
       }),
@@ -1085,7 +1084,7 @@ describe("MessageV2.filterCompacted", () => {
           text: "fourth reply",
         })
 
-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
+        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
 
         expect(result.map((item) => item.info.id)).toEqual([c2, s2, u3, a3, u4, a4])
       }),
@@ -1108,7 +1107,7 @@ describe("MessageV2.filterCompacted", () => {
         parts: [{ type: "text", text: "hello" }] as unknown as SessionV1.Part[],
       },
     ]
-    const result = MessageV2.filterCompacted(items)
+    const result = MessageV2.modelTurn(items).messages
     expect(result).toHaveLength(1)
     expect(result[0].info.id).toBe(id)
   })
@@ -1193,7 +1192,7 @@ describe("MessageV2 consistency", () => {
         yield* fill(sessionID, 4)
 
         const stream = yield* MessageV2.stream(sessionID)
-        const filtered = MessageV2.filterCompacted(stream)
+        const filtered = MessageV2.modelTurn(stream).messages
         const all = stream.toReversed()
 
         expect(filtered.map((m) => m.info.id)).toEqual(all.map((m) => m.info.id))

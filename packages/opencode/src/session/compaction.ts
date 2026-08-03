@@ -118,8 +118,7 @@ function completedCompactions(messages: SessionV1.WithParts[]) {
   }
 
   return messages.flatMap((msg, assistantIndex): CompletedCompaction[] => {
-    if (msg.info.role !== "assistant") return []
-    if (!msg.info.summary || !msg.info.finish || msg.info.error) return []
+    if (!MessageV2.isUsableCompactionSummary(msg)) return []
     const userIndex = users.get(msg.info.parentID)
     if (userIndex === undefined) return []
     return [{ userIndex, assistantIndex, summary: summaryText(msg) }]
@@ -320,7 +319,7 @@ export const layer = Layer.effect(
         const msg = msgs[msgIndex]
         if (msg.info.role === "user") turns++
         if (turns < 2) continue
-        if (msg.info.role === "assistant" && msg.info.summary) break loop
+        if (MessageV2.isUsableCompactionSummary(msg)) break loop
         for (let partIndex = msg.parts.length - 1; partIndex >= 0; partIndex--) {
           const part = msg.parts[partIndex]
           if (part.type !== "tool") continue
@@ -360,8 +359,11 @@ export const layer = Layer.effect(
       }
       const userMessage = parent.info
       const compactionPart = parent.parts.find((part): part is SessionV1.CompactionPart => part.type === "compaction")
+      const prefix = input.messages.filter(
+        (message) => MessageV2.compareHydratedMessagePhysicalOrder(message, parent) < 0,
+      )
 
-      let messages = input.messages
+      let messages = prefix
       let replay:
         | {
             info: SessionV1.User
@@ -369,12 +371,11 @@ export const layer = Layer.effect(
           }
         | undefined
       if (input.overflow) {
-        const idx = input.messages.findIndex((m) => m.info.id === input.parentID)
-        for (let i = idx - 1; i >= 0; i--) {
-          const msg = input.messages[i]
+        for (let i = prefix.length - 1; i >= 0; i--) {
+          const msg = prefix[i]
           if (msg.info.role === "user" && !msg.parts.some((p) => p.type === "compaction")) {
             replay = { info: msg.info, parts: msg.parts }
-            messages = input.messages.slice(0, i)
+            messages = prefix.slice(0, i)
             break
           }
         }
@@ -382,7 +383,7 @@ export const layer = Layer.effect(
           replay && messages.some((m) => m.info.role === "user" && !m.parts.some((p) => p.type === "compaction"))
         if (!hasContent) {
           replay = undefined
-          messages = input.messages
+          messages = prefix
         }
       }
 
@@ -391,7 +392,7 @@ export const layer = Layer.effect(
         ? yield* provider.getModel(agent.model.providerID, agent.model.modelID).pipe(Effect.orDie)
         : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
       const cfg = yield* config.get()
-      const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
+      const history = messages
       const prior = completedCompactions(history)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
       const previousSummary = prior.at(-1)?.summary
@@ -470,8 +471,15 @@ export const layer = Layer.effect(
         }).toObject()
         processor.message.finish = "error"
         yield* session.updateMessage(processor.message)
-        return "stop"
       }
+
+      const summary = (yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)).find(
+        (item) => item.info.id === msg.id,
+      ) ?? {
+        info: processor.message,
+        parts: [],
+      }
+      if (!MessageV2.isUsableCompactionSummary(summary)) return "stop"
 
       if (compactionPart && selected.tail_start_id && compactionPart.tail_start_id !== selected.tail_start_id) {
         yield* session.updatePart({
@@ -503,22 +511,20 @@ export const layer = Layer.effect(
               part.type === "file" && MessageV2.isMedia(part.mime)
                 ? { type: "text" as const, text: `[Attached ${part.mime}: ${part.filename ?? "file"}]` }
                 : part
-            const metadata =
-              replayPart.type === "text"
-                ? {
-                    ...(part.type === "text" ? (part.metadata ?? {}) : {}),
-                    compaction_replay: true,
-                    compaction_owner_marker_id: userMessage.id,
-                    compaction_replay_source_message_id: original.id,
-                    source_message_id: part.messageID,
-                  }
-                : undefined
             yield* session.updatePart({
               ...replayPart,
               id: PartID.ascending(),
               messageID: replayMsg.id,
               sessionID: input.sessionID,
-              ...(metadata ? { metadata } : {}),
+              ...(replayPart.type === "text"
+                ? {
+                    serverProvenance: {
+                      type: "compaction-replay" as const,
+                      ownerMessageID: userMessage.id,
+                      sourceMessageID: original.id,
+                    },
+                  }
+                : {}),
             })
           }
           if (!hasProtocolCarrier) {
@@ -529,10 +535,10 @@ export const layer = Layer.effect(
               type: "text",
               text: "",
               synthetic: true,
-              metadata: {
-                compaction_replay: true,
-                compaction_owner_marker_id: userMessage.id,
-                compaction_replay_source_message_id: original.id,
+              serverProvenance: {
+                type: "compaction-replay",
+                ownerMessageID: userMessage.id,
+                sourceMessageID: original.id,
               },
               time: {
                 start: Date.now(),
@@ -582,12 +588,9 @@ export const layer = Layer.effect(
               messageID: continueMsg.id,
               sessionID: input.sessionID,
               type: "text",
-              // Internal marker for auto-compaction followups so provider plugins
-              // can distinguish them from manual post-compaction user prompts.
-              // This is not a stable plugin contract and may change or disappear.
-              metadata: {
-                compaction_continue: true,
-                compaction_owner_marker_id: userMessage.id,
+              serverProvenance: {
+                type: "compaction-continuation",
+                ownerMessageID: userMessage.id,
               },
               synthetic: true,
               text,
@@ -600,23 +603,13 @@ export const layer = Layer.effect(
         }
       }
 
-      if (processor.message.error) {
-        return "stop"
-      }
       if (result === "continue") {
-        const summary = summaryText(
-          (yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)).find(
-            (item) => item.info.id === msg.id,
-          ) ?? {
-            info: msg,
-            parts: [],
-          },
-        )
+        const text = summaryText(summary)
         if (flags.experimentalEventSystem) {
           yield* events.publish(SessionEvent.Compaction.Ended, {
             sessionID: input.sessionID,
             timestamp: DateTime.makeUnsafe(Date.now()),
-            text: summary ?? "",
+            text: text ?? "",
             include: selected.tail_start_id,
           })
         }
@@ -667,7 +660,7 @@ export const layer = Layer.effect(
           db,
           { sessionID: input.sessionID, kind: "compaction-process" },
           processCompaction(input),
-        ),
+        ).pipe(Effect.map((result) => (result === "continue" ? "continue" : "stop"))),
       create: (input) =>
         SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "compaction-create" }, create(input)),
     })

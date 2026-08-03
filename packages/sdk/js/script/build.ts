@@ -58,6 +58,57 @@ if (sseTypesPatched === sseTypesSource) {
 }
 await Bun.write(sseTypesPath, sseTypesPatched)
 
+const generatedTypes = await Bun.file("./src/v2/gen/types.gen.ts").text()
+const provenanceStart = generatedTypes.indexOf("export type ContinuityProvenance =")
+const provenanceEnd = generatedTypes.indexOf("export type TextPart =", provenanceStart)
+if (provenanceStart < 0 || provenanceEnd < 0) {
+  throw new Error("Generated ContinuityProvenance read contract is missing")
+}
+
+const legacyTypesPath = "./src/gen/types.gen.ts"
+let legacyTypes = await Bun.file(legacyTypesPath).text()
+const legacyProvenanceStart = legacyTypes.indexOf("export type ContinuityProvenance =")
+if (legacyProvenanceStart < 0) {
+  const insertion = legacyTypes.indexOf("export type TextPart =")
+  if (insertion < 0) throw new Error("Legacy generated TextPart read contract is missing")
+  legacyTypes =
+    legacyTypes.slice(0, insertion) +
+    generatedTypes.slice(provenanceStart, provenanceEnd) +
+    legacyTypes.slice(insertion)
+} else {
+  const legacyProvenanceEnd = legacyTypes.indexOf("export type TextPart =", legacyProvenanceStart)
+  if (legacyProvenanceEnd < 0) throw new Error("Legacy generated ContinuityProvenance block is unbounded")
+  legacyTypes =
+    legacyTypes.slice(0, legacyProvenanceStart) +
+    generatedTypes.slice(provenanceStart, provenanceEnd) +
+    legacyTypes.slice(legacyProvenanceEnd)
+}
+
+for (const [name, next] of [
+  ["TextPart", "ReasoningPart"],
+  ["ToolPart", "StepStartPart"],
+] as const) {
+  const start = legacyTypes.indexOf(`export type ${name} =`)
+  const end = legacyTypes.indexOf(`export type ${next} =`, start)
+  if (start < 0 || end < 0) throw new Error(`Legacy generated ${name} read contract is missing`)
+  const block = legacyTypes.slice(start, end).replaceAll("\n  serverProvenance?: ContinuityProvenance", "")
+  const close = block.lastIndexOf("\n}")
+  if (close < 0) throw new Error(`Legacy generated ${name} read contract has an unexpected shape`)
+  legacyTypes =
+    legacyTypes.slice(0, start) +
+    block.slice(0, close) +
+    "\n  serverProvenance?: ContinuityProvenance" +
+    block.slice(close) +
+    legacyTypes.slice(end)
+}
+if (
+  legacyTypes.indexOf("export type ContinuityProvenance =") !==
+  legacyTypes.lastIndexOf("export type ContinuityProvenance =")
+) {
+  throw new Error("Legacy generated ContinuityProvenance block is duplicated")
+}
+await Bun.write(legacyTypesPath, legacyTypes)
+
 await $`bun prettier --write src/gen`
 await $`bun prettier --write src/v2`
 await $`rm -rf dist`

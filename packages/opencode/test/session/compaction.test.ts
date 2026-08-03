@@ -192,6 +192,7 @@ function createCompactionMarker(sessionID: SessionID) {
         type: "compaction",
         auto: false,
       })
+      return msg
     }),
   )
 }
@@ -199,25 +200,45 @@ function createCompactionMarker(sessionID: SessionID) {
 function fake(
   input: Parameters<SessionProcessorModule.SessionProcessor.Interface["create"]>[0],
   result: "continue" | "compact",
+  session: SessionNs.Interface,
 ) {
   const msg = input.assistantMessage
   return {
     get message() {
       return msg
     },
+    registerToolCall: Effect.fn("TestSessionProcessor.registerToolCall")(() => Effect.die("not used")),
     updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
     completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
-    process: Effect.fn("TestSessionProcessor.process")(() => Effect.succeed(result)),
+    process: Effect.fn("TestSessionProcessor.process")(() =>
+      Effect.gen(function* () {
+        if (result !== "continue") return result
+        msg.finish = "stop"
+        msg.time.completed = Date.now()
+        yield* session.updateMessage(msg)
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID: msg.sessionID,
+          messageID: msg.id,
+          type: "text",
+          text: "summary",
+        })
+        return result
+      }),
+    ),
   } satisfies SessionProcessorModule.SessionProcessor.Handle
 }
 
 function layer(result: "continue" | "compact") {
-  return Layer.succeed(
+  return Layer.effect(
     SessionProcessorModule.SessionProcessor.Service,
-    SessionProcessorModule.SessionProcessor.Service.of({
-      create: Effect.fn("TestSessionProcessor.create")((input) => Effect.succeed(fake(input, result))),
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      return SessionProcessorModule.SessionProcessor.Service.of({
+        create: Effect.fn("TestSessionProcessor.create")((input) => Effect.succeed(fake(input, result, session))),
+      })
     }),
-  )
+  ).pipe(Layer.provide(SessionNs.defaultLayer))
 }
 
 function cfg(compaction?: ConfigV1.Info["compaction"]) {
@@ -908,11 +929,13 @@ describe("session.compaction.process", () => {
   )
 
   it.instance(
-    "adds synthetic continue prompt when auto is enabled",
+    "adds owner-adjacent synthetic continuation before later B when auto is enabled",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
-      const msg = yield* createUserMessage(session.id, "hello")
+      yield* createUserMessage(session.id, "hello")
+      const msg = yield* createCompactionMarker(session.id)
+      const b = yield* createUserMessage(session.id, "later B")
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
       const result = yield* SessionCompaction.use.process({
@@ -930,11 +953,24 @@ describe("session.compaction.process", () => {
       expect(last?.parts[0]).toMatchObject({
         type: "text",
         synthetic: true,
-        metadata: { compaction_continue: true },
+        serverProvenance: { type: "compaction-continuation", ownerMessageID: msg.id },
       })
       if (last?.parts[0]?.type === "text") {
         expect(last.parts[0].text).toContain("Continue if you have next steps")
       }
+      const view = MessageV2.modelTurn(all)
+      const summary = all.find((message) => message.info.role === "assistant" && message.info.summary === true)
+      expect(summary?.info.role === "assistant" ? summary.info.parentID : undefined).toBe(msg.id)
+      expect(view.messages.findIndex((message) => message.info.id === summary?.info.id)).toBeLessThan(
+        view.messages.findIndex((message) => message.info.id === b.id),
+      )
+      expect(view.messages.findIndex((message) => message.info.id === last?.info.id)).toBeLessThan(
+        view.messages.findIndex((message) => message.info.id === b.id),
+      )
+      expect(view.target?.id).toBe(b.id)
+      expect(all.findIndex((message) => message.info.id === b.id)).toBeLessThan(
+        all.findIndex((message) => message.info.id === summary?.info.id),
+      )
     }),
   )
 
@@ -1095,7 +1131,7 @@ describe("session.compaction.process", () => {
         expect(captured).toContain("zzzz")
         expect(captured).not.toContain("keep tail")
 
-        const filtered = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
+        const filtered = MessageV2.modelTurn(yield* MessageV2.stream(session.id)).messages
         expect(filtered.map((msg) => msg.info.id).slice(0, 3)).toEqual([parent!, expect.any(String), keep.id])
         expect(filtered[1]?.info.role).toBe("assistant")
         expect(filtered[1]?.info.role === "assistant" ? filtered[1].info.summary : false).toBe(true)
@@ -1106,11 +1142,13 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
-    "allows plugins to disable synthetic continue prompt",
+    "keeps later B current when plugins disable synthetic continuation",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
-      const msg = yield* createUserMessage(session.id, "hello")
+      yield* createUserMessage(session.id, "hello")
+      const msg = yield* createCompactionMarker(session.id)
+      const b = yield* createUserMessage(session.id, "later B")
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
       const result = yield* SessionCompaction.use.process({
@@ -1134,11 +1172,18 @@ describe("session.compaction.process", () => {
             ),
         ),
       ).toBe(false)
+      const summary = all.find((message) => message.info.role === "assistant" && message.info.summary === true)
+      const view = MessageV2.modelTurn(all)
+      expect(summary?.info.role === "assistant" ? summary.info.parentID : undefined).toBe(msg.id)
+      expect(view.messages.findIndex((message) => message.info.id === summary?.info.id)).toBeLessThan(
+        view.messages.findIndex((message) => message.info.id === b.id),
+      )
+      expect(view.target?.id).toBe(b.id)
     }).pipe(withCompaction({ plugin: autocontinue(false) })),
   )
 
   it.instance(
-    "replays the prior user turn on overflow when earlier context exists",
+    "replays the bounded prior user turn beside M before later B",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
@@ -1153,7 +1198,8 @@ describe("session.compaction.process", () => {
         filename: "cat.png",
         url: "https://example.com/cat.png",
       })
-      const msg = yield* createUserMessage(session.id, "current")
+      const msg = yield* createCompactionMarker(session.id)
+      const b = yield* createUserMessage(session.id, "later B")
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
       const result = yield* SessionCompaction.use.process({
@@ -1164,19 +1210,33 @@ describe("session.compaction.process", () => {
         overflow: true,
       })
 
-      const last = (yield* ssn.messages({ sessionID: session.id })).at(-1)
+      const all = yield* ssn.messages({ sessionID: session.id })
+      const replayed = all.find((item) =>
+        item.parts.some(
+          (part) =>
+            part.type === "text" &&
+            part.serverProvenance?.type === "compaction-replay" &&
+            part.serverProvenance.ownerMessageID === msg.id &&
+            part.serverProvenance.sourceMessageID === replay.id,
+        ),
+      )
 
       expect(result).toBe("continue")
-      expect(last?.info.role).toBe("user")
-      expect(last?.parts.some((part) => part.type === "file")).toBe(false)
+      expect(replayed?.info.role).toBe("user")
+      expect(replayed?.parts.some((part) => part.type === "file")).toBe(false)
       expect(
-        last?.parts.some((part) => part.type === "text" && part.text.includes("Attached image/png: cat.png")),
+        replayed?.parts.some((part) => part.type === "text" && part.text.includes("Attached image/png: cat.png")),
       ).toBe(true)
+      const view = MessageV2.modelTurn(all)
+      expect(view.messages.findIndex((message) => message.info.id === replayed?.info.id)).toBeLessThan(
+        view.messages.findIndex((message) => message.info.id === b.id),
+      )
+      expect(view.target?.id).toBe(b.id)
     }),
   )
 
   it.instance(
-    "adds replay ownership metadata when the prior turn has no text carrier",
+    "adds typed replay provenance when the prior turn has no text carrier",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
@@ -1189,7 +1249,8 @@ describe("session.compaction.process", () => {
         model: ref,
         time: { created: Date.now() },
       })
-      const msg = yield* createUserMessage(session.id, "current")
+      const msg = yield* createCompactionMarker(session.id)
+      const b = yield* createUserMessage(session.id, "later B")
       const messages = yield* ssn.messages({ sessionID: session.id })
 
       const result = yield* SessionCompaction.use.process({
@@ -1206,27 +1267,39 @@ describe("session.compaction.process", () => {
           item.parts.some(
             (part) =>
               part.type === "text" &&
-              part.metadata?.compaction_replay === true &&
-              part.metadata.compaction_replay_source_message_id === replay.id,
+              part.serverProvenance?.type === "compaction-replay" &&
+              part.serverProvenance.sourceMessageID === replay.id,
           ),
       )
       const carrier = replayed?.parts.find(
-        (part): part is SessionV1.TextPart => part.type === "text" && part.metadata?.compaction_replay === true,
+        (part): part is SessionV1.TextPart =>
+          part.type === "text" && part.serverProvenance?.type === "compaction-replay",
       )
 
       expect(result).toBe("continue")
       expect(carrier).toMatchObject({ text: "", synthetic: true })
-      expect(carrier?.metadata?.compaction_owner_marker_id).toBe(msg.id)
+      expect(carrier?.serverProvenance).toEqual({
+        type: "compaction-replay",
+        ownerMessageID: msg.id,
+        sourceMessageID: replay.id,
+      })
+      const all = yield* ssn.messages({ sessionID: session.id })
+      const view = MessageV2.modelTurn(all)
+      expect(view.messages.findIndex((message) => message.info.id === replayed?.info.id)).toBeLessThan(
+        view.messages.findIndex((message) => message.info.id === b.id),
+      )
+      expect(view.target?.id).toBe(b.id)
     }),
   )
 
   it.instance(
-    "falls back to overflow guidance when no replayable turn exists",
+    "projects synthetic overflow fallback beside M before later B",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
       yield* createUserMessage(session.id, "earlier")
-      const msg = yield* createUserMessage(session.id, "current")
+      const msg = yield* createCompactionMarker(session.id)
+      const b = yield* createUserMessage(session.id, "later B")
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
       const result = yield* SessionCompaction.use.process({
@@ -1237,13 +1310,21 @@ describe("session.compaction.process", () => {
         overflow: true,
       })
 
-      const last = (yield* ssn.messages({ sessionID: session.id })).at(-1)
+      const all = yield* ssn.messages({ sessionID: session.id })
+      const last = all.find((message) =>
+        message.parts.some((part) => part.type === "text" && part.serverProvenance?.type === "compaction-continuation"),
+      )
 
       expect(result).toBe("continue")
       expect(last?.info.role).toBe("user")
       if (last?.parts[0]?.type === "text") {
         expect(last.parts[0].text).toContain("previous request exceeded the provider's size limit")
       }
+      const view = MessageV2.modelTurn(all)
+      expect(view.messages.findIndex((message) => message.info.id === last?.info.id)).toBeLessThan(
+        view.messages.findIndex((message) => message.info.id === b.id),
+      )
+      expect(view.target?.id).toBe(b.id)
     }),
   )
 
@@ -1420,7 +1501,7 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
-    "summarizes only the head while keeping recent tail out of summary input",
+    "summarizes only the head and projects retained tail before later B",
     () => {
       const stub = llm()
       let captured = ""
@@ -1435,13 +1516,12 @@ describe("session.compaction.process", () => {
         yield* createUserMessage(session.id, "older context")
         yield* createUserMessage(session.id, "keep this turn")
         yield* createUserMessage(session.id, "and this one too")
-        yield* createCompactionMarker(session.id)
+        const marker = yield* createCompactionMarker(session.id)
+        const b = yield* createUserMessage(session.id, "later external B")
 
         const msgs = yield* ssn.messages({ sessionID: session.id })
-        const parent = msgs.at(-1)?.info.id
-        expect(parent).toBeTruthy()
         yield* SessionCompaction.use.process({
-          parentID: parent!,
+          parentID: marker.id,
           messages: msgs,
           sessionID: session.id,
           auto: false,
@@ -1450,7 +1530,16 @@ describe("session.compaction.process", () => {
         expect(captured).toContain("older context")
         expect(captured).not.toContain("keep this turn")
         expect(captured).not.toContain("and this one too")
+        expect(captured).not.toContain("later external B")
         expect(captured).not.toContain("What did we do so far?")
+        const all = yield* ssn.messages({ sessionID: session.id })
+        const summary = all.find((message) => message.info.role === "assistant" && message.info.summary === true)
+        const view = MessageV2.modelTurn(all)
+        expect(summary?.info.role === "assistant" ? summary.info.parentID : undefined).toBe(marker.id)
+        expect(view.messages.findIndex((message) => message.info.id === summary?.info.id)).toBeLessThan(
+          view.messages.findIndex((message) => message.info.id === b.id),
+        )
+        expect(view.target?.id).toBe(b.id)
       }).pipe(withCompaction({ llm: stub.layer }))
     },
     { git: true },
@@ -1481,18 +1570,31 @@ describe("session.compaction.process", () => {
         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
         yield* createUserMessage(session.id, "latest turn")
-        yield* createCompactionMarker(session.id)
+        const marker = yield* createCompactionMarker(session.id)
+        const b = yield* createUserMessage(session.id, "later external B")
 
-        msgs = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
-        parent = msgs.at(-1)?.info.id
-        expect(parent).toBeTruthy()
-        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+        msgs = MessageV2.modelTurn(yield* MessageV2.stream(session.id)).messages
+        yield* SessionCompaction.use.process({
+          parentID: marker.id,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        })
 
         expect(captured).toContain("<previous-summary>")
         expect(captured).toContain("summary one")
         expect(captured.match(/summary one/g)?.length).toBe(1)
         expect(captured).toContain("## Constraints & Preferences")
         expect(captured).toContain("## Progress")
+        expect(captured).not.toContain("later external B")
+        const all = yield* ssn.messages({ sessionID: session.id })
+        const summary = all.findLast((message) => message.info.role === "assistant" && message.info.summary === true)
+        const view = MessageV2.modelTurn(all)
+        expect(summary?.info.role === "assistant" ? summary.info.parentID : undefined).toBe(marker.id)
+        expect(view.messages.findIndex((message) => message.info.id === summary?.info.id)).toBeLessThan(
+          view.messages.findIndex((message) => message.info.id === b.id),
+        )
+        expect(view.target?.id).toBe(b.id)
       }).pipe(withCompaction({ llm: stub.layer }))
     },
     { git: true },
@@ -1519,12 +1621,12 @@ describe("session.compaction.process", () => {
       const u4 = yield* createUserMessage(session.id, "four")
       yield* createCompactionMarker(session.id)
 
-      msgs = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
+      msgs = MessageV2.modelTurn(yield* MessageV2.stream(session.id)).messages
       parent = msgs.at(-1)?.info.id
       expect(parent).toBeTruthy()
       yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
-      const filtered = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
+      const filtered = MessageV2.modelTurn(yield* MessageV2.stream(session.id)).messages
       const ids = filtered.map((msg) => msg.info.id)
 
       expect(ids).not.toContain(u1.id)

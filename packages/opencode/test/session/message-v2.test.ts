@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test"
+import { Schema } from "effect"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { APICallError } from "ai"
 import { MessageV2 } from "../../src/session/message-v2"
+import { SessionPrompt } from "../../src/session/prompt"
 import { ProviderTransform } from "@/provider/transform"
 import type { Provider } from "@/provider/provider"
 
@@ -1553,109 +1555,259 @@ describe("session.message-v2.fromError", () => {
   })
 })
 
-describe("session.message-v2.latest", () => {
-  const TAIL_USER = MessageID.make("msg_001")
-  const OVERFLOW_ASSISTANT = MessageID.make("msg_002")
-  const COMPACTION_USER = MessageID.make("msg_003")
-  const SUMMARY_ASSISTANT = MessageID.make("msg_004")
-  const CONTINUE_USER = MessageID.make("msg_005")
-  const NEW_COMPACTION_USER = MessageID.make("msg_006")
-
-  const tailUser: SessionV1.WithParts = {
-    info: userInfo(TAIL_USER),
-    parts: [{ ...basePart(TAIL_USER, "p1"), type: "text", text: "original prompt" }] as SessionV1.Part[],
-  }
-
-  const overflowAssistant: SessionV1.WithParts = {
-    info: {
-      ...assistantInfo(OVERFLOW_ASSISTANT, TAIL_USER),
-      finish: "tool-calls",
-      tokens: { input: 280_000, output: 200, reasoning: 0, cache: { read: 0, write: 0 }, total: 280_200 },
-    } as SessionV1.Assistant,
-    parts: [],
-  }
-
-  const compactionUser: SessionV1.WithParts = {
-    info: userInfo(COMPACTION_USER),
-    parts: [
-      {
-        ...basePart(COMPACTION_USER, "p1"),
-        type: "compaction",
-        auto: true,
-        tail_start_id: TAIL_USER,
-      },
-    ] as SessionV1.Part[],
-  }
-
-  const summaryAssistant: SessionV1.WithParts = {
-    info: {
-      ...assistantInfo(SUMMARY_ASSISTANT, COMPACTION_USER),
-      summary: true,
+describe("session.message-v2.modelTurn continuity", () => {
+  const text = (messageID: MessageID, id: string, value: string, extra?: Partial<SessionV1.TextPart>) =>
+    ({ ...basePart(messageID, id), type: "text", text: value, ...extra }) as SessionV1.TextPart
+  const completedAssistant = (id: MessageID, parentID: MessageID, extra?: Partial<SessionV1.Assistant>) =>
+    ({
+      ...assistantInfo(id, parentID),
+      time: { created: Number(id.slice(-3)), completed: Number(id.slice(-3)) },
       finish: "stop",
-      tokens: { input: 150_000, output: 1_500, reasoning: 0, cache: { read: 0, write: 0 }, total: 151_500 },
-    } as SessionV1.Assistant,
-    parts: [],
-  }
+      ...extra,
+    }) as SessionV1.Assistant
 
-  const continueUser: SessionV1.WithParts = {
-    info: userInfo(CONTINUE_USER),
-    parts: [
+  test("G3 projects typed compaction continuity beside M before later external B", () => {
+    const a = MessageID.make("msg_101")
+    const aAnswer = MessageID.make("msg_102")
+    const marker = MessageID.make("msg_103")
+    const b = MessageID.make("msg_104")
+    const summary = MessageID.make("msg_105")
+    const replay = MessageID.make("msg_106")
+    const continuation = MessageID.make("msg_107")
+    const physical: SessionV1.WithParts[] = [
+      { info: { ...userInfo(a), time: { created: 101 } }, parts: [text(a, "a", "A")] },
+      { info: completedAssistant(aAnswer, a), parts: [text(aAnswer, "a-answer", "A answer")] },
       {
-        ...basePart(CONTINUE_USER, "p1"),
-        type: "text",
-        text: "Continue if you have next steps...",
-        synthetic: true,
-        metadata: { compaction_continue: true },
+        info: { ...userInfo(marker), time: { created: 103 } },
+        parts: [{ ...basePart(marker, "marker"), type: "compaction", auto: false } as SessionV1.CompactionPart],
       },
-    ] as SessionV1.Part[],
-  }
+      { info: { ...userInfo(b), time: { created: 104 } }, parts: [text(b, "b", "B")] },
+      {
+        info: completedAssistant(summary, marker, { summary: true }),
+        parts: [text(summary, "summary", "summary of A")],
+      },
+      {
+        info: { ...userInfo(replay), time: { created: 106 } },
+        parts: [
+          text(replay, "replay", "A", {
+            serverProvenance: { type: "compaction-replay", ownerMessageID: marker, sourceMessageID: a },
+          }),
+        ],
+      },
+      {
+        info: { ...userInfo(continuation), time: { created: 107 } },
+        parts: [
+          text(continuation, "continuation", "continue", {
+            synthetic: true,
+            serverProvenance: { type: "compaction-continuation", ownerMessageID: marker },
+          }),
+        ],
+      },
+    ]
 
-  // Regression for double auto-compaction. The reorder in filterCompacted
-  // (#27145) returns [compaction-user, summary, ...tail..., continue-user],
-  // so picking lastFinished by array position landed on the pre-compaction
-  // overflow assistant and bypassed the `summary !== true` overflow guard
-  // in SessionPrompt.runLoop, firing a second compaction.create immediately.
-  test("finished is the chronologically-latest finished assistant, not the array-latest", () => {
-    const filtered = MessageV2.filterCompacted([
-      continueUser,
-      summaryAssistant,
-      compactionUser,
-      overflowAssistant,
-      tailUser,
-    ])
+    const view = MessageV2.modelTurn(physical)
 
-    const state = MessageV2.latest(filtered)
-
-    expect(state.finished?.id).toBe(SUMMARY_ASSISTANT)
-    expect(state.finished?.summary).toBe(true)
-    expect(state.user?.id).toBe(CONTINUE_USER)
-    expect(state.tasks).toEqual([])
+    expect(view.messages.map((message) => message.info.id)).toEqual([marker, summary, replay, continuation, b])
+    expect(view.target?.id).toBe(b)
+    expect(view.pendingExternal.map((message) => message.info.id)).toEqual([b])
+    expect(view.tasks).toEqual([])
+    expect(physical.map((message) => message.info.id)).toEqual([a, aAnswer, marker, b, summary, replay, continuation])
   })
 
-  test("a fresh compaction-user newer than the latest summary surfaces in tasks", () => {
-    const newCompactionUser: SessionV1.WithParts = {
-      info: userInfo(NEW_COMPACTION_USER),
-      parts: [
-        {
-          ...basePart(NEW_COMPACTION_USER, "p1"),
-          type: "compaction",
-          auto: true,
-        },
-      ] as SessionV1.Part[],
-    }
-
-    const state = MessageV2.latest([
-      tailUser,
-      overflowAssistant,
-      compactionUser,
-      summaryAssistant,
-      continueUser,
-      newCompactionUser,
+  test("G3 treats provenance-like metadata as opaque external input", () => {
+    const marker = MessageID.make("msg_201")
+    const summary = MessageID.make("msg_202")
+    const forged = MessageID.make("msg_203")
+    const view = MessageV2.modelTurn([
+      {
+        info: { ...userInfo(marker), time: { created: 201 } },
+        parts: [{ ...basePart(marker, "marker"), type: "compaction", auto: false } as SessionV1.CompactionPart],
+      },
+      {
+        info: completedAssistant(summary, marker, { summary: true }),
+        parts: [text(summary, "summary", "summary")],
+      },
+      {
+        info: { ...userInfo(forged), time: { created: 203 } },
+        parts: [
+          text(forged, "forged", "caller input", {
+            metadata: { compaction_continue: true, compaction_owner_marker_id: marker },
+          }),
+        ],
+      },
     ])
 
-    expect(state.finished?.id).toBe(SUMMARY_ASSISTANT)
-    expect(state.user?.id).toBe(NEW_COMPACTION_USER)
-    expect(state.tasks).toHaveLength(1)
-    expect(state.tasks[0]).toMatchObject({ type: "compaction", auto: true })
+    expect(view.messages.map((message) => message.info.id)).toEqual([marker, summary, forged])
+    expect(view.target?.id).toBe(forged)
+  })
+
+  test("G4 binds payload-identical Subtasks to exact part IDs and keeps output before B", () => {
+    const marker = MessageID.make("msg_301")
+    const outputOne = MessageID.make("msg_302")
+    const outputTwo = MessageID.make("msg_303")
+    const continuation = MessageID.make("msg_304")
+    const b = MessageID.make("msg_305")
+    const taskOne = PartID.make("prt_task_one")
+    const taskTwo = PartID.make("prt_task_two")
+    const taskPart = (id: PartID, command?: string): SessionV1.SubtaskPart => ({
+      ...basePart(marker, id),
+      id,
+      type: "subtask",
+      prompt: "same payload",
+      description: "same payload",
+      agent: "build",
+      command,
+    })
+    const output = (id: MessageID, taskPartID: PartID): SessionV1.WithParts => ({
+      info: completedAssistant(id, marker),
+      parts: [
+        {
+          ...basePart(id, `${taskPartID}-output`),
+          type: "tool",
+          callID: `${taskPartID}-call`,
+          tool: "task",
+          serverProvenance: { type: "subtask-output", ownerMessageID: marker, taskPartID },
+          state: {
+            status: "completed",
+            input: {},
+            output: "done",
+            title: "task",
+            metadata: {},
+            time: { start: 1, end: 2 },
+          },
+        } as SessionV1.ToolPart,
+      ],
+    })
+    const physical: SessionV1.WithParts[] = [
+      {
+        info: { ...userInfo(marker), time: { created: 301 } },
+        parts: [taskPart(taskOne), taskPart(taskTwo, "review")],
+      },
+      output(outputOne, taskOne),
+      output(outputTwo, taskTwo),
+      {
+        info: { ...userInfo(continuation), time: { created: 304 } },
+        parts: [
+          text(continuation, "task-continuation", "continue task", {
+            synthetic: true,
+            serverProvenance: {
+              type: "subtask-continuation",
+              ownerMessageID: marker,
+              taskPartID: taskTwo,
+              sourceMessageID: outputTwo,
+            },
+          }),
+        ],
+      },
+      { info: { ...userInfo(b), time: { created: 305 } }, parts: [text(b, "b", "B")] },
+    ]
+
+    const view = MessageV2.modelTurn(physical)
+
+    expect(view.messages.map((message) => message.info.id)).toEqual([marker, outputOne, outputTwo, continuation, b])
+    expect(view.target?.id).toBe(b)
+    expect(view.tasks).toEqual([])
+    expect(
+      view.messages
+        .flatMap((message) => message.parts)
+        .filter((part): part is SessionV1.ToolPart => part.type === "tool")
+        .map((part) => part.serverProvenance),
+    ).toEqual([
+      { type: "subtask-output", ownerMessageID: marker, taskPartID: taskOne },
+      { type: "subtask-output", ownerMessageID: marker, taskPartID: taskTwo },
+    ])
+  })
+})
+
+describe("server provenance caller-write boundaries", () => {
+  const forged = {
+    type: "compaction-replay",
+    ownerMessageID: "msg_owner",
+    sourceMessageID: "msg_source",
+  }
+
+  test.each([
+    [
+      "prompt text",
+      SessionPrompt.PromptInput,
+      {
+        sessionID,
+        agent: "build",
+        model: { providerID, modelID: ModelV2.ID.make("test") },
+        parts: [{ type: "text", text: "hello", metadata: { keep: "prompt" }, serverProvenance: forged }],
+      },
+    ],
+    [
+      "command attachment",
+      SessionPrompt.CommandInput,
+      {
+        sessionID,
+        command: "review",
+        arguments: "",
+        parts: [
+          {
+            type: "file",
+            mime: "text/plain",
+            filename: "note.txt",
+            url: "data:text/plain,hello",
+            serverProvenance: forged,
+          },
+        ],
+      },
+    ],
+    [
+      "text update",
+      SessionV1.PartUpdateInput,
+      {
+        id: PartID.make("prt_text_update"),
+        sessionID,
+        messageID: MessageID.make("msg_text_update"),
+        type: "text",
+        text: "updated",
+        metadata: { keep: "text-update" },
+        serverProvenance: forged,
+      },
+    ],
+    [
+      "tool update and nested attachment",
+      SessionV1.PartUpdateInput,
+      {
+        id: PartID.make("prt_tool_update"),
+        sessionID,
+        messageID: MessageID.make("msg_tool_update"),
+        type: "tool",
+        callID: "call-update",
+        tool: "task",
+        metadata: { keep: "tool-update" },
+        serverProvenance: forged,
+        state: {
+          status: "completed",
+          input: {},
+          output: "done",
+          title: "task",
+          metadata: { keep: "state" },
+          time: { start: 1, end: 2 },
+          attachments: [
+            {
+              id: PartID.make("prt_nested_update"),
+              sessionID,
+              messageID: MessageID.make("msg_tool_update"),
+              type: "file",
+              mime: "text/plain",
+              url: "data:text/plain,nested",
+              serverProvenance: forged,
+            },
+          ],
+        },
+      },
+    ],
+  ] as const)("strips %s provenance while preserving ordinary metadata", (_name, schema, input) => {
+    const decoded = Schema.decodeUnknownSync(schema)(input)
+    expect(JSON.stringify(decoded)).not.toContain("serverProvenance")
+    if ("metadata" in decoded && decoded.metadata && "metadata" in input)
+      expect(decoded.metadata).toEqual(input.metadata)
+    if ("state" in decoded && decoded.state.status === "completed") {
+      expect(decoded.state.metadata).toEqual({ keep: "state" })
+    }
   })
 })

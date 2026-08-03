@@ -424,11 +424,7 @@ function createLayer(input: StreamInput) {
 
         const events = yield* Scope.provide(scope)(
           Effect.acquireRelease(
-            Effect.promise(() =>
-              input.sdk.global.event({
-                signal: abort.signal,
-              }),
-            ),
+            Effect.promise(() => input.sdk.global.event({}, { signal: abort.signal })),
             (events) =>
               Effect.sync(() => {
                 void events.stream.return(StreamClosed).catch(() => {})

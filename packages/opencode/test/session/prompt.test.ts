@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { FetchHttpClient } from "effect/unstable/http"
 import { expect } from "bun:test"
-import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Context, Deferred, Duration, Effect, Exit, Fiber, Layer, Ref } from "effect"
 import path from "path"
 import { fileURLToPath, pathToFileURL } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -158,6 +158,57 @@ const lsp = Layer.succeed(
 const status = SessionStatus.layer.pipe(Layer.provideMerge(EventV2Bridge.defaultLayer))
 const run = SessionRunState.layer.pipe(Layer.provide(status))
 const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
+
+class RunStateRetirementGate extends Context.Service<
+  RunStateRetirementGate,
+  {
+    readonly idleEntered: Deferred.Deferred<void>
+    readonly releaseIdle: Deferred.Deferred<void>
+    readonly statuses: Ref.Ref<SessionStatus.Info[]>
+  }
+>()("@test/SessionRunStateRetirementGate") {}
+
+const runStateRetirementGate = Layer.effect(
+  RunStateRetirementGate,
+  Effect.gen(function* () {
+    return {
+      idleEntered: yield* Deferred.make<void>(),
+      releaseIdle: yield* Deferred.make<void>(),
+      statuses: yield* Ref.make<SessionStatus.Info[]>([]),
+    }
+  }),
+)
+
+const gatedRunStateStatus = Layer.effect(
+  SessionStatus.Service,
+  Effect.gen(function* () {
+    const gate = yield* RunStateRetirementGate
+    return SessionStatus.Service.of({
+      get: () => Ref.get(gate.statuses).pipe(Effect.map((items) => items.at(-1) ?? { type: "idle" as const })),
+      list: () => Effect.succeed(new Map()),
+      set: (_sessionID, next) =>
+        Ref.update(gate.statuses, (items) => [...items, next]).pipe(
+          Effect.andThen(
+            next.type === "idle"
+              ? Deferred.succeed(gate.idleEntered, undefined).pipe(Effect.andThen(Deferred.await(gate.releaseIdle)))
+              : Effect.void,
+          ),
+        ),
+    })
+  }),
+).pipe(Layer.provideMerge(runStateRetirementGate))
+
+const runStateRetirement = testEffect(
+  SessionRunState.layer.pipe(
+    Layer.provide(
+      Layer.mock(BackgroundJob.Service, {
+        list: () => Effect.succeed([]),
+        cancel: () => Effect.succeed(undefined),
+      }),
+    ),
+    Layer.provideMerge(gatedRunStateStatus),
+  ),
+)
 
 const processorCreateStarted: Array<() => void> = []
 const blockingProcessor = Layer.succeed(
@@ -419,7 +470,7 @@ const seed = Effect.fn("test.seed")(function* (sessionID: SessionID, opts?: { fi
 const addSubtask = (sessionID: SessionID, messageID: MessageID, model = ref) =>
   Effect.gen(function* () {
     const session = yield* Session.Service
-    yield* session.updatePart({
+    return yield* session.updatePart({
       id: PartID.ascending(),
       messageID,
       sessionID,
@@ -708,7 +759,7 @@ it.instance("glob tool keeps instance context during prompt runs", () =>
     const result = yield* prompt.loop({ sessionID: session.id })
     expect(result.info.role).toBe("assistant")
 
-    const msgs = yield* MessageV2.filterCompactedEffect(session.id)
+    const msgs = (yield* MessageV2.modelTurnEffect(session.id)).messages
     const tool = msgs
       .flatMap((msg) => msg.parts)
       .find(
@@ -771,13 +822,13 @@ it.instance("failed subtask preserves metadata on error tool state", () =>
     })
     yield* llm.text("done")
     const msg = yield* user(chat.id, "hello")
-    yield* addSubtask(chat.id, msg.id)
+    const task = yield* addSubtask(chat.id, msg.id)
 
     const result = yield* prompt.loop({ sessionID: chat.id })
     expect(result.info.role).toBe("assistant")
     expect(yield* llm.calls).toBe(2)
 
-    const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+    const msgs = (yield* MessageV2.modelTurnEffect(chat.id)).messages
     const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
     expect(taskMsg?.info.role).toBe("assistant")
     if (!taskMsg || taskMsg.info.role !== "assistant") return
@@ -785,6 +836,11 @@ it.instance("failed subtask preserves metadata on error tool state", () =>
     const tool = errorTool(taskMsg.parts)
     if (!tool) return
 
+    expect(tool.serverProvenance).toEqual({
+      type: "subtask-output",
+      ownerMessageID: msg.id,
+      taskPartID: task.id,
+    })
     expect(tool.state.error).toContain("Tool execution failed")
     expect(tool.state.metadata).toBeDefined()
     expect(tool.state.metadata?.sessionId).toBeDefined()
@@ -811,7 +867,7 @@ it.instance(
 
       const tool = yield* pollWithTimeout(
         Effect.gen(function* () {
-          const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+          const msgs = (yield* MessageV2.modelTurnEffect(chat.id)).messages
           const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
           const tool = taskMsg?.parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
           if (tool?.state.status === "running" && tool.state.metadata?.sessionId) return tool
@@ -853,7 +909,7 @@ it.instance(
 
       const tool = yield* pollWithTimeout(
         Effect.gen(function* () {
-          const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+          const msgs = (yield* MessageV2.modelTurnEffect(chat.id)).messages
           const assistant = msgs.findLast((item) => item.info.role === "assistant" && item.info.agent === "build")
           const tool = assistant?.parts.find(
             (part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "task",
@@ -1071,7 +1127,7 @@ noLLMServer.instance(
       expect(Exit.isSuccess(exit)).toBe(true)
       yield* awaitWithTimeout(Deferred.await(aborted), "timed out waiting for task tool abort", "10 seconds")
 
-      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+      const msgs = (yield* MessageV2.modelTurnEffect(chat.id)).messages
       const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
       expect(taskMsg?.info.role).toBe("assistant")
       if (!taskMsg || taskMsg.info.role !== "assistant") return
@@ -1104,7 +1160,7 @@ it.instance(
       const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
       yield* llm.wait(1)
 
-      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+      const msgs = (yield* MessageV2.modelTurnEffect(chat.id)).messages
       const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
       const tool = taskMsg ? toolPart(taskMsg.parts) : undefined
       const sessionID = tool?.state.status === "running" ? tool.state.metadata?.sessionId : undefined
@@ -1258,6 +1314,732 @@ it.instance(
 )
 
 it.instance(
+  "G3 manual compaction keeps later B pending while summary continuity projects before it",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const gate = yield* Deferred.make<void>()
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+
+      yield* llm.hold("answer A", deferredAsPromise(gate))
+      yield* llm.text("summary A")
+      yield* llm.text("answer B")
+
+      const a = yield* prompt
+        .prompt({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          parts: [{ type: "text", text: "external A" }],
+        })
+        .pipe(Effect.forkChild)
+      yield* llm.wait(1)
+
+      const compact = yield* prompt
+        .summarize({ sessionID: chat.id, providerID: ref.providerID, modelID: ref.modelID })
+        .pipe(Effect.forkChild)
+      const marker = yield* pollWithTimeout(
+        sessions
+          .messages({ sessionID: chat.id })
+          .pipe(
+            Effect.map((messages) =>
+              messages.find(
+                (message) => message.info.role === "user" && message.parts.some((part) => part.type === "compaction"),
+              ),
+            ),
+          ),
+        "manual compaction marker was not persisted",
+      )
+
+      const bID = MessageID.ascending()
+      const b = yield* prompt
+        .prompt({
+          sessionID: chat.id,
+          messageID: bID,
+          agent: "build",
+          model: ref,
+          parts: [{ type: "text", text: "external B" }],
+        })
+        .pipe(Effect.forkChild)
+      yield* pollWithTimeout(
+        sessions
+          .messages({ sessionID: chat.id })
+          .pipe(Effect.map((messages) => (messages.some((message) => message.info.id === bID) ? true : undefined))),
+        "later external B was not persisted before compaction selection",
+      )
+
+      yield* Deferred.succeed(gate, undefined)
+      const exits = yield* Effect.all([Fiber.await(a), Fiber.await(compact), Fiber.await(b)])
+      expect(exits.every(Exit.isSuccess)).toBe(true)
+      expect(yield* llm.calls).toBe(3)
+
+      const persisted = yield* sessions.messages({ sessionID: chat.id })
+      const summary = persisted.find((message) => message.info.role === "assistant" && message.info.summary === true)
+      if (!summary || summary.info.role !== "assistant") throw new Error("expected completed summary")
+      const response = persisted.find(
+        (message) =>
+          message.info.role === "assistant" && message.info.parentID === bID && message.info.summary !== true,
+      )
+      expect(response?.info.role).toBe("assistant")
+      expect(summary.info.parentID).toBe(marker.info.id)
+      expect(persisted.findIndex((message) => message.info.id === bID)).toBeLessThan(
+        persisted.findIndex((message) => message.info.id === summary.info.id),
+      )
+
+      const inputs = yield* llm.inputs
+      const summaryInput = JSON.stringify(inputs[1]?.messages)
+      expect(summaryInput).toContain("external A")
+      expect(summaryInput).not.toContain("external B")
+      const nextInput = JSON.stringify(inputs[2]?.messages)
+      expect(nextInput.indexOf("summary A")).toBeGreaterThanOrEqual(0)
+      expect(nextInput.indexOf("external B")).toBeGreaterThan(nextInput.indexOf("summary A"))
+
+      const turn = MessageV2.modelTurn(persisted)
+      expect(turn.target?.id).toBeUndefined()
+      expect(turn.messages.findIndex((message) => message.info.id === summary.info.id)).toBeLessThan(
+        turn.messages.findIndex((message) => message.info.id === bID),
+      )
+    }),
+  5_000,
+)
+
+it.instance(
+  "G3 projects every reached compaction continuity form through persistence and provider response B",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const scenarios = [
+        { name: "retained-tail", tail: true },
+        { name: "ordinary-replay", provenance: "compaction-replay" as const },
+        { name: "synthetic-replay", provenance: "compaction-replay" as const, synthetic: true },
+        { name: "no-replay" },
+        { name: "autocontinue-disabled", auto: true },
+        { name: "continuation", provenance: "compaction-continuation" as const, synthetic: true },
+        { name: "repeated-compaction", predecessor: true },
+        { name: "failed-summary", summaryFinish: "error" },
+        { name: "unusable-summary", summaryText: "   " },
+      ]
+
+      for (const scenario of scenarios) {
+        const chat = yield* sessions.create({ title: `G3 ${scenario.name}` })
+        let created = Date.now()
+        const addUser = Effect.fnUntraced(function* (textValue: string) {
+          const info = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            sessionID: chat.id,
+            role: "user",
+            agent: "build",
+            model: ref,
+            time: { created: created++ },
+          })
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            sessionID: chat.id,
+            messageID: info.id,
+            type: "text",
+            text: textValue,
+          })
+          return info
+        })
+        const addAssistant = Effect.fnUntraced(function* (
+          parentID: MessageID,
+          textValue: string,
+          options?: { summary?: boolean; finish?: string },
+        ) {
+          const info = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            sessionID: chat.id,
+            role: "assistant",
+            parentID,
+            mode: "build",
+            agent: "build",
+            providerID: ref.providerID,
+            modelID: ref.modelID,
+            path: { cwd: "/tmp", root: "/tmp" },
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            time: { created: created++, completed: created },
+            finish: options?.finish ?? "stop",
+            summary: options?.summary,
+          })
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            sessionID: chat.id,
+            messageID: info.id,
+            type: "text",
+            text: textValue,
+          })
+          return info
+        })
+
+        if (scenario.predecessor) {
+          const predecessor = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            sessionID: chat.id,
+            role: "user",
+            agent: "build",
+            model: ref,
+            time: { created: created++ },
+          })
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            sessionID: chat.id,
+            messageID: predecessor.id,
+            type: "compaction",
+            auto: false,
+          })
+          yield* addAssistant(predecessor.id, `${scenario.name} predecessor summary`, { summary: true })
+        }
+
+        const a = yield* addUser(`${scenario.name} external A`)
+        yield* addAssistant(a.id, `${scenario.name} answer A`)
+        const marker = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          sessionID: chat.id,
+          role: "user",
+          agent: "build",
+          model: ref,
+          time: { created: created++ },
+        })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          sessionID: chat.id,
+          messageID: marker.id,
+          type: "compaction",
+          auto: scenario.auto ?? false,
+          ...(scenario.tail ? { tail_start_id: a.id } : {}),
+        })
+        const b = yield* addUser(`${scenario.name} external B`)
+        const summary = yield* addAssistant(marker.id, scenario.summaryText ?? `${scenario.name} canonical summary`, {
+          summary: true,
+          finish: scenario.summaryFinish,
+        })
+        let carrier: SessionV1.User | undefined
+        if (scenario.provenance) {
+          carrier = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            sessionID: chat.id,
+            role: "user",
+            agent: "build",
+            model: ref,
+            time: { created: created++ },
+          })
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            sessionID: chat.id,
+            messageID: carrier.id,
+            type: "text",
+            text: `${scenario.name} continuity carrier`,
+            synthetic: scenario.synthetic,
+            serverProvenance:
+              scenario.provenance === "compaction-replay"
+                ? { type: "compaction-replay", ownerMessageID: marker.id, sourceMessageID: a.id }
+                : { type: "compaction-continuation", ownerMessageID: marker.id },
+          })
+        }
+
+        const before = yield* sessions.messages({ sessionID: chat.id })
+        const beforeIDs = before.map((message) => message.info.id)
+        const view = MessageV2.modelTurn(before)
+        expect(view.target?.id, scenario.name).toBe(b.id)
+        expect(
+          view.pendingExternal.map((message) => message.info.id),
+          scenario.name,
+        ).toEqual([b.id])
+        expect(
+          view.messages.findIndex((message) => message.info.id === summary.id),
+          scenario.name,
+        ).toBeLessThan(view.messages.findIndex((message) => message.info.id === b.id))
+        if (carrier) {
+          expect(
+            view.messages.filter((message) => message.info.id === carrier!.id),
+            scenario.name,
+          ).toHaveLength(1)
+          expect(
+            view.messages.findIndex((message) => message.info.id === carrier!.id),
+            scenario.name,
+          ).toBeLessThan(view.messages.findIndex((message) => message.info.id === b.id))
+        }
+
+        const inputOffset = (yield* llm.inputs).length
+        yield* llm.text(`${scenario.name} response B`)
+        if (carrier) yield* llm.text(`${scenario.name} generated response`)
+        const result = yield* prompt.loop({ sessionID: chat.id })
+        expect(result.info.role, scenario.name).toBe("assistant")
+
+        const input = JSON.stringify((yield* llm.inputs)[inputOffset]?.messages)
+        expect(input.indexOf(`${scenario.name} external B`), scenario.name).toBeGreaterThan(
+          input.indexOf(scenario.summaryText ?? `${scenario.name} canonical summary`),
+        )
+        if (carrier) {
+          const label = `${scenario.name} continuity carrier`
+          expect(input.indexOf(label), scenario.name).toBeGreaterThanOrEqual(0)
+          expect(input.indexOf(label), scenario.name).toBe(input.lastIndexOf(label))
+          expect(input.indexOf(`${scenario.name} external B`), scenario.name).toBeGreaterThan(input.indexOf(label))
+        }
+
+        const after = yield* sessions.messages({ sessionID: chat.id })
+        const response = after.find(
+          (message) =>
+            message.info.role === "assistant" && message.info.parentID === b.id && message.info.summary !== true,
+        )
+        expect(response?.info.role, scenario.name).toBe("assistant")
+        expect(
+          after.slice(0, beforeIDs.length).map((message) => message.info.id),
+          scenario.name,
+        ).toEqual(beforeIDs)
+        expect(
+          after.filter((message) => message.info.id === summary.id),
+          scenario.name,
+        ).toHaveLength(1)
+        expect(after.findLast((message) => message.info.role === "assistant")?.info.id, scenario.name).toBe(
+          result.info.id,
+        )
+      }
+    }),
+  15_000,
+)
+
+it.instance(
+  "G4 ordinary and command Subtasks keep exact containing ownership when B is already admitted",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        command: {
+          delegated: {
+            template: "same payload",
+            description: "same payload",
+            agent: "general",
+            subtask: true,
+          },
+        },
+      }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+
+      for (const kind of ["ordinary", "command"] as const) {
+        const gate = yield* Deferred.make<void>()
+        const chat = yield* sessions.create({
+          title: "Pinned",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        const aID = MessageID.ascending()
+        const mID = MessageID.ascending()
+        const bID = MessageID.ascending()
+        const taskID = PartID.ascending()
+
+        yield* llm.hold(`${kind} answer A`, deferredAsPromise(gate))
+        yield* llm.text(`${kind} task output`)
+        yield* llm.text(`${kind} answer B`)
+
+        const a = yield* prompt
+          .prompt({
+            sessionID: chat.id,
+            messageID: aID,
+            agent: "build",
+            model: ref,
+            variant: "owner-variant",
+            parts: [{ type: "text", text: `${kind} external A` }],
+          })
+          .pipe(Effect.forkChild)
+        yield* llm.wait(kind === "ordinary" ? 1 : 4)
+
+        const task = yield* (
+          kind === "ordinary"
+            ? prompt.prompt({
+                sessionID: chat.id,
+                messageID: mID,
+                agent: "build",
+                model: ref,
+                variant: "owner-variant",
+                parts: [
+                  {
+                    id: taskID,
+                    type: "subtask",
+                    prompt: "same payload",
+                    description: "same payload",
+                    agent: "general",
+                    model: ref,
+                  },
+                ],
+              })
+            : prompt.command({
+                sessionID: chat.id,
+                messageID: mID,
+                command: "delegated",
+                arguments: "",
+                agent: "build",
+                model: `${ref.providerID}/${ref.modelID}`,
+                variant: "owner-variant",
+              })
+        ).pipe(Effect.forkChild)
+
+        const admittedTask = yield* pollWithTimeout(
+          sessions.messages({ sessionID: chat.id }).pipe(
+            Effect.map((messages) => {
+              const owner = messages.find((message) => message.info.id === mID)
+              const part = owner?.parts.find(
+                (candidate): candidate is SessionV1.SubtaskPart => candidate.type === "subtask",
+              )
+              return part ?? undefined
+            }),
+          ),
+          `${kind} Subtask was not admitted before B`,
+        )
+        if (kind === "ordinary") expect(admittedTask.id).toBe(taskID)
+        else expect(admittedTask.command).toBe("delegated")
+
+        const b = yield* prompt
+          .prompt({
+            sessionID: chat.id,
+            messageID: bID,
+            agent: "build",
+            model: ref,
+            variant: "later-variant",
+            parts: [{ type: "text", text: `${kind} external B` }],
+          })
+          .pipe(Effect.forkChild)
+        yield* pollWithTimeout(
+          sessions
+            .messages({ sessionID: chat.id })
+            .pipe(Effect.map((messages) => (messages.some((message) => message.info.id === bID) ? true : undefined))),
+          `${kind} B was not admitted before Subtask selection`,
+        )
+
+        yield* Deferred.succeed(gate, undefined)
+        const exits = yield* Effect.all([Fiber.await(a), Fiber.await(task), Fiber.await(b)])
+        expect(exits.every(Exit.isSuccess)).toBe(true)
+
+        const persisted = yield* sessions.messages({ sessionID: chat.id })
+        const output = persisted.find((message) =>
+          message.parts.some(
+            (part) =>
+              part.type === "tool" &&
+              part.serverProvenance?.type === "subtask-output" &&
+              part.serverProvenance.taskPartID === admittedTask.id,
+          ),
+        )
+        if (!output || output.info.role !== "assistant") throw new Error(`missing ${kind} Subtask output`)
+        const outputPart = output.parts.find(
+          (part): part is SessionV1.ToolPart =>
+            part.type === "tool" && part.serverProvenance?.type === "subtask-output",
+        )
+        expect(output.info.parentID).toBe(mID)
+        expect(output.info.modelID).toBe(ref.modelID)
+        expect(output.info.providerID).toBe(ref.providerID)
+        expect(output.info.variant).toBe("owner-variant")
+        expect(outputPart?.serverProvenance).toEqual({
+          type: "subtask-output",
+          ownerMessageID: mID,
+          taskPartID: admittedTask.id,
+        })
+        expect(outputPart?.state.status).toBe("completed")
+        if (!outputPart || outputPart.state.status !== "completed") throw new Error(`incomplete ${kind} Subtask output`)
+        const taskOutputText = outputPart.state.output
+        const continuation = persisted.find((message) =>
+          message.parts.some((part) => part.type === "text" && part.serverProvenance?.type === "subtask-continuation"),
+        )
+        if (kind === "command") {
+          const part = continuation?.parts.find(
+            (candidate): candidate is SessionV1.TextPart =>
+              candidate.type === "text" && candidate.serverProvenance?.type === "subtask-continuation",
+          )
+          expect(part?.serverProvenance).toEqual({
+            type: "subtask-continuation",
+            ownerMessageID: mID,
+            taskPartID: admittedTask.id,
+            sourceMessageID: output.info.id,
+          })
+        } else {
+          expect(continuation).toBeUndefined()
+        }
+
+        const response = persisted.find(
+          (message) =>
+            message.info.role === "assistant" && message.info.parentID === bID && message.info.summary !== true,
+        )
+        expect(response?.info.role).toBe("assistant")
+        const view = MessageV2.modelTurn(persisted)
+        expect(view.messages.findIndex((message) => message.info.id === output.info.id)).toBeLessThan(
+          view.messages.findIndex((message) => message.info.id === bID),
+        )
+        expect(view.target?.id).toBeUndefined()
+
+        const finalMessages = ((yield* llm.inputs).at(-1)?.messages ?? []) as Array<{ readonly role: string }>
+        const finalInput = JSON.stringify(finalMessages)
+        expect(taskOutputText.length).toBeGreaterThan(0)
+        expect(finalInput).toContain(outputPart.callID)
+        const labels = finalMessages.map((message) => {
+          const value = JSON.stringify(message)
+          return {
+            role: message.role,
+            output: value.includes(outputPart.callID),
+            b: value.includes(`${kind} external B`),
+          }
+        })
+        expect(
+          labels.findIndex((label) => label.b),
+          JSON.stringify(labels),
+        ).toBeGreaterThan(labels.findIndex((label) => label.output))
+        expect(finalInput.indexOf(`${kind} external B`)).toBeGreaterThan(finalInput.indexOf(outputPart.callID))
+      }
+    }),
+  15_000,
+)
+
+it.instance(
+  "G4 rejects nearby equal-output candidates for two payload-identical Subtasks under one owner",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "G4 exact task identity",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      let created = Date.now()
+      const owner = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        sessionID: chat.id,
+        role: "user",
+        agent: "build",
+        model: { ...ref, variant: "owner-variant" },
+        time: { created: created++ },
+      })
+      const ordinaryTask = PartID.ascending()
+      const commandTask = PartID.ascending()
+      for (const [id, command] of [
+        [ordinaryTask, undefined],
+        [commandTask, "delegated"],
+      ] as const) {
+        yield* sessions.updatePart({
+          id,
+          sessionID: chat.id,
+          messageID: owner.id,
+          type: "subtask",
+          prompt: "payload-identical",
+          description: "payload-identical",
+          agent: "general",
+          model: ref,
+          command,
+        })
+      }
+
+      const addWrongOutput = Effect.fnUntraced(function* (taskPartID: PartID, metadataOnly: boolean) {
+        const info = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          sessionID: chat.id,
+          role: "assistant",
+          parentID: owner.id,
+          mode: "build",
+          agent: "build",
+          providerID: ref.providerID,
+          modelID: ref.modelID,
+          variant: "wrong-variant",
+          path: { cwd: "/tmp", root: "/tmp" },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          time: { created: created++, completed: created },
+          finish: "stop",
+        })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          sessionID: chat.id,
+          messageID: info.id,
+          type: "tool",
+          callID: `wrong-${taskPartID}`,
+          tool: "task",
+          state: {
+            status: "completed",
+            input: { prompt: "payload-identical" },
+            output: "payload-identical output",
+            title: "task",
+            metadata: {},
+            time: { start: created, end: created + 1 },
+          },
+          ...(metadataOnly
+            ? { metadata: { taskPartID, source_message_id: info.id } }
+            : {
+                serverProvenance: {
+                  type: "subtask-output",
+                  ownerMessageID: owner.id,
+                  taskPartID: PartID.ascending(),
+                },
+              }),
+        })
+        return info
+      })
+      const wrong = [yield* addWrongOutput(ordinaryTask, false), yield* addWrongOutput(commandTask, true)]
+      const b = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        sessionID: chat.id,
+        role: "user",
+        agent: "build",
+        model: { ...ref, variant: "later-variant" },
+        time: { created: created++ },
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: chat.id,
+        messageID: b.id,
+        type: "text",
+        text: "G4 external B",
+      })
+      const addExactOutput = Effect.fnUntraced(function* (taskPartID: PartID, label: string) {
+        const info = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          sessionID: chat.id,
+          role: "assistant",
+          parentID: owner.id,
+          mode: "build",
+          agent: "build",
+          providerID: ref.providerID,
+          modelID: ref.modelID,
+          variant: "owner-variant",
+          path: { cwd: "/tmp", root: "/tmp" },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          time: { created: created++, completed: created },
+          finish: "tool-calls",
+        })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          sessionID: chat.id,
+          messageID: info.id,
+          type: "tool",
+          callID: `exact-${taskPartID}`,
+          tool: "task",
+          serverProvenance: { type: "subtask-output", ownerMessageID: owner.id, taskPartID },
+          state: {
+            status: "completed",
+            input: { prompt: "payload-identical" },
+            output: `${label} payload-identical output`,
+            title: "task",
+            metadata: {},
+            time: { start: created, end: created + 1 },
+          },
+        })
+        return info
+      })
+      const ordinaryOutput = yield* addExactOutput(ordinaryTask, "ordinary")
+      const commandOutput = yield* addExactOutput(commandTask, "command")
+      const commandContinuation = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        sessionID: chat.id,
+        role: "user",
+        agent: "build",
+        model: { ...ref, variant: "owner-variant" },
+        time: { created: created++ },
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: chat.id,
+        messageID: commandContinuation.id,
+        type: "text",
+        text: "command continuation",
+        synthetic: true,
+        serverProvenance: {
+          type: "subtask-continuation",
+          ownerMessageID: owner.id,
+          taskPartID: commandTask,
+          sourceMessageID: commandOutput.id,
+        },
+      })
+      const before = yield* sessions.messages({ sessionID: chat.id })
+      expect(MessageV2.modelTurn(before).target?.id).toBe(b.id)
+
+      const inputOffset = (yield* llm.inputs).length
+      const releaseB = yield* Deferred.make<void>()
+      yield* llm.hold("G4 response B", deferredAsPromise(releaseB))
+      yield* llm.text("command continuation response")
+      const loop = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* awaitWithTimeout(llm.wait(inputOffset + 1), "timed out waiting for the B provider turn", "10 seconds")
+      const newInputs = (yield* llm.inputs).slice(inputOffset)
+      const bInput = newInputs.find((input) => JSON.stringify(input.messages).includes("G4 external B"))
+      expect(bInput).toBeDefined()
+      yield* Deferred.succeed(releaseB, undefined)
+      yield* Fiber.join(loop)
+
+      const persisted = yield* sessions.messages({ sessionID: chat.id })
+      const exactOutputs = persisted.flatMap((message) =>
+        message.parts.flatMap((part) =>
+          part.type === "tool" &&
+          part.serverProvenance?.type === "subtask-output" &&
+          (part.serverProvenance.taskPartID === ordinaryTask || part.serverProvenance.taskPartID === commandTask)
+            ? [{ message, part }]
+            : [],
+        ),
+      )
+      expect(exactOutputs).toHaveLength(2)
+      expect(
+        exactOutputs
+          .map((item) =>
+            item.part.serverProvenance?.type === "subtask-output" ? item.part.serverProvenance.taskPartID : undefined,
+          )
+          .toSorted(),
+      ).toEqual([ordinaryTask, commandTask].toSorted())
+      expect(
+        exactOutputs.every((item) => item.message.info.role === "assistant" && item.message.info.parentID === owner.id),
+      ).toBe(true)
+      expect(
+        exactOutputs.every(
+          (item) =>
+            item.message.info.role === "assistant" &&
+            item.message.info.modelID === ref.modelID &&
+            item.message.info.providerID === ref.providerID &&
+            item.message.info.variant === "owner-variant" &&
+            item.part.state.status === "completed",
+        ),
+      ).toBe(true)
+      expect(wrong.every((candidate) => !exactOutputs.some((item) => item.message.info.id === candidate.id))).toBe(true)
+      expect(exactOutputs.map((item) => item.message.info.id).toSorted()).toEqual(
+        [ordinaryOutput.id, commandOutput.id].toSorted(),
+      )
+
+      const continuation = persisted
+        .flatMap((message) => message.parts.map((part) => ({ message, part })))
+        .find(
+          (item) =>
+            item.part.type === "text" &&
+            item.part.serverProvenance?.type === "subtask-continuation" &&
+            item.part.serverProvenance.taskPartID === commandTask,
+        )
+      expect(continuation?.part.type === "text" ? continuation.part.serverProvenance : undefined).toEqual({
+        type: "subtask-continuation",
+        ownerMessageID: owner.id,
+        taskPartID: commandTask,
+        sourceMessageID: commandOutput.id,
+      })
+
+      const view = MessageV2.modelTurn(persisted)
+      expect(view.messages.findIndex((message) => message.info.id === b.id)).toBeGreaterThan(
+        Math.max(
+          ...exactOutputs.map((item) => view.messages.findIndex((message) => message.info.id === item.message.info.id)),
+        ),
+      )
+      const responseB = persisted.find(
+        (message) =>
+          message.info.role === "assistant" && message.info.parentID === b.id && message.info.summary !== true,
+      )
+      expect(responseB?.info.role).toBe("assistant")
+      expect(responseB?.info.role === "assistant" ? responseB.info.finish : undefined).toBe("stop")
+      expect(responseB?.parts.some((part) => part.type === "text" && part.text === "G4 response B")).toBe(true)
+      const bInputText = JSON.stringify(bInput?.messages)
+      expect(bInputText).toContain("G4 external B")
+      for (const output of exactOutputs) {
+        expect(bInputText.indexOf(output.part.callID)).toBeLessThan(bInputText.indexOf("G4 external B"))
+      }
+    }),
+  15_000,
+)
+
+it.instance(
   "assertNotBusy fails with BusyError when loop running",
   () =>
     Effect.gen(function* () {
@@ -1295,6 +2077,122 @@ noLLMServer.instance("assertNotBusy succeeds when idle", () =>
     const exit = yield* run.assertNotBusy(chat.id).pipe(Effect.exit)
     expect(Exit.isSuccess(exit)).toBe(true)
   }),
+)
+
+noLLMServer.instance("SessionRunState keeps an acquired successor current through status transitions", () =>
+  Effect.gen(function* () {
+    const run = yield* SessionRunState.Service
+    const status = yield* SessionStatus.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    const info = yield* user(chat.id, "runner value")
+    const value = { info, parts: [] } satisfies SessionV1.WithParts
+    const activeStarted = yield* Deferred.make<void>()
+    const releaseActive = yield* Deferred.make<void>()
+    const admitted = yield* Deferred.make<void>()
+    const successorStarted = yield* Deferred.make<void>()
+    const releaseSuccessor = yield* Deferred.make<void>()
+
+    const active = yield* run
+      .ensureRunning(
+        chat.id,
+        Effect.succeed(value),
+        Deferred.succeed(activeStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseActive)),
+          Effect.as(value),
+        ),
+      )
+      .pipe(Effect.forkChild)
+    yield* Deferred.await(activeStarted)
+    const successor = yield* run
+      .submit(
+        chat.id,
+        Effect.succeed(value),
+        Deferred.succeed(admitted, undefined),
+        Deferred.succeed(successorStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseSuccessor)),
+          Effect.as(value),
+        ),
+      )
+      .pipe(Effect.forkChild)
+    yield* Deferred.await(admitted)
+
+    yield* Deferred.succeed(releaseActive, undefined)
+    yield* Fiber.join(active)
+    yield* Deferred.await(successorStarted)
+    expect((yield* status.get(chat.id)).type).toBe("busy")
+    expect(Exit.isSuccess(yield* run.assertNotBusy(chat.id).pipe(Effect.exit))).toBe(false)
+
+    yield* Deferred.succeed(releaseSuccessor, undefined)
+    yield* Fiber.join(successor)
+    expect((yield* status.get(chat.id)).type).toBe("idle")
+    expect(Exit.isSuccess(yield* run.assertNotBusy(chat.id).pipe(Effect.exit))).toBe(true)
+  }),
+)
+
+runStateRetirement.instance(
+  "SessionRunState retains the exact entry across gated Idle and replacement cancellation",
+  () =>
+    Effect.gen(function* () {
+      const run = yield* SessionRunState.Service
+      const gate = yield* RunStateRetirementGate
+      const sessionID = SessionID.make("ses_run_state_retirement")
+      const oldInfo = {
+        id: MessageID.ascending(),
+        sessionID,
+        role: "user",
+        agent: "build",
+        model: ref,
+        time: { created: Date.now() },
+      } satisfies SessionV1.User
+      const replacementInfo = {
+        ...oldInfo,
+        id: MessageID.ascending(),
+        time: { created: Date.now() + 1 },
+      } satisfies SessionV1.User
+      const oldValue = { info: oldInfo, parts: [] } satisfies SessionV1.WithParts
+      const replacementValue = { info: replacementInfo, parts: [] } satisfies SessionV1.WithParts
+      const replacementAttempted = yield* Deferred.make<void>()
+      const replacementStarted = yield* Deferred.make<void>()
+      const replacementRuns = yield* Ref.make(0)
+
+      const active = yield* run
+        .ensureRunning(sessionID, Effect.succeed(oldValue), Effect.succeed(oldValue))
+        .pipe(Effect.forkChild)
+      yield* Deferred.await(gate.idleEntered)
+      expect((yield* Ref.get(gate.statuses)).map((item) => item.type)).toEqual(["busy", "idle"])
+
+      const replacement = yield* Deferred.succeed(replacementAttempted, undefined)
+        .pipe(
+          Effect.andThen(
+            run.ensureRunning(
+              sessionID,
+              Effect.succeed(replacementValue),
+              Ref.update(replacementRuns, (count) => count + 1).pipe(
+                Effect.andThen(Deferred.succeed(replacementStarted, undefined)),
+                Effect.andThen(Effect.never),
+                Effect.as(replacementValue),
+              ),
+            ),
+          ),
+        )
+        .pipe(Effect.forkChild)
+      yield* Deferred.await(replacementAttempted)
+      yield* Deferred.succeed(gate.releaseIdle, undefined)
+
+      expect((yield* Fiber.join(active)).info.id).toBe(oldInfo.id)
+      yield* Deferred.await(replacementStarted)
+      expect(yield* Ref.get(replacementRuns)).toBe(1)
+      expect((yield* Ref.get(gate.statuses)).map((item) => item.type)).toEqual(["busy", "idle", "busy"])
+      expect(Exit.isFailure(yield* run.assertNotBusy(sessionID).pipe(Effect.exit))).toBe(true)
+
+      yield* run.cancel(sessionID)
+      const result = yield* Fiber.join(replacement)
+      expect(result.info.id).toBe(replacementInfo.id)
+      expect(yield* Ref.get(replacementRuns)).toBe(1)
+      expect((yield* Ref.get(gate.statuses)).map((item) => item.type)).toEqual(["busy", "idle", "busy", "idle"])
+      expect(Exit.isSuccess(yield* run.assertNotBusy(sessionID).pipe(Effect.exit))).toBe(true)
+    }),
 )
 
 // Shell semantics
@@ -1484,7 +2382,7 @@ unixNoLLMServer(
 
         yield* pollWithTimeout(
           Effect.gen(function* () {
-            const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+            const msgs = (yield* MessageV2.modelTurnEffect(chat.id)).messages
             const taskMsg = msgs.find((item) => item.info.role === "assistant")
             const tool = taskMsg ? toolPart(taskMsg.parts) : undefined
             if (tool?.state.status === "running" && tool.state.metadata?.output.includes("first")) return true
@@ -1718,7 +2616,7 @@ unix(
       yield* llm.wait(1)
       yield* pollWithTimeout(
         Effect.gen(function* () {
-          const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+          const msgs = (yield* MessageV2.modelTurnEffect(chat.id)).messages
           const assistant = msgs.findLast((item) => item.info.role === "assistant")
           const tool = assistant ? toolPart(assistant.parts) : undefined
           if (tool?.state.status === "running" && tool.state.metadata?.output.includes("truncation-ready")) return true

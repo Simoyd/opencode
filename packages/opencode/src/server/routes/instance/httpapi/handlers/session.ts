@@ -15,6 +15,8 @@ import { CompactionCatalog } from "@/session/compaction-catalog"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
+import { Database } from "@opencode-ai/core/database/database"
+import { PartTable } from "@opencode-ai/core/session/sql"
 import { StreamDiagnostics } from "@/diagnostic/stream"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Cause, Deferred, Effect, Option, Schema, Scope } from "effect"
@@ -60,6 +62,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const todoSvc = yield* Todo.Service
     const summary = yield* SessionSummary.Service
     const events = yield* EventV2Bridge.Service
+    const { db } = yield* Database.Service
     const scope = yield* Scope.Scope
 
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
@@ -479,12 +482,47 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return true
     })
 
+    const validCompletedToolAttachments = Effect.fn("SessionHttpApi.validCompletedToolAttachments")(function* (
+      payload: SessionV1.PartUpdateInput,
+    ) {
+      if (payload.type !== "tool" || payload.state.status !== "completed" || !payload.state.attachments) return true
+      const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: payload.sessionID }))
+      const containing = messages.find((message) => message.info.id === payload.messageID)
+      if (!containing || containing.info.role !== "assistant") return false
+
+      const persistedParts = yield* db
+        .select({ id: PartTable.id, data: PartTable.data })
+        .from(PartTable)
+        .all()
+        .pipe(Effect.orDie)
+      const occupied = new Set(persistedParts.map((part) => part.id))
+      for (const part of persistedParts) {
+        const data = part.data as Partial<SessionV1.ToolPart>
+        if (part.id === payload.id || data.type !== "tool" || data.state?.status !== "completed") continue
+        for (const attachment of data.state.attachments ?? []) occupied.add(attachment.id)
+      }
+
+      const incoming = new Set<string>()
+      for (const attachment of payload.state.attachments) {
+        if (
+          attachment.sessionID !== payload.sessionID ||
+          attachment.messageID !== payload.messageID ||
+          occupied.has(attachment.id) ||
+          incoming.has(attachment.id)
+        ) {
+          return false
+        }
+        incoming.add(attachment.id)
+      }
+      return true
+    })
+
     const updatePart = Effect.fn("SessionHttpApi.updatePart")(function* (ctx: {
       params: { sessionID: SessionID; messageID: MessageID; partID: PartID }
-      payload: typeof SessionV1.Part.Type
+      payload: typeof SessionV1.PartUpdateInput.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      const payload = ctx.payload as SessionV1.Part
+      const payload = ctx.payload as SessionV1.PartUpdateInput
       if (
         payload.id !== ctx.params.partID ||
         payload.messageID !== ctx.params.messageID ||
@@ -492,7 +530,18 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       ) {
         return yield* new HttpApiError.BadRequest({})
       }
-      return yield* session.updatePart(payload)
+      const stored = yield* session.getPart(ctx.params)
+      if (!stored || stored.type !== payload.type) {
+        return yield* new HttpApiError.BadRequest({})
+      }
+      if (!(yield* validCompletedToolAttachments(payload))) return yield* new HttpApiError.BadRequest({})
+      if (stored.type === "text" && payload.type === "text") {
+        return yield* session.updatePart({ ...payload, serverProvenance: stored.serverProvenance })
+      }
+      if (stored.type === "tool" && payload.type === "tool") {
+        return yield* session.updatePart({ ...payload, serverProvenance: stored.serverProvenance })
+      }
+      return yield* session.updatePart(payload as SessionV1.Part)
     })
 
     return handlers

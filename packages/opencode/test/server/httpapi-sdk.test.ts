@@ -345,7 +345,7 @@ describe("HttpApi SDK", () => {
 
       expect(health.response.status).toBe(200)
       expect(health.data).toMatchObject({ healthy: true })
-      expect(yield* firstEvent((signal) => sdk.global.event({ signal }))).toMatchObject({
+      expect(yield* firstEvent((signal) => sdk.global.event({}, { signal }))).toMatchObject({
         payload: { type: "server.connected" },
       })
       expect(log.response.status).toBe(200)
@@ -422,7 +422,7 @@ describe("HttpApi SDK", () => {
   serverPathParity("matches generated SDK global event stream", (serverPath) =>
     Effect.gen(function* () {
       const sdk = yield* client(serverPath)
-      const event = yield* firstEvent((signal) => sdk.global.event({ signal }))
+      const event = yield* firstEvent((signal) => sdk.global.event({}, { signal }))
       return { type: record(record(event).payload).type }
     }),
   )
@@ -628,8 +628,8 @@ describe("HttpApi SDK", () => {
             sessionID,
             messageID: seeded.message.id,
             partID: seeded.part.id,
-            part: { ...seeded.part, text: "updated message" } as NonNullable<
-              Parameters<Sdk["part"]["update"]>[0]["part"]
+            partUpdateInput: { ...seeded.part, text: "updated message" } as NonNullable<
+              Parameters<Sdk["part"]["update"]>[0]["partUpdateInput"]
             >,
           }),
         )
@@ -711,8 +711,8 @@ describe("HttpApi SDK", () => {
             sessionID,
             messageID: seeded.message.id,
             partID: seeded.part.id,
-            part: { ...seeded.part, text: "updated via sync" } as NonNullable<
-              Parameters<Sdk["part"]["update"]>[0]["part"]
+            partUpdateInput: { ...seeded.part, text: "updated via sync" } as NonNullable<
+              Parameters<Sdk["part"]["update"]>[0]["partUpdateInput"]
             >,
           }),
         )

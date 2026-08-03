@@ -140,19 +140,22 @@ export function createServerSdkContext(server: ServerConnection.Any, scope: Serv
         }
         abort.signal.addEventListener("abort", onAbort)
         try {
-          const events = await eventSdk.global.event({
-            signal: attempt.signal,
-            onSseError: (error) => {
-              if (isStreamClosed(error, attempt?.signal)) return
-              if (streamErrorLogged) return
-              streamErrorLogged = true
-              console.error("[global-sdk] event stream error", {
-                url: server.http.url,
-                fetch: eventFetch ? "platform" : "webview",
-                error,
-              })
+          const events = await eventSdk.global.event(
+            {},
+            {
+              signal: attempt.signal,
+              onSseError: (error) => {
+                if (isStreamClosed(error, attempt?.signal)) return
+                if (streamErrorLogged) return
+                streamErrorLogged = true
+                console.error("[global-sdk] event stream error", {
+                  url: server.http.url,
+                  fetch: eventFetch ? "platform" : "webview",
+                  error,
+                })
+              },
             },
-          })
+          )
           let yielded = Date.now()
           resetHeartbeat()
           for await (const event of events.stream) {

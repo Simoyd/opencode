@@ -92,6 +92,26 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
   return part.state.status === "error" && part.state.metadata?.interrupted === true
 }
 
+function stripPluginAuthoredServerProvenance<T>(part: T): T {
+  if (typeof part !== "object" || part === null) return part
+  const value = { ...part } as Record<string, unknown>
+  delete value.serverProvenance
+
+  if (value.type !== "tool" || typeof value.state !== "object" || value.state === null) return value as T
+  const state = value.state as Record<string, unknown>
+  if (state.status !== "completed" || !Array.isArray(state.attachments)) return value as T
+  value.state = {
+    ...state,
+    attachments: state.attachments.map((attachment) => {
+      if (typeof attachment !== "object" || attachment === null) return attachment
+      const nested = { ...attachment } as Record<string, unknown>
+      delete nested.serverProvenance
+      return nested
+    }),
+  }
+  return value as T
+}
+
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (
@@ -332,6 +352,11 @@ export const layer = Layer.effect(
         type: "tool",
         callID: ulid(),
         tool: TaskTool.id,
+        serverProvenance: {
+          type: "subtask-output",
+          ownerMessageID: task.messageID,
+          taskPartID: task.id,
+        },
         state: {
           status: "running",
           input: {
@@ -487,6 +512,12 @@ export const layer = Layer.effect(
         type: "text",
         text: "Summarize the task tool output above and continue with your task.",
         synthetic: true,
+        serverProvenance: {
+          type: "subtask-continuation",
+          ownerMessageID: task.messageID,
+          taskPartID: task.id,
+          sourceMessageID: assistantMessage.id,
+        },
       } satisfies SessionV1.TextPart)
     })
 
@@ -1063,7 +1094,8 @@ export const layer = Layer.effect(
         { message: info, parts: resolvedParts },
       )
 
-      const parts = yield* Effect.forEach(resolvedParts, (part) =>
+      const trustedParts = resolvedParts.map(stripPluginAuthoredServerProvenance)
+      const parts = yield* Effect.forEach(trustedParts, (part) =>
         part.type === "file" && part.mime.startsWith("image/")
           ? image.normalize(part).pipe(
               Effect.catchIf(
@@ -1236,37 +1268,30 @@ export const layer = Layer.effect(
           yield* status.set(sessionID, { type: "busy" })
           yield* slog.info("loop", { step })
 
-          let msgs = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
+          const view = yield* MessageV2.modelTurnEffect(sessionID).pipe(
             Effect.provideService(Database.Service, database),
           )
+          let msgs = view.messages
+          const {
+            target: lastUser,
+            assistant: lastAssistant,
+            terminal: lastTerminal,
+            tasks,
+            reminderBoundary,
+            pendingExternal,
+          } = view
 
-          const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
-
-          if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
-
-          const lastAssistantMsg = msgs.findLast(
-            (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
+          const terminalAssistantMsg = msgs.findLast(
+            (msg) => msg.info.role === "assistant" && msg.info.id === lastTerminal?.id,
           )
-          // Some providers return "stop" even when the assistant message contains
-          // tool calls. Keep the loop running so tool results can be sent back to
-          // the model, but ignore cleanup-marked interrupted orphans.
-          const hasToolCalls =
-            lastAssistantMsg?.parts.some(
-              (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
-            ) ?? false
 
-          if (
-            lastAssistant?.finish &&
-            !["tool-calls"].includes(lastAssistant.finish) &&
-            !hasToolCalls &&
-            MessageV2.compareHydratedMessagePhysicalOrder(lastUser, lastAssistant) < 0
-          ) {
-            const orphan = lastAssistantMsg?.parts.find(
+          if (tasks.length === 0 && !lastUser) {
+            const orphan = terminalAssistantMsg?.parts.find(
               (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
             )
             if (orphan) {
               yield* slog.warn("loop exit with orphaned interrupted tool", {
-                messageID: lastAssistant.id,
+                messageID: lastTerminal!.id,
                 tool: orphan.tool,
                 callID: orphan.callID,
               })
@@ -1276,38 +1301,52 @@ export const layer = Layer.effect(
           }
 
           step++
+          const taskExecution = tasks[0]
+          const task = taskExecution?.task
+          const currentUser = taskExecution?.owner.info ?? lastUser
+          if (!currentUser) throw new Error("A runnable task or current model target must have a user owner")
           if (step === 1)
             yield* title({
               session,
-              modelID: lastUser.model.modelID,
-              providerID: lastUser.model.providerID,
+              modelID: currentUser.model.modelID,
+              providerID: currentUser.model.providerID,
               history: msgs,
             }).pipe(Effect.ignore, Effect.forkIn(scope))
 
-          const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
-          const task = tasks.pop()
+          const model = yield* getModel(currentUser.model.providerID, currentUser.model.modelID, sessionID)
 
           if (task?.type === "subtask") {
-            yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
+            yield* handleSubtask({
+              task,
+              model,
+              lastUser: currentUser,
+              sessionID,
+              session,
+              msgs: msgs.filter((msg) => MessageV2.compareHydratedMessagePhysicalOrder(msg, taskExecution!.owner) <= 0),
+            })
             continue
           }
 
           if (task?.type === "compaction") {
-            const result = yield* compaction.process({
+            yield* compaction.process({
               messages: msgs,
-              parentID: lastUser.id,
+              parentID: task.messageID,
               sessionID,
               auto: task.auto,
               overflow: task.overflow,
             })
-            if (result === "stop") break
+            // A failed or unusable summary is terminal for this compaction attempt,
+            // but another durable external turn may already belong to this drain.
             continue
           }
 
+          if (!lastUser) break
+
           if (
-            lastFinished &&
-            lastFinished.summary !== true &&
-            (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
+            lastAssistant &&
+            MessageV2.classifyAssistant(lastAssistant) === "successful" &&
+            lastAssistant.summary !== true &&
+            (yield* compaction.isOverflow({ tokens: lastAssistant.tokens, model }))
           ) {
             yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
             continue
@@ -1323,7 +1362,7 @@ export const layer = Layer.effect(
           }
           const maxSteps = agent.steps ?? Infinity
           const isLastStep = step >= maxSteps
-          msgs = yield* SessionReminders.apply({ messages: msgs, agent, session }).pipe(
+          msgs = yield* SessionReminders.apply({ messages: msgs, targetID: lastUser.id, agent, session }).pipe(
             Effect.provideService(RuntimeFlags.Service, flags),
             Effect.provideService(FSUtil.Service, fsys),
             Effect.provideService(Session.Service, sessions),
@@ -1365,7 +1404,7 @@ export const layer = Layer.effect(
             .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
 
           const outcome: "break" | "continue" = yield* Effect.gen(function* () {
-            const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
+            const lastUserMsg = msgs.find((message) => message.info.id === lastUser.id)
             const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
             const promptOps = yield* ops()
 
@@ -1396,10 +1435,8 @@ export const layer = Layer.effect(
 
             if (step === 1) yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore)
 
-            if (step > 1 && lastFinished) {
-              for (const m of msgs) {
-                if (m.info.role !== "user" || MessageV2.compareHydratedMessagePhysicalOrder(m, lastFinished) <= 0)
-                  continue
+            if (step > 1 && reminderBoundary) {
+              for (const m of pendingExternal) {
                 for (const p of m.parts) {
                   if (p.type !== "text" || p.ignored || p.synthetic) continue
                   if (!p.text.trim()) continue
@@ -1416,7 +1453,34 @@ export const layer = Layer.effect(
             }
 
             msgs = yield* SessionStagedContext.injectAndConsume({ sessionID, lastUser, messages: msgs })
+            const trustedProvenance = new Map<string, SessionV1.ContinuityProvenance>(
+              msgs.flatMap((message) =>
+                message.parts.flatMap((part) =>
+                  (part.type === "text" || part.type === "tool") && part.serverProvenance
+                    ? [[`${part.sessionID}\n${part.messageID}\n${part.id}`, part.serverProvenance] as const]
+                    : [],
+                ),
+              ),
+            )
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+            const partIdentityCounts = new Map<string, number>()
+            for (const message of msgs) {
+              for (const part of message.parts) {
+                const key = `${part.sessionID}\n${part.messageID}\n${part.id}`
+                partIdentityCounts.set(key, (partIdentityCounts.get(key) ?? 0) + 1)
+              }
+            }
+            msgs = msgs.map((message) => ({
+              ...message,
+              parts: message.parts.map((part) => {
+                const clean = stripPluginAuthoredServerProvenance(part)
+                const key = `${part.sessionID}\n${part.messageID}\n${part.id}`
+                const provenance = partIdentityCounts.get(key) === 1 ? trustedProvenance.get(key) : undefined
+                return provenance && (clean.type === "text" || clean.type === "tool")
+                  ? { ...clean, serverProvenance: provenance }
+                  : clean
+              }),
+            }))
 
             const [skills, env, instructions, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
@@ -1447,8 +1511,10 @@ export const layer = Layer.effect(
               return "break" as const
             }
 
-            const finished = handle.message.finish && !["tool-calls", "unknown"].includes(handle.message.finish)
-            if (finished && !handle.message.error) {
+            const finished =
+              MessageV2.classifyAssistant(handle.message) === "successful" &&
+              !["tool-calls", "unknown"].includes(handle.message.finish!)
+            if (finished) {
               if (format.type === "json_schema") {
                 handle.message.error = new SessionV1.StructuredOutputError({
                   message: "Model did not produce structured output",

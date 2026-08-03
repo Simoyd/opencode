@@ -6,6 +6,7 @@ import * as Log from "@opencode-ai/core/util/log"
 import { setTimeout as sleep } from "node:timers/promises"
 import { CopilotModels } from "./models"
 import { MessageV2 } from "@/session/message-v2"
+import type { TextPart } from "@opencode-ai/core/v1/session"
 
 const log = Log.create({ service: "plugin.copilot" })
 
@@ -389,9 +390,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
         parts?.data.parts?.some(
           (part) =>
             part.type === "compaction" ||
-            // Auto-compaction resumes via a synthetic user text part. Treat only
-            // that marked followup as agent-initiated so manual prompts stay user-initiated.
-            (part.type === "text" && part.synthetic && part.metadata?.compaction_continue === true),
+            (part.type === "text" && (part as TextPart).serverProvenance?.type === "compaction-continuation"),
         )
       ) {
         output.headers["x-initiator"] = "agent"

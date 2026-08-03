@@ -5,7 +5,7 @@ import { Agent } from "@/agent/agent"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { InstanceState } from "@/effect/instance-state"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { PartID } from "./schema"
+import { MessageID, PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
 import { Session } from "./session"
 import PROMPT_PLAN from "./prompt/plan.txt"
@@ -14,14 +14,17 @@ import PLAN_MODE from "./prompt/plan-mode.txt"
 
 export const apply = Effect.fn("SessionReminders.apply")(function* (input: {
   messages: SessionV1.WithParts[]
+  targetID: MessageID
   agent: Agent.Info
   session: Session.Info
 }) {
   const flags = yield* RuntimeFlags.Service
   const fsys = yield* FSUtil.Service
   const sessions = yield* Session.Service
-  const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
-  if (!userMessage) return input.messages
+  const userMessage = input.messages.find((message) => message.info.id === input.targetID)
+  if (!userMessage || userMessage.info.role !== "user") {
+    throw new Error(`Reminder target is not a projected user message: ${input.targetID}`)
+  }
 
   if (!flags.experimentalPlanMode) {
     if (input.agent.name === "plan") {

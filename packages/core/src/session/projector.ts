@@ -99,15 +99,6 @@ function messageStructure(data: typeof MessageTable.$inferInsert.data) {
   })
 }
 
-function partIsStructural(data: typeof PartTable.$inferInsert.data | undefined) {
-  if (!data) return false
-  const value = data as Record<string, unknown>
-  if (value.type === "compaction") return true
-  if (value.type !== "text") return false
-  const metadata = value.metadata as Record<string, unknown> | undefined
-  return value.synthetic === true || metadata?.compaction_replay === true || metadata?.compaction_continue === true
-}
-
 function applyUsage(
   db: DatabaseService,
   sessionID: (typeof SessionV1.Event.MessageUpdated.Type)["data"]["sessionID"],

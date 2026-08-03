@@ -427,12 +427,19 @@ export const layer = Layer.effect(
     ) {
       const [cmd, ...args] = mcp.command
       const cwd = yield* InstanceState.directory
+      const environment = Environment.userToolEnv(
+        process.env,
+        cmd === "opencode" ? { BUN_BE_BUN: "1" } : {},
+        mcp.environment,
+      )
       const transport = new StdioClientTransport({
         stderr: "pipe",
         command: cmd,
         args,
         cwd,
-        env: Environment.userToolEnv(process.env, cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}, mcp.environment),
+        env: Object.fromEntries(
+          Object.entries(environment).filter((entry): entry is [string, string] => entry[1] !== undefined),
+        ),
       })
       transport.stderr?.on("data", (chunk: Buffer) => {
         log.info(`mcp stderr: ${chunk.toString()}`, { key })

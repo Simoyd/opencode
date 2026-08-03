@@ -522,7 +522,7 @@ export const SessionApi = HttpApi.make("session")
         HttpApiEndpoint.patch("updatePart", SessionPaths.updatePart, {
           params: { sessionID: SessionID, messageID: MessageID, partID: PartID },
           query: WorkspaceRoutingQuery,
-          payload: SessionV1.Part,
+          payload: SessionV1.PartUpdateInput,
           success: described(SessionV1.Part, "Successfully updated part"),
           error: [HttpApiError.BadRequest, ApiNotFoundError],
         }).annotateMerge(

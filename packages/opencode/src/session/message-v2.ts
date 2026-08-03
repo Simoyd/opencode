@@ -545,11 +545,11 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
     )
 })
 
-export function filterCompacted(msgs: Iterable<WithParts>) {
+function selectCompacted(physical: WithParts[]) {
   const result = [] as WithParts[]
   const completed = new Set<string>()
   let retain: MessageID | undefined
-  for (const msg of msgs) {
+  for (const msg of [...physical].reverse()) {
     result.push(msg)
     if (retain) {
       if (msg.info.id === retain) break
@@ -563,44 +563,414 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
       if (msg.info.id === retain) break
       continue
     }
-    if (msg.info.role === "user" && completed.has(msg.info.id) && msg.parts.some((part) => part.type === "compaction"))
-      break
-    if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error)
-      completed.add(msg.info.parentID)
+    if (isUsableCompactionSummary(msg)) completed.add(msg.info.parentID)
   }
   result.reverse()
-  const compactionIndex = result.findLastIndex(
-    (msg) =>
-      msg.info.role === "user" &&
-      msg.parts.some((item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined),
-  )
-  const compaction = result[compactionIndex]
-  const part = compaction?.parts.find(
-    (item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined,
-  )
-  const summaryIndex = compaction
-    ? result.findIndex(
-        (msg, index) =>
-          index > compactionIndex &&
-          msg.info.role === "assistant" &&
-          msg.info.summary &&
-          msg.info.parentID === compaction.info.id,
-      )
-    : -1
-  const tailIndex = part?.tail_start_id ? result.findIndex((msg) => msg.info.id === part.tail_start_id) : -1
-  if (tailIndex >= 0 && tailIndex < compactionIndex && summaryIndex > compactionIndex) {
-    return [
-      ...result.slice(compactionIndex, summaryIndex + 1),
-      ...result.slice(tailIndex, compactionIndex),
-      ...result.slice(summaryIndex + 1),
-    ]
-  }
   return result
 }
 
-export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
-  return filterCompacted(yield* stream(sessionID))
-})
+export type TerminalClassification = "successful" | "failed" | "pending"
+
+export function classifyAssistant(message: Assistant): TerminalClassification {
+  if (message.error || message.finish === "error") return "failed"
+  if (message.finish !== undefined) return "successful"
+  return "pending"
+}
+
+function normalizedSummaryText(message: WithParts) {
+  return message.parts
+    .filter((part): part is SessionV1.TextPart => part.type === "text")
+    .map((part) => part.text.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim()
+}
+
+export function isUsableCompactionSummary(
+  message: WithParts,
+): message is WithParts & { info: Assistant & { summary: true } } {
+  return (
+    message.info.role === "assistant" &&
+    message.info.summary === true &&
+    classifyAssistant(message.info) === "successful" &&
+    normalizedSummaryText(message).length > 0
+  )
+}
+
+export type TaskExecutionState =
+  | "unstarted"
+  | "attempted-incomplete"
+  | "terminal-failure"
+  | "terminal-success"
+  | "terminal-tool-error"
+
+export interface TaskExecution {
+  owner: WithParts & { info: User }
+  task: CompactionPart | SubtaskPart
+  outputs: WithParts[]
+  state: TaskExecutionState
+}
+
+interface OwnershipEdge {
+  parent: MessageID
+  order: number
+}
+
+function taskPartsOfOwner(message: WithParts) {
+  if (message.info.role !== "user") return []
+  const tasks = message.parts.filter(
+    (part): part is CompactionPart | SubtaskPart =>
+      (part.type === "compaction" || part.type === "subtask") && part.messageID === message.info.id,
+  )
+  const compactions = tasks.filter((part) => part.type === "compaction")
+  return compactions.length <= 1 ? tasks : tasks.filter((part) => part.type === "subtask")
+}
+
+function taskToolParts(message: WithParts) {
+  return message.parts.filter((part): part is ToolPart => part.type === "tool" && part.tool === "task")
+}
+
+function matchedSubtaskTool(execution: TaskExecution & { task: SubtaskPart }, output: WithParts) {
+  const tools = taskToolParts(output).filter(
+    (part) =>
+      part.serverProvenance?.type === "subtask-output" &&
+      part.serverProvenance.ownerMessageID === execution.owner.info.id &&
+      part.serverProvenance.taskPartID === execution.task.id,
+  )
+  return tools.length === 1 ? tools[0] : undefined
+}
+
+function classifyTask(execution: TaskExecution): TaskExecutionState {
+  if (execution.outputs.length === 0) return "unstarted"
+  if (
+    execution.outputs.some((output) => output.info.role === "assistant" && classifyAssistant(output.info) === "failed")
+  ) {
+    return "terminal-failure"
+  }
+  if (execution.task.type === "compaction") {
+    return execution.outputs.some(isUsableCompactionSummary) ? "terminal-success" : "attempted-incomplete"
+  }
+  const output = execution.outputs[0]
+  if (!output || output.info.role !== "assistant" || classifyAssistant(output.info) !== "successful") {
+    return "attempted-incomplete"
+  }
+  const tool = matchedSubtaskTool(execution as TaskExecution & { task: SubtaskPart }, output)
+  if (tool?.state.status === "completed") return "terminal-success"
+  if (tool?.state.status === "error") return "terminal-tool-error"
+  return "attempted-incomplete"
+}
+
+function deriveTaskExecutions(physical: WithParts[]) {
+  const executions = physical.flatMap((message) => {
+    if (message.info.role !== "user") return []
+    return taskPartsOfOwner(message).map(
+      (task): TaskExecution => ({
+        owner: message as WithParts & { info: User },
+        task,
+        outputs: [],
+        state: "unstarted",
+      }),
+    )
+  })
+  const byOwner = new Map<MessageID, TaskExecution[]>()
+  for (const execution of executions) {
+    const current = byOwner.get(execution.owner.info.id)
+    if (current) current.push(execution)
+    else byOwner.set(execution.owner.info.id, [execution])
+  }
+
+  for (const [ownerID, local] of byOwner) {
+    const compaction = local.find((execution) => execution.task.type === "compaction")
+    if (compaction) {
+      compaction.outputs.push(
+        ...physical.filter(
+          (message) =>
+            message.info.role === "assistant" && message.info.parentID === ownerID && message.info.summary === true,
+        ),
+      )
+    }
+
+    const subtasks = new Map(
+      local
+        .filter((execution): execution is TaskExecution & { task: SubtaskPart } => execution.task.type === "subtask")
+        .map((execution) => [execution.task.id, execution]),
+    )
+    for (const output of physical) {
+      if (output.info.role !== "assistant" || output.info.parentID !== ownerID) continue
+      for (const part of taskToolParts(output)) {
+        const provenance = part.serverProvenance
+        if (provenance?.type !== "subtask-output" || provenance.ownerMessageID !== ownerID) continue
+        const execution = subtasks.get(provenance.taskPartID)
+        if (!execution || execution.outputs.some((item) => item.info.id === output.info.id)) continue
+        execution.outputs.push(output)
+      }
+    }
+  }
+  for (const execution of executions) execution.state = classifyTask(execution)
+  return executions
+}
+
+function sameProvenance(left: SessionV1.ContinuityProvenance, right: SessionV1.ContinuityProvenance) {
+  if (left.type !== right.type || left.ownerMessageID !== right.ownerMessageID) return false
+  if (left.type === "compaction-replay" && right.type === "compaction-replay") {
+    return left.sourceMessageID === right.sourceMessageID
+  }
+  if (left.type === "subtask-output" && right.type === "subtask-output") {
+    return left.taskPartID === right.taskPartID
+  }
+  if (left.type === "subtask-continuation" && right.type === "subtask-continuation") {
+    return left.taskPartID === right.taskPartID && left.sourceMessageID === right.sourceMessageID
+  }
+  return left.type === "compaction-continuation" && right.type === "compaction-continuation"
+}
+
+function generatedProvenance(message: WithParts & { info: User }) {
+  const provenances = message.parts.flatMap((part) =>
+    part.type === "text" && part.serverProvenance ? [part.serverProvenance] : [],
+  )
+  const first = provenances[0]
+  if (!first || first.type === "subtask-output") return
+  return provenances.every((item) => sameProvenance(item, first)) ? first : undefined
+}
+
+function qualifyGenerated(physical: WithParts[], executions: TaskExecution[], indexes: ReadonlyMap<MessageID, number>) {
+  const generated = new Map<MessageID, MessageID>()
+  const byMessageID = new Map(physical.map((message) => [message.info.id, message]))
+  const compactions = new Map(
+    executions
+      .filter(
+        (execution): execution is TaskExecution & { task: CompactionPart } =>
+          execution.task.type === "compaction" && execution.state === "terminal-success",
+      )
+      .map((execution) => [execution.owner.info.id, execution]),
+  )
+  const subtasks = new Map(
+    executions
+      .filter((execution): execution is TaskExecution & { task: SubtaskPart } => execution.task.type === "subtask")
+      .map((execution) => [execution.task.id, execution]),
+  )
+
+  for (const candidate of physical) {
+    if (candidate.info.role !== "user") continue
+    const provenance = generatedProvenance(candidate as WithParts & { info: User })
+    if (!provenance) continue
+    const candidateIndex = indexes.get(candidate.info.id)!
+
+    if (provenance.type === "compaction-replay" || provenance.type === "compaction-continuation") {
+      const execution = compactions.get(provenance.ownerMessageID)
+      const summary = execution?.outputs.find(isUsableCompactionSummary)
+      if (!execution || !summary || indexes.get(summary.info.id)! >= candidateIndex) continue
+      if (provenance.type === "compaction-replay") {
+        const source = byMessageID.get(provenance.sourceMessageID)
+        if (
+          !source ||
+          source.info.role !== "user" ||
+          indexes.get(source.info.id)! >= indexes.get(execution.owner.info.id)! ||
+          source.parts.some((part) => part.type === "compaction")
+        ) {
+          continue
+        }
+      }
+      generated.set(candidate.info.id, execution.owner.info.id)
+      continue
+    }
+
+    const execution = subtasks.get(provenance.taskPartID)
+    if (
+      !execution ||
+      execution.owner.info.id !== provenance.ownerMessageID ||
+      !execution.task.command ||
+      (execution.state !== "terminal-success" && execution.state !== "terminal-tool-error")
+    ) {
+      continue
+    }
+    const output = execution.outputs.find((item) => item.info.id === provenance.sourceMessageID)
+    if (!output || indexes.get(output.info.id)! >= candidateIndex) continue
+    generated.set(candidate.info.id, execution.owner.info.id)
+  }
+  return generated
+}
+
+interface PhysicalAnalysis {
+  physical: WithParts[]
+  indexes: Map<MessageID, number>
+  executions: TaskExecution[]
+  generated: Map<MessageID, MessageID>
+  external: Set<MessageID>
+  matchedOutputs: Set<MessageID>
+  rejectedTaskOutputs: Set<MessageID>
+}
+
+function analyzePhysical(messages: WithParts[]): PhysicalAnalysis {
+  const physical = [...messages].sort(compareHydratedMessagePhysicalOrder)
+  const indexes = new Map(physical.map((message, index) => [message.info.id, index]))
+  const candidates = deriveTaskExecutions(physical)
+  const generated = qualifyGenerated(physical, candidates, indexes)
+  const executions = candidates.filter((execution) => !generated.has(execution.owner.info.id))
+  const owners = new Set(executions.map((execution) => execution.owner.info.id))
+  const external = new Set(
+    physical
+      .filter(
+        (message) =>
+          message.info.role === "user" &&
+          !owners.has(message.info.id) &&
+          !message.parts.some((part) => part.type === "compaction" || part.type === "subtask") &&
+          !generated.has(message.info.id),
+      )
+      .map((message) => message.info.id),
+  )
+  const matchedOutputs = new Set(executions.flatMap((execution) => execution.outputs.map((output) => output.info.id)))
+  const subtaskOwners = new Set(
+    executions.filter((execution) => execution.task.type === "subtask").map((execution) => execution.owner.info.id),
+  )
+  const rejectedTaskOutputs = new Set(
+    physical
+      .filter(
+        (message) =>
+          message.info.role === "assistant" &&
+          subtaskOwners.has(message.info.parentID) &&
+          taskToolParts(message).length > 0 &&
+          !matchedOutputs.has(message.info.id),
+      )
+      .map((message) => message.info.id),
+  )
+  return { physical, indexes, executions, generated, external, matchedOutputs, rejectedTaskOutputs }
+}
+
+function isTerminalResponse(message: WithParts) {
+  if (message.info.role !== "assistant") return false
+  const terminal = classifyAssistant(message.info)
+  if (terminal === "failed") return true
+  return terminal === "successful" && message.info.finish !== "tool-calls" && message.info.finish !== "unknown"
+}
+
+function hasUnresolvedModelToolCall(message: WithParts) {
+  return message.parts.some(
+    (part) =>
+      part.type === "tool" &&
+      !part.metadata?.providerExecuted &&
+      !(part.state.status === "error" && part.state.metadata?.interrupted === true),
+  )
+}
+
+function isOrdinaryFinalResponse(message: WithParts, analysis: PhysicalAnalysis) {
+  if (message.info.role !== "assistant") return false
+  return (
+    !analysis.matchedOutputs.has(message.info.id) &&
+    message.info.summary !== true &&
+    !analysis.generated.has(message.info.parentID) &&
+    !hasUnresolvedModelToolCall(message) &&
+    isTerminalResponse(message)
+  )
+}
+
+function isGeneratedFinalResponse(message: WithParts, analysis: PhysicalAnalysis) {
+  return (
+    message.info.role === "assistant" && analysis.generated.has(message.info.parentID) && isTerminalResponse(message)
+  )
+}
+
+function projectTaskContinuity(selected: WithParts[], analysis: PhysicalAnalysis) {
+  const selectedIDs = new Set(selected.map((message) => message.info.id))
+  const byID = new Map(selected.map((message) => [message.info.id, message]))
+  const edges = new Map<MessageID, OwnershipEdge>()
+  const assign = (child: WithParts, parentID: MessageID, order: number) => {
+    if (
+      child.info.id === parentID ||
+      !selectedIDs.has(child.info.id) ||
+      !byID.has(parentID) ||
+      edges.has(child.info.id)
+    ) {
+      return false
+    }
+    edges.set(child.info.id, { parent: parentID, order })
+    return true
+  }
+
+  for (const execution of analysis.executions) {
+    if (!selectedIDs.has(execution.owner.info.id)) continue
+    for (const output of execution.outputs) assign(output, execution.owner.info.id, 0)
+  }
+
+  for (const [messageID, ownerID] of analysis.generated) {
+    const message = byID.get(messageID)
+    if (message) assign(message, ownerID, 2)
+  }
+
+  for (const message of selected) {
+    if (message.info.role !== "assistant" || !analysis.generated.has(message.info.parentID)) continue
+    assign(message, message.info.parentID, 0)
+  }
+
+  for (const message of selected) {
+    if (message.info.role !== "assistant" || !isOrdinaryFinalResponse(message, analysis)) continue
+    const parentID = message.info.parentID
+    const order = analysis.executions.some((execution) => execution.owner.info.id === parentID) ? 3 : 0
+    assign(message, message.info.parentID, order)
+  }
+
+  for (const message of selected) {
+    const index = analysis.indexes.get(message.info.id)!
+    const enclosing = analysis.executions
+      .filter((execution) => {
+        if (execution.task.type !== "compaction" || execution.state !== "terminal-success") return false
+        if (!execution.task.tail_start_id || !selectedIDs.has(execution.owner.info.id)) return false
+        const tail = analysis.indexes.get(execution.task.tail_start_id)
+        const end = analysis.indexes.get(execution.owner.info.id)
+        return tail !== undefined && end !== undefined && tail <= index && index < end
+      })
+      .sort((left, right) => analysis.indexes.get(left.owner.info.id)! - analysis.indexes.get(right.owner.info.id)!)[0]
+    if (enclosing) assign(message, enclosing.owner.info.id, 1)
+  }
+
+  const cyclic = new Set<MessageID>()
+  for (const message of selected) {
+    const path = [] as MessageID[]
+    const seen = new Map<MessageID, number>()
+    let current: MessageID | undefined = message.info.id
+    while (current && edges.has(current)) {
+      const found = seen.get(current)
+      if (found !== undefined) {
+        for (const id of path.slice(found)) cyclic.add(id)
+        break
+      }
+      seen.set(current, path.length)
+      path.push(current)
+      current = edges.get(current)?.parent
+    }
+  }
+  for (const id of cyclic) edges.delete(id)
+
+  const children = new Map<MessageID, WithParts[]>()
+  for (const message of selected) {
+    const edge = edges.get(message.info.id)
+    if (!edge) continue
+    const list = children.get(edge.parent)
+    if (list) list.push(message)
+    else children.set(edge.parent, [message])
+  }
+  for (const list of children.values()) {
+    list.sort((left, right) => {
+      const order = edges.get(left.info.id)!.order - edges.get(right.info.id)!.order
+      if (order !== 0) return order
+      return analysis.indexes.get(left.info.id)! - analysis.indexes.get(right.info.id)!
+    })
+  }
+
+  const result = [] as WithParts[]
+  const added = new Set<MessageID>()
+  const emit = (message: WithParts) => {
+    if (added.has(message.info.id)) return
+    added.add(message.info.id)
+    result.push(message)
+    for (const child of children.get(message.info.id) ?? []) emit(child)
+  }
+  for (const message of selected) {
+    if (!edges.has(message.info.id)) emit(message)
+  }
+  for (const message of selected) emit(message)
+  return result
+}
 
 const physicalOrderTextEncoder = new TextEncoder()
 
@@ -623,30 +993,78 @@ export function compareHydratedMessagePhysicalOrder(left: Info | WithParts, righ
   return compareUtf8Binary(leftInfo.id, rightInfo.id)
 }
 
-// filterCompacted reorders messages for model consumption, so derive turn
-// bindings and pending work from a physically ordered copy.
-export function latest(msgs: WithParts[]) {
-  let user: User | undefined
-  let assistant: Assistant | undefined
-  let finished: Assistant | undefined
-  let finishedIndex = -1
-  const ordered = [...msgs].sort(compareHydratedMessagePhysicalOrder)
-  for (const [index, msg] of ordered.entries()) {
-    const info = msg.info
-    if (info.role === "user") user = info
-    if (info.role === "assistant") assistant = info
-    if (info.role === "assistant" && info.finish) {
-      finished = info
-      finishedIndex = index
-    }
-  }
-  const tasks = ordered
-    .slice(finishedIndex + 1)
-    .flatMap((m) =>
-      m.parts.filter((p): p is CompactionPart | SubtaskPart => p.type === "compaction" || p.type === "subtask"),
+export function modelTurn(messages: WithParts[]) {
+  const analysis = analyzePhysical(messages)
+  const selected = selectCompacted(analysis.physical).filter(
+    (message) => !analysis.rejectedTaskOutputs.has(message.info.id),
+  )
+  const selectedIDs = new Set(selected.map((message) => message.info.id))
+  const projected = projectTaskContinuity(selected, analysis)
+  const ordinaryFinal = (message: WithParts) =>
+    selectedIDs.has(message.info.id) && isOrdinaryFinalResponse(message, analysis)
+  const answered = new Set(
+    selected.flatMap((message) =>
+      message.info.role === "assistant" && ordinaryFinal(message) ? [message.info.parentID] : [],
+    ),
+  )
+  const generatedAnswered = new Set(
+    selected.flatMap((message) =>
+      message.info.role === "assistant" && isGeneratedFinalResponse(message, analysis) ? [message.info.parentID] : [],
+    ),
+  )
+  const pendingExternal = projected.filter(
+    (message): message is WithParts & { info: User } =>
+      message.info.role === "user" && analysis.external.has(message.info.id) && !answered.has(message.info.id),
+  )
+  const pendingGenerated = analysis.physical.filter(
+    (message): message is WithParts & { info: User } =>
+      selectedIDs.has(message.info.id) &&
+      message.info.role === "user" &&
+      analysis.generated.has(message.info.id) &&
+      !generatedAnswered.has(message.info.id),
+  )
+  const pendingSubtask = analysis.executions
+    .filter(
+      (execution) =>
+        selectedIDs.has(execution.owner.info.id) &&
+        execution.task.type === "subtask" &&
+        !execution.task.command &&
+        (execution.state === "terminal-success" || execution.state === "terminal-tool-error") &&
+        !answered.has(execution.owner.info.id),
     )
-  return { user, assistant, finished, tasks }
+    .sort((left, right) => analysis.indexes.get(left.owner.info.id)! - analysis.indexes.get(right.owner.info.id)!)
+  const targetMessage = pendingExternal.at(-1) ?? pendingGenerated.at(-1) ?? pendingSubtask.at(-1)?.owner
+  const target = targetMessage?.info.role === "user" ? targetMessage.info : undefined
+  const assistantMessage = target
+    ? analysis.physical.findLast(
+        (message) =>
+          selectedIDs.has(message.info.id) &&
+          message.info.role === "assistant" &&
+          message.info.parentID === target.id &&
+          !analysis.matchedOutputs.has(message.info.id) &&
+          message.info.summary !== true,
+      )
+    : undefined
+  const assistant = assistantMessage?.info.role === "assistant" ? assistantMessage.info : undefined
+  const terminalMessage = projected.findLast(ordinaryFinal)
+  const terminal = terminalMessage?.info.role === "assistant" ? terminalMessage.info : undefined
+  const boundary = projected.findLastIndex(ordinaryFinal)
+  const reminderBoundary = boundary >= 0 ? projected[boundary] : undefined
+  const reminders = projected
+    .slice(boundary + 1)
+    .filter(
+      (message): message is WithParts & { info: User } =>
+        message.info.role === "user" && analysis.external.has(message.info.id) && !answered.has(message.info.id),
+    )
+  const tasks = analysis.executions.filter(
+    (execution) => selectedIDs.has(execution.owner.info.id) && execution.state === "unstarted",
+  )
+  return { messages: projected, tasks, target, assistant, terminal, reminderBoundary, pendingExternal: reminders }
 }
+
+export const modelTurnEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
+  return modelTurn(yield* stream(sessionID))
+})
 
 export function fromError(
   e: unknown,

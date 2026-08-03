@@ -75,6 +75,30 @@ const partBase = {
   messageID: MessageID,
 }
 
+export const ContinuityProvenance = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("compaction-replay"),
+    ownerMessageID: MessageID,
+    sourceMessageID: MessageID,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("compaction-continuation"),
+    ownerMessageID: MessageID,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("subtask-output"),
+    ownerMessageID: MessageID,
+    taskPartID: PartID,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("subtask-continuation"),
+    ownerMessageID: MessageID,
+    taskPartID: PartID,
+    sourceMessageID: MessageID,
+  }),
+]).annotate({ discriminator: "type", identifier: "ContinuityProvenance" })
+export type ContinuityProvenance = Types.DeepMutable<Schema.Schema.Type<typeof ContinuityProvenance>>
+
 export const SnapshotPart = Schema.Struct({
   ...partBase,
   type: Schema.Literal("snapshot"),
@@ -90,7 +114,7 @@ export const PatchPart = Schema.Struct({
 }).annotate({ identifier: "PatchPart" })
 export type PatchPart = Types.DeepMutable<Schema.Schema.Type<typeof PatchPart>>
 
-export const TextPart = Schema.Struct({
+const textPartFields = {
   ...partBase,
   type: Schema.Literal("text"),
   text: Schema.String,
@@ -103,6 +127,11 @@ export const TextPart = Schema.Struct({
     }),
   ),
   metadata: Schema.optional(Schema.Record(Schema.String, Schema.Any)),
+}
+
+export const TextPart = Schema.Struct({
+  ...textPartFields,
+  serverProvenance: Schema.optional(ContinuityProvenance),
 }).annotate({ identifier: "TextPart" })
 export type TextPart = Types.DeepMutable<Schema.Schema.Type<typeof TextPart>>
 
@@ -303,13 +332,18 @@ export const ToolState = Schema.Union([
 })
 export type ToolState = ToolStatePending | ToolStateRunning | ToolStateCompleted | ToolStateError
 
-export const ToolPart = Schema.Struct({
+const toolPartFields = {
   ...partBase,
   type: Schema.Literal("tool"),
   callID: Schema.String,
   tool: Schema.String,
   state: ToolState,
   metadata: Schema.optional(Schema.Record(Schema.String, Schema.Any)),
+}
+
+export const ToolPart = Schema.Struct({
+  ...toolPartFields,
+  serverProvenance: Schema.optional(ContinuityProvenance),
 }).annotate({ identifier: "ToolPart" })
 export type ToolPart = Omit<Types.DeepMutable<Schema.Schema.Type<typeof ToolPart>>, "state"> & {
   state: ToolState
@@ -380,6 +414,22 @@ export type Part =
   | AgentPart
   | RetryPart
   | CompactionPart
+
+export const PartUpdateInput = Schema.Union([
+  Schema.Struct(textPartFields).annotate({ identifier: "TextPartUpdateInput" }),
+  SubtaskPart,
+  ReasoningPart,
+  FilePart,
+  Schema.Struct(toolPartFields).annotate({ identifier: "ToolPartUpdateInput" }),
+  StepStartPart,
+  StepFinishPart,
+  SnapshotPart,
+  PatchPart,
+  AgentPart,
+  RetryPart,
+  CompactionPart,
+]).annotate({ discriminator: "type", identifier: "PartUpdateInput" })
+export type PartUpdateInput = Types.DeepMutable<Schema.Schema.Type<typeof PartUpdateInput>>
 
 const AssistantErrorSchema = Schema.Union([
   AuthError.EffectSchema,

@@ -748,13 +748,59 @@ export const layer: Layer.Layer<
         title,
         metadata: structuredClone(original.metadata),
       })
-      const idMap = new Map<string, MessageID>()
+      const copied = msgs.slice(0, cutoffIndex)
+      const idMap = new Map<string, MessageID>(copied.map((msg) => [msg.info.id, MessageID.ascending()]))
+      const partIDMap = new Map<string, PartID>(
+        copied.flatMap((msg) => msg.parts.map((part) => [part.id, PartID.ascending()] as const)),
+      )
+      const attachmentIDMap = new Map<SessionV1.FilePart, PartID>(
+        copied.flatMap((msg) =>
+          msg.parts.flatMap((part) =>
+            part.type === "tool" && part.state.status === "completed"
+              ? (part.state.attachments ?? []).map((attachment) => [attachment, PartID.ascending()] as const)
+              : [],
+          ),
+        ),
+      )
+      const remapMessageID = (id: MessageID) => {
+        const mapped = idMap.get(id)
+        if (!mapped) throw new Error(`Forked continuity references a message outside the copied range: ${id}`)
+        return mapped
+      }
+      const remapPartID = (id: PartID) => {
+        const mapped = partIDMap.get(id)
+        if (!mapped) throw new Error(`Forked continuity references a part outside the copied range: ${id}`)
+        return mapped
+      }
+      const remapProvenance = (provenance: SessionV1.ContinuityProvenance): SessionV1.ContinuityProvenance => {
+        switch (provenance.type) {
+          case "compaction-replay":
+            return {
+              ...provenance,
+              ownerMessageID: remapMessageID(provenance.ownerMessageID),
+              sourceMessageID: remapMessageID(provenance.sourceMessageID),
+            }
+          case "compaction-continuation":
+            return { ...provenance, ownerMessageID: remapMessageID(provenance.ownerMessageID) }
+          case "subtask-output":
+            return {
+              ...provenance,
+              ownerMessageID: remapMessageID(provenance.ownerMessageID),
+              taskPartID: remapPartID(provenance.taskPartID),
+            }
+          case "subtask-continuation":
+            return {
+              ...provenance,
+              ownerMessageID: remapMessageID(provenance.ownerMessageID),
+              taskPartID: remapPartID(provenance.taskPartID),
+              sourceMessageID: remapMessageID(provenance.sourceMessageID),
+            }
+        }
+      }
 
-      for (const msg of msgs.slice(0, cutoffIndex)) {
-        const newID = MessageID.ascending()
-        idMap.set(msg.info.id, newID)
-
-        const parentID = msg.info.role === "assistant" && msg.info.parentID ? idMap.get(msg.info.parentID) : undefined
+      for (const msg of copied) {
+        const newID = remapMessageID(msg.info.id)
+        const parentID = msg.info.role === "assistant" ? remapMessageID(msg.info.parentID) : undefined
         const cloned = yield* updateMessage({
           ...msg.info,
           sessionID: session.id,
@@ -765,26 +811,26 @@ export const layer: Layer.Layer<
         for (const part of msg.parts) {
           const p: SessionV1.Part = {
             ...part,
-            id: PartID.ascending(),
+            id: remapPartID(part.id),
             messageID: cloned.id,
             sessionID: session.id,
           }
           if (p.type === "compaction" && p.tail_start_id) {
-            p.tail_start_id = idMap.get(p.tail_start_id)
+            p.tail_start_id = remapMessageID(p.tail_start_id)
           }
-          if (p.type === "text" && p.metadata) {
-            const metadata = structuredClone(p.metadata)
-            for (const key of [
-              "compaction_owner_marker_id",
-              "compaction_replay_source_message_id",
-              "source_message_id",
-            ] as const) {
-              const sourceID = metadata[key]
-              if (typeof sourceID !== "string") continue
-              const mapped = idMap.get(sourceID)
-              if (mapped) metadata[key] = mapped
+          if ((p.type === "text" || p.type === "tool") && p.serverProvenance) {
+            p.serverProvenance = remapProvenance(p.serverProvenance)
+          }
+          if (p.type === "tool" && p.state.status === "completed" && p.state.attachments) {
+            p.state = {
+              ...p.state,
+              attachments: p.state.attachments.map((attachment) => ({
+                ...attachment,
+                id: attachmentIDMap.get(attachment)!,
+                sessionID: session.id,
+                messageID: cloned.id,
+              })),
             }
-            p.metadata = metadata
           }
           yield* updatePart(p)
         }

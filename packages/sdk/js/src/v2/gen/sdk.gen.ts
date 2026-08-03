@@ -115,10 +115,10 @@ import type {
   McpStatusResponses,
   MoveSessionDestination,
   OutputFormat,
-  Part as Part2,
   PartDeleteErrors,
   PartDeleteResponses,
   PartUpdateErrors,
+  PartUpdateInput,
   PartUpdateResponses,
   PathGetErrors,
   PathGetResponses,
@@ -4629,7 +4629,7 @@ export class Part extends HeyApiClient {
       partID: string
       directory?: string
       workspace?: string
-      part?: Part2
+      partUpdateInput?: PartUpdateInput
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -4643,7 +4643,7 @@ export class Part extends HeyApiClient {
             { in: "path", key: "partID" },
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
-            { key: "part", map: "body" },
+            { key: "partUpdateInput", map: "body" },
           ],
         },
       ],

@@ -1,6 +1,7 @@
 import type { Session as SDKSession, Message, Part } from "@opencode-ai/sdk/v2"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Session } from "@/session/session"
+import type { MessageID, PartID } from "@/session/schema"
 import { MessageV2 } from "../../session/message-v2"
 import { CliError, effectCmd } from "../effect-cmd"
 import { Database } from "@opencode-ai/core/database/database"
@@ -17,6 +18,31 @@ import { eq } from "drizzle-orm"
 
 const decodeMessageInfo = Schema.decodeUnknownSync(SessionV1.Info)
 const decodePart = Schema.decodeUnknownSync(SessionV1.Part)
+
+function semanticallyEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => semanticallyEqual(value, right[index]))
+    )
+  }
+  if (typeof left !== "object" || left === null || typeof right !== "object" || right === null) return false
+  const leftRecord = left as Record<string, unknown>
+  const rightRecord = right as Record<string, unknown>
+  const leftKeys = Object.keys(leftRecord)
+    .filter((key) => leftRecord[key] !== undefined)
+    .sort()
+  const rightKeys = Object.keys(rightRecord)
+    .filter((key) => rightRecord[key] !== undefined)
+    .sort()
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every((key, index) => key === rightKeys[index] && semanticallyEqual(leftRecord[key], rightRecord[key]))
+  )
+}
 
 /** Discriminated union returned by the ShareNext API (GET /api/shares/:id/data) */
 export type ShareData =
@@ -70,6 +96,12 @@ export function transformShareData(shareData: ShareData[]): {
   }
 
   if (messages.length === 0) return null
+  const messageIDs = new Set(messages.map((message) => message.id))
+  for (const messageID of partMap.keys()) {
+    if (!messageIDs.has(messageID)) {
+      throw new Error(`Shared part references an absent containing message: ${messageID}`)
+    }
+  }
 
   return {
     info: sessionItem.data,
@@ -81,6 +113,210 @@ export function transformShareData(shareData: ShareData[]): {
 }
 
 export type ExportData = { info: SDKSession; messages: Array<{ info: Message; parts: Part[] }> }
+
+function decodeImportedMessages(exportData: ExportData, sessionID: Session.Info["id"]) {
+  const messages = exportData.messages.map((message) => ({
+    info: decodeMessageInfo(message.info) as SessionV1.Info,
+    parts: message.parts.map((part) => decodePart(part) as SessionV1.Part),
+  }))
+  const messageIDs = new Set<string>()
+  const partIDs = new Set<string>()
+  const indexes = new Map<string, number>()
+  const byMessageID = new Map(messages.map((message) => [message.info.id, message]))
+  const byPartID = new Map<string, SessionV1.Part>()
+  let previous: SessionV1.Info | undefined
+
+  for (const [index, message] of messages.entries()) {
+    if (message.info.sessionID !== sessionID || message.info.time?.created === undefined) {
+      throw new Error("Imported message owner and physical time must match its containing session")
+    }
+    if (
+      messageIDs.has(message.info.id) ||
+      (previous && MessageV2.compareHydratedMessagePhysicalOrder(message.info, previous) <= 0)
+    ) {
+      throw new Error("Imported messages contradict canonical physical order")
+    }
+    messageIDs.add(message.info.id)
+    indexes.set(message.info.id, index)
+    previous = message.info
+    for (const part of message.parts) {
+      if (part.sessionID !== sessionID || part.messageID !== message.info.id || partIDs.has(part.id)) {
+        throw new Error("Imported part ownership must match its containing message and session")
+      }
+      partIDs.add(part.id)
+      byPartID.set(part.id, part)
+      if (part.type === "tool" && part.state.status === "completed" && part.state.attachments) {
+        if (message.info.role !== "assistant") {
+          throw new Error("Imported completed-tool attachments require an assistant containing message")
+        }
+        for (const attachment of part.state.attachments) {
+          if (
+            attachment.sessionID !== sessionID ||
+            attachment.messageID !== message.info.id ||
+            partIDs.has(attachment.id)
+          ) {
+            throw new Error("Imported nested attachment identity contradicts its containing ToolPart")
+          }
+          partIDs.add(attachment.id)
+        }
+      }
+    }
+  }
+
+  const requireOwner = (ownerMessageID: MessageID, part: SessionV1.Part) => {
+    const owner = byMessageID.get(ownerMessageID)
+    const containing = byMessageID.get(part.messageID)!
+    if (!owner || owner.info.role !== "user" || indexes.get(owner.info.id)! >= indexes.get(containing.info.id)!) {
+      throw new Error("Imported continuity owner must be an earlier user message in the same session")
+    }
+    return { owner, containing }
+  }
+  const requireCompaction = (owner: SessionV1.WithParts) => {
+    const parts = owner.parts.filter(
+      (part): part is SessionV1.CompactionPart => part.type === "compaction" && part.messageID === owner.info.id,
+    )
+    if (parts.length !== 1) throw new Error("Imported compaction continuity must target one exact CompactionPart owner")
+    return parts[0]
+  }
+  const requireSubtask = (owner: SessionV1.WithParts, taskPartID: PartID) => {
+    const task = byPartID.get(taskPartID)
+    if (!task || task.type !== "subtask" || task.messageID !== owner.info.id) {
+      throw new Error("Imported subtask continuity must target an exact SubtaskPart owner")
+    }
+    return task
+  }
+
+  const sameProvenance = (left: SessionV1.ContinuityProvenance, right: SessionV1.ContinuityProvenance) => {
+    if (left.type !== right.type || left.ownerMessageID !== right.ownerMessageID) return false
+    if (left.type === "compaction-replay" && right.type === "compaction-replay") {
+      return left.sourceMessageID === right.sourceMessageID
+    }
+    if (left.type === "subtask-output" && right.type === "subtask-output") {
+      return left.taskPartID === right.taskPartID
+    }
+    if (left.type === "subtask-continuation" && right.type === "subtask-continuation") {
+      return left.taskPartID === right.taskPartID && left.sourceMessageID === right.sourceMessageID
+    }
+    return left.type === "compaction-continuation" && right.type === "compaction-continuation"
+  }
+
+  for (const message of messages) {
+    const claims = message.parts.flatMap((part) =>
+      part.type === "text" && part.serverProvenance ? [part.serverProvenance] : [],
+    )
+    const first = claims[0]
+    if (first && !claims.every((claim) => sameProvenance(first, claim))) {
+      throw new Error(`Imported generated message ${message.info.id} has contradictory continuity relationships`)
+    }
+  }
+
+  type ExactSubtaskOutput = {
+    owner: SessionV1.WithParts
+    task: SessionV1.SubtaskPart
+    message: SessionV1.WithParts
+    part: SessionV1.ToolPart
+  }
+  const outputByTaskPartID = new Map<string, ExactSubtaskOutput>()
+  const taskPartIDByOutputMessageID = new Map<string, string>()
+
+  for (const message of messages) {
+    for (const part of message.parts) {
+      const provenance = (part.type === "text" || part.type === "tool") && part.serverProvenance
+      if (!provenance || provenance.type !== "subtask-output") continue
+      const { owner, containing } = requireOwner(provenance.ownerMessageID, part)
+      const task = requireSubtask(owner, provenance.taskPartID)
+      if (
+        part.type !== "tool" ||
+        part.tool !== "task" ||
+        containing.info.role !== "assistant" ||
+        containing.info.parentID !== owner.info.id ||
+        MessageV2.classifyAssistant(containing.info) !== "successful" ||
+        (part.state.status !== "completed" && part.state.status !== "error")
+      ) {
+        throw new Error("Imported Subtask output provenance does not identify an exact terminal task result")
+      }
+      if (outputByTaskPartID.has(task.id) || taskPartIDByOutputMessageID.has(containing.info.id)) {
+        throw new Error("Imported Subtask output provenance has duplicate or conflicting exact result claims")
+      }
+      const output = { owner, task, message: containing, part } satisfies ExactSubtaskOutput
+      outputByTaskPartID.set(task.id, output)
+      taskPartIDByOutputMessageID.set(containing.info.id, task.id)
+    }
+  }
+
+  const requireCompletedCompactionBefore = (owner: SessionV1.WithParts, containing: SessionV1.WithParts) => {
+    requireCompaction(owner)
+    const ownerIndex = indexes.get(owner.info.id)!
+    const containingIndex = indexes.get(containing.info.id)!
+    const summary = messages.find(
+      (candidate) =>
+        candidate.info.role === "assistant" &&
+        candidate.info.parentID === owner.info.id &&
+        ownerIndex < indexes.get(candidate.info.id)! &&
+        indexes.get(candidate.info.id)! < containingIndex &&
+        MessageV2.isUsableCompactionSummary(candidate),
+    )
+    if (!summary) {
+      throw new Error("Imported compaction continuity requires a usable completed owner summary before its carrier")
+    }
+  }
+
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (part.type !== "text" && part.type !== "tool") continue
+      const provenance = part.serverProvenance
+      if (!provenance) continue
+      const { owner, containing } = requireOwner(provenance.ownerMessageID, part)
+      switch (provenance.type) {
+        case "compaction-replay": {
+          requireCompletedCompactionBefore(owner, containing)
+          const source = byMessageID.get(provenance.sourceMessageID)
+          if (
+            part.type !== "text" ||
+            containing.info.role !== "user" ||
+            !source ||
+            source.info.role !== "user" ||
+            indexes.get(source.info.id)! >= indexes.get(owner.info.id)! ||
+            source.parts.some((candidate) => candidate.type === "compaction")
+          ) {
+            throw new Error("Imported compaction replay provenance has an invalid source or physical direction")
+          }
+          break
+        }
+        case "compaction-continuation":
+          requireCompletedCompactionBefore(owner, containing)
+          if (part.type !== "text" || containing.info.role !== "user") {
+            throw new Error("Imported compaction continuation provenance has an invalid target kind")
+          }
+          break
+        case "subtask-output":
+          break
+        case "subtask-continuation": {
+          const task = requireSubtask(owner, provenance.taskPartID)
+          const source = byMessageID.get(provenance.sourceMessageID)
+          const output = outputByTaskPartID.get(task.id)
+          if (
+            part.type !== "text" ||
+            containing.info.role !== "user" ||
+            !task.command ||
+            !source ||
+            source.info.role !== "assistant" ||
+            source.info.parentID !== owner.info.id ||
+            !output ||
+            output.owner.info.id !== owner.info.id ||
+            output.message.info.id !== source.info.id ||
+            indexes.get(owner.info.id)! >= indexes.get(source.info.id)! ||
+            indexes.get(source.info.id)! >= indexes.get(containing.info.id)!
+          ) {
+            throw new Error("Imported Subtask continuation provenance has an invalid source or physical direction")
+          }
+          break
+        }
+      }
+    }
+  }
+  return messages
+}
 
 export const persistImportedSession = Effect.fn("Cli.import.persist")(function* (
   exportData: ExportData,
@@ -94,40 +330,166 @@ export const persistImportedSession = Effect.fn("Cli.import.persist")(function* 
     path: path.relative(path.resolve(ctx.worktree), ctx.directory).replaceAll("\\", "/"),
   }) as Session.Info
   const row = Session.toRow(info)
-  const writeImportedRows = Effect.gen(function* () {
-    const messageIDs = new Set<string>()
-    const partIDs = new Set<string>()
-    let previousMessage: SessionV1.Info | undefined
-    for (const msg of exportData.messages) {
-      const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
-      if (msgInfo.sessionID !== exportData.info.id || msgInfo.time?.created === undefined) {
-        return yield* Effect.die("Imported message owner and physical time must match its containing session")
+  const importedMessages = decodeImportedMessages(exportData, info.id)
+  const importedParts = importedMessages.flatMap((message) => message.parts)
+  const nestedAttachments = importedParts.flatMap((part) =>
+    part.type === "tool" && part.state.status === "completed"
+      ? (part.state.attachments ?? []).map((attachment) => ({ attachment, containingPart: part }))
+      : [],
+  )
+  const validateCollisions = Effect.gen(function* () {
+    const existingSession = yield* db
+      .select()
+      .from(SessionTable)
+      .where(eq(SessionTable.id, row.id))
+      .get()
+      .pipe(Effect.orDie)
+    if (existingSession && !semanticallyEqual(Session.fromRow(existingSession), info)) {
+      return yield* Effect.die(`Imported session ${row.id} collides with different persisted data`)
+    }
+
+    if (existingSession) {
+      const existingMessages = yield* db
+        .select({ id: MessageTable.id })
+        .from(MessageTable)
+        .where(eq(MessageTable.session_id, row.id))
+        .all()
+        .pipe(Effect.orDie)
+      const importedMessageIDs = new Set(importedMessages.map((message) => message.info.id))
+      if (
+        existingMessages.length > 0 &&
+        (existingMessages.length !== importedMessageIDs.size ||
+          existingMessages.some((message) => !importedMessageIDs.has(message.id)))
+      ) {
+        return yield* Effect.die(`Imported session ${row.id} has a different persisted message graph`)
       }
+
+      const existingParts = yield* db
+        .select({ id: PartTable.id })
+        .from(PartTable)
+        .where(eq(PartTable.session_id, row.id))
+        .all()
+        .pipe(Effect.orDie)
+      const importedPartIDs = new Set(importedParts.map((part) => part.id))
+      if (
+        existingParts.length > 0 &&
+        (existingParts.length !== importedPartIDs.size || existingParts.some((part) => !importedPartIDs.has(part.id)))
+      ) {
+        return yield* Effect.die(`Imported session ${row.id} has a different persisted part graph`)
+      }
+    }
+
+    const persistedParts = yield* db
+      .select({
+        id: PartTable.id,
+        sessionID: PartTable.session_id,
+        messageID: PartTable.message_id,
+        data: PartTable.data,
+      })
+      .from(PartTable)
+      .all()
+      .pipe(Effect.orDie)
+    const persistedTopLevelIDs = new Set(persistedParts.map((part) => part.id))
+    const persistedNestedByID = new Map<
+      string,
+      Array<{
+        containingPartID: string
+        sessionID: string
+        messageID: string
+        attachment: SessionV1.FilePart
+      }>
+    >()
+    for (const part of persistedParts) {
+      const data = part.data as Partial<SessionV1.ToolPart>
+      if (data.type !== "tool" || data.state?.status !== "completed") continue
+      for (const attachment of data.state.attachments ?? []) {
+        const existing = persistedNestedByID.get(attachment.id)
+        const location = {
+          containingPartID: part.id,
+          sessionID: part.sessionID,
+          messageID: part.messageID,
+          attachment,
+        }
+        if (existing) existing.push(location)
+        else persistedNestedByID.set(attachment.id, [location])
+      }
+    }
+
+    for (const part of importedParts) {
+      if (persistedNestedByID.has(part.id)) {
+        return yield* Effect.die(`Imported top-level part ${part.id} collides with a persisted nested attachment`)
+      }
+    }
+
+    for (const msg of importedMessages) {
+      const msgInfo = msg.info
       const { id, sessionID: _, ...msgData } = msgInfo
       const timeCreated = msgInfo.time.created
-      if (
-        messageIDs.has(id) ||
-        (previousMessage && MessageV2.compareHydratedMessagePhysicalOrder(msgInfo, previousMessage) <= 0)
-      ) {
-        return yield* Effect.die("Imported messages contradict canonical physical order")
-      }
-      messageIDs.add(id)
-      previousMessage = msgInfo
       const existingMessage = yield* db
-        .select({ sessionID: MessageTable.session_id, timeCreated: MessageTable.time_created })
+        .select({ sessionID: MessageTable.session_id, timeCreated: MessageTable.time_created, data: MessageTable.data })
         .from(MessageTable)
         .where(eq(MessageTable.id, id))
         .get()
         .pipe(Effect.orDie)
-      if (existingMessage && (existingMessage.sessionID !== row.id || existingMessage.timeCreated !== timeCreated)) {
-        return yield* Effect.die(`Imported message ${id} collides with a different persisted owner or position`)
+      if (
+        existingMessage &&
+        (existingMessage.sessionID !== row.id ||
+          existingMessage.timeCreated !== timeCreated ||
+          !semanticallyEqual(existingMessage.data, msgData))
+      ) {
+        return yield* Effect.die(`Imported message ${id} collides with different persisted identity or data`)
       }
+
+      for (const part of msg.parts) {
+        const { id: partId, sessionID: _s, messageID, ...partData } = part
+        const existingPart = yield* db
+          .select({ sessionID: PartTable.session_id, messageID: PartTable.message_id, data: PartTable.data })
+          .from(PartTable)
+          .where(eq(PartTable.id, partId))
+          .get()
+          .pipe(Effect.orDie)
+        if (
+          existingPart &&
+          (existingPart.sessionID !== row.id ||
+            existingPart.messageID !== messageID ||
+            !semanticallyEqual(existingPart.data, partData))
+        ) {
+          return yield* Effect.die(`Imported part ${partId} collides with different persisted identity or data`)
+        }
+      }
+    }
+
+    for (const { attachment, containingPart } of nestedAttachments) {
+      if (persistedTopLevelIDs.has(attachment.id)) {
+        return yield* Effect.die(`Imported nested attachment ${attachment.id} collides with a persisted top-level part`)
+      }
+      const existingNested = persistedNestedByID.get(attachment.id)
+      if (
+        existingNested?.some(
+          (persisted) =>
+            persisted.containingPartID !== containingPart.id ||
+            persisted.sessionID !== containingPart.sessionID ||
+            persisted.messageID !== containingPart.messageID ||
+            !semanticallyEqual(persisted.attachment, attachment),
+        )
+      ) {
+        return yield* Effect.die(
+          `Imported nested attachment ${attachment.id} collides with a different persisted parent or data`,
+        )
+      }
+    }
+  })
+
+  const writeImportedRows = Effect.gen(function* () {
+    yield* db.insert(SessionTable).values(row).onConflictDoNothing().run().pipe(Effect.orDie)
+    for (const msg of importedMessages) {
+      const { id, sessionID: _, ...msgData } = msg.info
       yield* db
         .insert(MessageTable)
         .values({
           id,
           session_id: row.id,
-          time_created: timeCreated,
+          time_created: msg.info.time.created,
           data: msgData as never,
         })
         .onConflictDoNothing()
@@ -135,21 +497,7 @@ export const persistImportedSession = Effect.fn("Cli.import.persist")(function* 
         .pipe(Effect.orDie)
 
       for (const part of msg.parts) {
-        const partInfo = decodePart(part) as SessionV1.Part
-        if (partInfo.sessionID !== exportData.info.id || partInfo.messageID !== id || partIDs.has(partInfo.id)) {
-          return yield* Effect.die("Imported part ownership must match its containing message and session")
-        }
-        partIDs.add(partInfo.id)
-        const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
-        const existingPart = yield* db
-          .select({ sessionID: PartTable.session_id, messageID: PartTable.message_id })
-          .from(PartTable)
-          .where(eq(PartTable.id, partId))
-          .get()
-          .pipe(Effect.orDie)
-        if (existingPart && (existingPart.sessionID !== row.id || existingPart.messageID !== messageID)) {
-          return yield* Effect.die(`Imported part ${partId} collides with a different persisted owner`)
-        }
+        const { id: partId, sessionID: _s, messageID, ...partData } = part
         yield* db
           .insert(PartTable)
           .values({
@@ -165,37 +513,9 @@ export const persistImportedSession = Effect.fn("Cli.import.persist")(function* 
     }
     yield* CompactionRegionProjection.reconcile(db, { sessionID: row.id })
   })
-  const upsertSession = db
-    .insert(SessionTable)
-    .values(row)
-    .onConflictDoUpdate({
-      target: SessionTable.id,
-      set: { project_id: row.project_id, directory: row.directory, path: row.path },
-    })
-    .run()
+  yield* db
+    .transaction(() => validateCollisions.pipe(Effect.andThen(writeImportedRows)), { behavior: "immediate" })
     .pipe(Effect.orDie)
-  const existing = yield* db
-    .select({ id: SessionTable.id })
-    .from(SessionTable)
-    .where(eq(SessionTable.id, row.id))
-    .get()
-    .pipe(Effect.orDie)
-  if (existing) {
-    yield* db
-      .transaction(() => upsertSession.pipe(Effect.andThen(writeImportedRows)), { behavior: "immediate" })
-      .pipe(Effect.orDie)
-  } else {
-    yield* db
-      .transaction(
-        () =>
-          Effect.gen(function* () {
-            yield* db.insert(SessionTable).values(row).run().pipe(Effect.orDie)
-            yield* writeImportedRows
-          }),
-        { behavior: "immediate" },
-      )
-      .pipe(Effect.orDie)
-  }
 
   return info
 })

@@ -118,9 +118,7 @@ export class Subscription {
 
   private async run() {
     while (!this.abort.signal.aborted) {
-      const events = (await this.input.sdk.global.event({
-        signal: this.abort.signal,
-      })) as GlobalEventStream
+      const events = (await this.input.sdk.global.event({}, { signal: this.abort.signal })) as GlobalEventStream
 
       for await (const event of events.stream) {
         if (this.abort.signal.aborted) return
