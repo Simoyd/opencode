@@ -112,6 +112,39 @@ function stripPluginAuthoredServerProvenance<T>(part: T): T {
   return value as T
 }
 
+/** @internal Exported for testing */
+export function protectPluginTransformedServerProvenance(messages: SessionV1.WithParts[]) {
+  const trustedProvenance = new Map<string, SessionV1.ContinuityProvenance>(
+    messages.flatMap((message) =>
+      message.parts.flatMap((part) =>
+        (part.type === "text" || part.type === "tool") && part.serverProvenance
+          ? [[`${part.sessionID}\n${part.messageID}\n${part.id}`, { ...part.serverProvenance }] as const]
+          : [],
+      ),
+    ),
+  )
+  return () => {
+    const partIdentityCounts = new Map<string, number>()
+    for (const message of messages) {
+      for (const part of message.parts) {
+        const key = `${part.sessionID}\n${part.messageID}\n${part.id}`
+        partIdentityCounts.set(key, (partIdentityCounts.get(key) ?? 0) + 1)
+      }
+    }
+    return messages.map((message) => ({
+      ...message,
+      parts: message.parts.map((part) => {
+        const clean = stripPluginAuthoredServerProvenance(part)
+        const key = `${part.sessionID}\n${part.messageID}\n${part.id}`
+        const provenance = partIdentityCounts.get(key) === 1 ? trustedProvenance.get(key) : undefined
+        return provenance && (clean.type === "text" || clean.type === "tool")
+          ? { ...clean, serverProvenance: provenance }
+          : clean
+      }),
+    }))
+  }
+}
+
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (
@@ -1453,34 +1486,9 @@ export const layer = Layer.effect(
             }
 
             msgs = yield* SessionStagedContext.injectAndConsume({ sessionID, lastUser, messages: msgs })
-            const trustedProvenance = new Map<string, SessionV1.ContinuityProvenance>(
-              msgs.flatMap((message) =>
-                message.parts.flatMap((part) =>
-                  (part.type === "text" || part.type === "tool") && part.serverProvenance
-                    ? [[`${part.sessionID}\n${part.messageID}\n${part.id}`, part.serverProvenance] as const]
-                    : [],
-                ),
-              ),
-            )
+            const restoreServerProvenance = protectPluginTransformedServerProvenance(msgs)
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-            const partIdentityCounts = new Map<string, number>()
-            for (const message of msgs) {
-              for (const part of message.parts) {
-                const key = `${part.sessionID}\n${part.messageID}\n${part.id}`
-                partIdentityCounts.set(key, (partIdentityCounts.get(key) ?? 0) + 1)
-              }
-            }
-            msgs = msgs.map((message) => ({
-              ...message,
-              parts: message.parts.map((part) => {
-                const clean = stripPluginAuthoredServerProvenance(part)
-                const key = `${part.sessionID}\n${part.messageID}\n${part.id}`
-                const provenance = partIdentityCounts.get(key) === 1 ? trustedProvenance.get(key) : undefined
-                return provenance && (clean.type === "text" || clean.type === "tool")
-                  ? { ...clean, serverProvenance: provenance }
-                  : clean
-              }),
-            }))
+            msgs = restoreServerProvenance()
 
             const [skills, env, instructions, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
