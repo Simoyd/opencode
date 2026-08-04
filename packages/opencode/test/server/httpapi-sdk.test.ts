@@ -985,15 +985,15 @@ describe("HttpApi SDK", () => {
   )
 
   httpapi(
-    "starts one promptAsync successor after an active run and includes its admitted input",
+    "starts one promptAsync successor with the complete admitted follow-up cohort",
     withFakeLlm("raw", ({ sdk, llm }) =>
       Effect.gen(function* () {
         let releaseFirst!: () => void
         const firstGate = new Promise<void>((resolve) => {
           releaseFirst = resolve
         })
-        yield* llm.hold("first", firstGate)
-        yield* llm.text("second")
+        yield* llm.hold("predecessor-output", firstGate)
+        yield* llm.text("successor-output")
 
         const created = yield* call(() => sdk.session.create())
         const sessionID = String(record(created.data).id)
@@ -1002,21 +1002,30 @@ describe("HttpApi SDK", () => {
             sessionID,
             agent: "general",
             model: { providerID: "test", modelID: "test-model" },
-            parts: [{ type: "text", text: "first" }],
+            parts: [{ type: "text", text: "root-user" }],
           }),
         )
         expect(first.response.status).toBe(204)
         yield* awaitWithTimeout(llm.wait(2), "predecessor provider request did not start", "5 seconds")
 
-        const followUp = yield* call(() =>
+        const second = yield* call(() =>
           sdk.session.promptAsync({
             sessionID,
             agent: "general",
             model: { providerID: "test", modelID: "test-model" },
-            parts: [{ type: "text", text: "second" }],
+            parts: [{ type: "text", text: "cohort-two" }],
           }),
         )
-        expect(followUp.response.status).toBe(204)
+        expect(second.response.status).toBe(204)
+        const third = yield* call(() =>
+          sdk.session.promptAsync({
+            sessionID,
+            agent: "general",
+            model: { providerID: "test", modelID: "test-model" },
+            parts: [{ type: "text", text: "cohort-three" }],
+          }),
+        )
+        expect(third.response.status).toBe(204)
 
         releaseFirst()
         yield* pollWithTimeout(
@@ -1025,9 +1034,22 @@ describe("HttpApi SDK", () => {
         )
         const inputs = yield* llm.inputs
         expect(inputs).toHaveLength(3)
-        const messages = inputs.at(-1)?.messages
-        if (!Array.isArray(messages)) throw new Error("expected provider messages")
-        expect(messages.at(-1)).toEqual({ role: "user", content: "second" })
+        expect(inputs[0]?.messages).toContainEqual({
+          role: "user",
+          content: "Generate a title for this conversation:\n",
+        })
+        expect(array(inputs[1]?.messages).at(-1)).toEqual({ role: "user", content: "root-user" })
+        const successor = inputs[2]?.messages
+        if (!Array.isArray(successor)) throw new Error("expected successor provider messages")
+        const tail = successor.slice(-4)
+        expect(tail.map((message) => message.role)).toEqual(["user", "assistant", "user", "user"])
+        expect(tail[0]).toEqual({ role: "user", content: "root-user" })
+        expect(tail[2]).toEqual({ role: "user", content: "cohort-two" })
+        expect(tail[3]).toEqual({ role: "user", content: "cohort-three" })
+        const serialized = JSON.stringify(successor)
+        for (const text of ["root-user", "predecessor-output", "cohort-two", "cohort-three"]) {
+          expect(serialized.match(new RegExp(text, "g"))).toHaveLength(1)
+        }
       }),
     ),
   )

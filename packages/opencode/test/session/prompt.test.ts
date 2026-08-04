@@ -1619,6 +1619,68 @@ it.instance("terminal assistant for a prior user does not answer the latest user
   }),
 )
 
+it.instance("terminal assistant precedes the complete pending user cohort in provider input", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+
+    const first = yield* user(chat.id, "root-user")
+    yield* user(chat.id, "cohort-two")
+    const third = yield* user(chat.id, "cohort-three")
+    const prior: SessionV1.Assistant = {
+      id: MessageID.ascending(),
+      role: "assistant",
+      parentID: first.id,
+      sessionID: chat.id,
+      mode: "build",
+      agent: "build",
+      cost: 0,
+      path: { cwd: "/tmp", root: "/tmp" },
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: ref.modelID,
+      providerID: ref.providerID,
+      time: { created: Date.now(), completed: Date.now() },
+      finish: "stop",
+    }
+    yield* sessions.updateMessage(prior)
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: prior.id,
+      sessionID: chat.id,
+      type: "text",
+      text: "predecessor-output",
+    })
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: prior.id,
+      sessionID: chat.id,
+      type: "text",
+      text: "predecessor-detail",
+    })
+    yield* llm.text("successor response")
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+
+    expect(result.info.role).toBe("assistant")
+    if (result.info.role !== "assistant") throw new Error("expected successor assistant")
+    expect(result.info.parentID).toBe(third.id)
+    expect(yield* llm.calls).toBe(1)
+    const inputs = yield* llm.inputs
+    const messages = inputs.at(-1)?.messages
+    if (!Array.isArray(messages)) throw new Error("expected LLM messages")
+    const tail = messages.slice(-3)
+    expect(tail.map((message) => message.role)).toEqual(["assistant", "user", "user"])
+    expect(tail[1]).toEqual({ role: "user", content: "cohort-two" })
+    expect(tail[2]).toEqual({ role: "user", content: "cohort-three" })
+    const serialized = JSON.stringify(messages)
+    for (const text of ["root-user", "cohort-two", "cohort-three", "predecessor-output", "predecessor-detail"]) {
+      expect(serialized.match(new RegExp(text, "g"))).toHaveLength(1)
+    }
+  }),
+)
+
 it.instance("lifecycle commit fails with BusyError when loop running", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)
