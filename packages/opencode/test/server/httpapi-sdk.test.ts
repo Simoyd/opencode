@@ -984,6 +984,54 @@ describe("HttpApi SDK", () => {
     ),
   )
 
+  httpapi(
+    "starts one promptAsync successor after an active run and includes its admitted input",
+    withFakeLlm("raw", ({ sdk, llm }) =>
+      Effect.gen(function* () {
+        let releaseFirst!: () => void
+        const firstGate = new Promise<void>((resolve) => {
+          releaseFirst = resolve
+        })
+        yield* llm.hold("first", firstGate)
+        yield* llm.text("second")
+
+        const created = yield* call(() => sdk.session.create({ title: "active promptAsync" }))
+        const sessionID = String(record(created.data).id)
+        const first = yield* call(() =>
+          sdk.session.promptAsync({
+            sessionID,
+            agent: "build",
+            model: { providerID: "test", modelID: "test-model" },
+            parts: [{ type: "text", text: "first" }],
+          }),
+        )
+        expect(first.response.status).toBe(204)
+        yield* awaitWithTimeout(llm.wait(1), "first provider request did not start", "5 seconds")
+
+        const followUp = yield* call(() =>
+          sdk.session.promptAsync({
+            sessionID,
+            agent: "build",
+            model: { providerID: "test", modelID: "test-model" },
+            parts: [{ type: "text", text: "second" }],
+          }),
+        )
+        expect(followUp.response.status).toBe(204)
+
+        releaseFirst()
+        yield* pollWithTimeout(
+          llm.inputs.pipe(Effect.map((inputs) => (inputs.length === 2 ? true : undefined))),
+          "timed out waiting for active promptAsync successor",
+        )
+        const inputs = yield* llm.inputs
+        expect(inputs).toHaveLength(2)
+        const messages = inputs.at(-1)?.messages
+        if (!Array.isArray(messages)) throw new Error("expected provider messages")
+        expect(messages.at(-1)).toEqual({ role: "user", content: "second" })
+      }),
+    ),
+  )
+
   serverPathParity("matches generated SDK prompt no-reply routes", (serverPath) =>
     withStandardProject(serverPath, ({ sdk }) =>
       Effect.gen(function* () {

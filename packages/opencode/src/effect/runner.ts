@@ -179,7 +179,7 @@ export const make = <A, E = never>(
         return Effect.succeed([Effect.void, state] as const)
       }
       return reconcile({ ...state, current: undefined }).pipe(
-        Effect.map(([bookkeeping, nextState]) => [bookkeeping.pipe(Effect.andThen(complete(handle.done, exit))), nextState] as const),
+        Effect.map(([bookkeeping, nextState]) => [complete(handle.done, exit).pipe(Effect.andThen(bookkeeping)), nextState] as const),
       )
     }).pipe(Effect.flatten)
   }

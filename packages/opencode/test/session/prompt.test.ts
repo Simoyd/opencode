@@ -1520,6 +1520,58 @@ it.instance("prompt submitted during an active run is included in the next LLM i
   }),
 )
 
+it.instance("manually admitted prompt during an active run starts one successor with the follow-up input", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const gate = yield* Deferred.make<void>()
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+
+    yield* llm.hold("first", deferredAsPromise(gate))
+    yield* llm.text("second")
+
+    const active = yield* prompt
+      .prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        parts: [{ type: "text", text: "first" }],
+      })
+      .pipe(Effect.forkChild)
+
+    yield* llm.wait(1)
+    yield* waitForBusy(chat.id)
+
+    const id = MessageID.ascending()
+    const admitted = yield* prompt.promptAdmitted(
+      {
+        sessionID: chat.id,
+        messageID: id,
+        agent: "build",
+        model: ref,
+        parts: [{ type: "text", text: "second" }],
+      },
+      "manual",
+    )
+    expect(admitted.info.id).toBe(id)
+    expect(admitted.info.role).toBe("user")
+
+    yield* Deferred.succeed(gate, void 0)
+    expect(Exit.isSuccess(yield* Fiber.await(active))).toBe(true)
+    yield* pollWithTimeout(
+      llm.calls.pipe(Effect.map((calls) => (calls === 2 ? true : undefined))),
+      "timed out waiting for admitted manual successor",
+    )
+
+    const inputs = yield* llm.inputs
+    expect(inputs).toHaveLength(2)
+    const messages = inputs.at(-1)?.messages
+    if (!Array.isArray(messages)) throw new Error("expected LLM messages")
+    expect(messages.at(-1)).toEqual({ role: "user", content: "second" })
+  }),
+)
+
 it.instance("lifecycle commit fails with BusyError when loop running", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)

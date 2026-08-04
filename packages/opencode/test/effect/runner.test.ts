@@ -76,6 +76,38 @@ describe("Runner", () => {
     expect(yield* runner.ensureRunning(Effect.succeed("next"))).toBe("next")
   }))
 
+  it.live("submitManualAdmitted starts one successor after the active run settles", Effect.gen(function* () {
+    const scope = yield* Scope.Scope
+    const runner = Runner.make<string>(scope)
+    const currentStarted = yield* Deferred.make<void>()
+    const releaseCurrent = yield* Deferred.make<void>()
+    const successorStarted = yield* Deferred.make<void>()
+    const successorCalls = yield* Ref.make(0)
+    const current = yield* runner.ensureRunning(
+      Deferred.succeed(currentStarted, undefined).pipe(
+        Effect.andThen(Deferred.await(releaseCurrent)),
+        Effect.as("current"),
+      ),
+    ).pipe(Effect.forkChild)
+    yield* Deferred.await(currentStarted)
+
+    expect(yield* runner.submitManualAdmitted(
+      Effect.succeed("accepted"),
+      Ref.update(successorCalls, (value) => value + 1).pipe(
+        Effect.andThen(Deferred.succeed(successorStarted, undefined)),
+        Effect.as("successor"),
+      ),
+    )).toBe("accepted")
+    expect(yield* runner.successorPending).toBe(true)
+    expect(yield* Ref.get(successorCalls)).toBe(0)
+
+    yield* Deferred.succeed(releaseCurrent, undefined)
+    expect(yield* Fiber.join(current)).toBe("current")
+    yield* Deferred.await(successorStarted)
+    expect(yield* Ref.get(successorCalls)).toBe(1)
+    expect(yield* runner.successorPending).toBe(false)
+  }))
+
   it.live("commit is exclusive and translates overlap to Busy", Effect.gen(function* () {
     const scope = yield* Scope.Scope
     const runner = Runner.make<string>(scope)
