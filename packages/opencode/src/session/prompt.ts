@@ -1169,7 +1169,7 @@ const layer = Layer.effect(
             lastAssistant?.finish &&
             !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
-            lastUser.id < lastAssistant.id
+            lastAssistant.parentID === lastUser.id
           ) {
             const orphan = lastAssistantMsg?.parts.find(
               (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
@@ -1308,9 +1308,18 @@ const layer = Layer.effect(
 
             if (step === 1) yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore)
 
+            // A manual successor can be persisted before the predecessor's
+            // terminal assistant. Keep the successor user at the provider
+            // boundary even though physical persistence order ends in the
+            // predecessor assistant.
+            const pendingUser =
+              lastAssistant?.finish && lastAssistant.parentID !== lastUser.id
+                ? msgs.find((item) => item.info.id === lastUser.id)
+                : undefined
+            const providerMsgs = pendingUser ? [...msgs.filter((item) => item !== pendingUser), pendingUser] : msgs
             const prepared: SessionStagedContext.Prepared = consumeStagedContext
-              ? yield* stagedContext.prepare({ sessionID, messages: msgs })
-              : { messages: msgs }
+              ? yield* stagedContext.prepare({ sessionID, messages: providerMsgs })
+              : { messages: providerMsgs }
             msgs = prepared.messages
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 

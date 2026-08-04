@@ -995,23 +995,23 @@ describe("HttpApi SDK", () => {
         yield* llm.hold("first", firstGate)
         yield* llm.text("second")
 
-        const created = yield* call(() => sdk.session.create({ title: "active promptAsync" }))
+        const created = yield* call(() => sdk.session.create())
         const sessionID = String(record(created.data).id)
         const first = yield* call(() =>
           sdk.session.promptAsync({
             sessionID,
-            agent: "build",
+            agent: "general",
             model: { providerID: "test", modelID: "test-model" },
             parts: [{ type: "text", text: "first" }],
           }),
         )
         expect(first.response.status).toBe(204)
-        yield* awaitWithTimeout(llm.wait(1), "first provider request did not start", "5 seconds")
+        yield* awaitWithTimeout(llm.wait(2), "predecessor provider request did not start", "5 seconds")
 
         const followUp = yield* call(() =>
           sdk.session.promptAsync({
             sessionID,
-            agent: "build",
+            agent: "general",
             model: { providerID: "test", modelID: "test-model" },
             parts: [{ type: "text", text: "second" }],
           }),
@@ -1020,11 +1020,11 @@ describe("HttpApi SDK", () => {
 
         releaseFirst()
         yield* pollWithTimeout(
-          llm.inputs.pipe(Effect.map((inputs) => (inputs.length === 2 ? true : undefined))),
+          llm.inputs.pipe(Effect.map((inputs) => (inputs.length === 3 ? true : undefined))),
           "timed out waiting for active promptAsync successor",
         )
         const inputs = yield* llm.inputs
-        expect(inputs).toHaveLength(2)
+        expect(inputs).toHaveLength(3)
         const messages = inputs.at(-1)?.messages
         if (!Array.isArray(messages)) throw new Error("expected provider messages")
         expect(messages.at(-1)).toEqual({ role: "user", content: "second" })
