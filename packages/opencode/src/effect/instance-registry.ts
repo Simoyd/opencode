@@ -8,5 +8,13 @@ export function registerDisposer(disposer: (directory: string) => Promise<void>)
 }
 
 export async function disposeInstance(directory: string) {
-  await Promise.allSettled([...disposers].map((disposer) => disposer(directory)))
+  let firstFailure: unknown
+  for (const disposer of [...disposers].toReversed()) {
+    try {
+      await disposer(directory)
+    } catch (error) {
+      firstFailure ??= error
+    }
+  }
+  if (firstFailure !== undefined) throw firstFailure
 }

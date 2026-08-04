@@ -1,7 +1,7 @@
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { Cause, Duration, Effect, Layer, Scope } from "effect"
+import { Cause, Duration, Effect, Fiber, Layer, Scope } from "effect"
 import { TestLLMServer } from "../../lib/llm-server"
 import type { Config } from "../../../src/config/config"
 
@@ -18,13 +18,13 @@ export function runScenario(options: Options) {
   return (scenario: Scenario) => {
     if (scenario.kind === "todo") return Effect.succeed({ status: "skip", scenario } as Result)
     return runActive(options, scenario).pipe(
+      Effect.scoped,
       Effect.timeoutOrElse({
         duration: options.scenarioTimeout,
         orElse: () => Effect.die(new Error(`scenario timed out after ${Duration.format(options.scenarioTimeout)}`)),
       }),
       Effect.as({ status: "pass", scenario } as Result),
       Effect.catchCause((cause) => Effect.succeed({ status: "fail" as const, scenario, message: Cause.pretty(cause) })),
-      Effect.scoped,
     )
   }
 }
@@ -47,15 +47,16 @@ function runActive(options: Options, scenario: ActiveScenario) {
 function runAuth(scenario: ActiveScenario) {
   return Effect.gen(function* () {
     const result = yield* callAuthProbe(scenario, "missing")
+    if (result.timedOut || result.status === 0) throw new Error("auth missing-credential probe did not complete")
     if (scenario.auth === "protected") {
       if (result.status !== 401) throw new Error(`auth expected 401, got ${result.status}`)
       const authed = yield* callAuthProbe(scenario, "valid")
+      if (authed.timedOut || authed.status === 0) throw new Error("auth valid-credential probe did not complete")
       if (authed.status === 401) throw new Error("auth rejected valid credentials")
       return
     }
 
     if (result.status === 401) throw new Error("auth expected public access, got 401")
-    if (result.timedOut) throw new Error("auth expected public access, probe timed out")
   })
 }
 
@@ -123,6 +124,17 @@ function withContext<A, E>(
           if (!context.llm) throw new Error("scenario needs fake LLM")
           return context.llm
         }
+        const worktreeReady = (name: string) =>
+          Effect.callback<void, never>((resume) => {
+            const on = (event: { payload: { type: string; properties: Record<string, unknown> } }) => {
+              if (event.payload.type !== modules.Worktree.Event.Ready.type) return
+              if (event.payload.properties.name !== name) return
+              modules.GlobalBus.off("event", on)
+              resume(Effect.void)
+            }
+            modules.GlobalBus.on("event", on)
+            return Effect.sync(() => modules.GlobalBus.off("event", on))
+          })
         const base: ScenarioContext = {
           directory: context.dir?.path,
           headers: (extra) => ({
@@ -174,10 +186,21 @@ function withContext<A, E>(
               )
               return { info, part }
             }),
+          messageID: () => MessageID.ascending(),
           messages: (sessionID) =>
             run(modules.Session.Service.use((svc) => svc.messages({ sessionID }).pipe(Effect.orDie))),
           todos: (sessionID, todos) => run(modules.Todo.Service.use((svc) => svc.update({ sessionID, todos }))),
-          worktree: (input) => run(modules.Worktree.Service.use((svc) => svc.create(input).pipe(Effect.orDie))),
+          worktree: (input) =>
+            Effect.gen(function* () {
+              const info = yield* run(
+                modules.Worktree.Service.use((svc) => svc.makeWorktreeInfo({ name: input?.name }).pipe(Effect.orDie)),
+              )
+              const ready = yield* worktreeReady(info.name).pipe(Effect.forkScoped)
+              yield* run(modules.Worktree.Service.use((svc) => svc.createFromInfo(info).pipe(Effect.orDie)))
+              yield* Fiber.join(ready)
+              return info
+            }),
+          worktreeReady,
           worktreeRemove: (directory) =>
             run(modules.Worktree.Service.use((svc) => svc.remove({ directory })).pipe(Effect.ignore)),
           llmText: (value) => Effect.suspend(() => llm().text(value)),
@@ -193,7 +216,7 @@ function withContext<A, E>(
         return result
       }).pipe(Effect.ensuring(context.llm ? context.llm.reset : Effect.void)),
     ),
-    Effect.ensuring(scenario.reset ? resetState : Effect.void),
+    Effect.ensuring(scenario.reset ? resetState(options, scenario) : Effect.void),
   )
 }
 
@@ -256,12 +279,19 @@ function fakeLlmConfig(url: string): Partial<ConfigV1.Info> {
   }
 }
 
-const resetState = Effect.promise(async () => {
-  const modules = await runtime()
-  Flag.OPENCODE_SERVER_PASSWORD = original.OPENCODE_SERVER_PASSWORD
-  Flag.OPENCODE_SERVER_USERNAME = original.OPENCODE_SERVER_USERNAME
-  await disposeApps()
-  await modules.disposeAllInstances()
-  await modules.resetDatabase()
-  await Bun.sleep(25)
-})
+function resetState(options: Options, scenario: ActiveScenario) {
+  return Effect.gen(function* () {
+    const modules = yield* Effect.promise(() => runtime())
+    Flag.OPENCODE_SERVER_PASSWORD = original.OPENCODE_SERVER_PASSWORD
+    Flag.OPENCODE_SERVER_USERNAME = original.OPENCODE_SERVER_USERNAME
+    yield* trace(options, scenario, "reset apps start")
+    yield* Effect.promise(() => disposeApps())
+    yield* trace(options, scenario, "reset apps done")
+    yield* trace(options, scenario, "reset instances start")
+    yield* Effect.promise(() => modules.disposeAllInstances())
+    yield* trace(options, scenario, "reset instances done")
+    yield* trace(options, scenario, "reset database start")
+    yield* Effect.promise(() => modules.resetDatabase())
+    yield* trace(options, scenario, "reset database done")
+  })
+}

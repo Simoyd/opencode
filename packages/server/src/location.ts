@@ -2,6 +2,8 @@ import { Location } from "@opencode-ai/core/location"
 import { LocationServiceMap } from "@opencode-ai/core/location-services"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
+import { Flag } from "@opencode-ai/core/flag/flag"
+import { InvalidRequestError } from "@opencode-ai/protocol/errors"
 import { Effect, Layer } from "effect"
 import { HttpServerRequest } from "effect/unstable/http"
 import { HttpApiMiddleware } from "effect/unstable/httpapi"
@@ -10,6 +12,7 @@ export type LocationServices = Layer.Success<ReturnType<(typeof LocationServiceM
 
 export class LocationMiddleware extends HttpApiMiddleware.Service<LocationMiddleware, { provides: LocationServices }>()(
   "@opencode/HttpApiLocation",
+  { error: InvalidRequestError },
 ) {}
 
 export function response<A, E, R>(data: Effect.Effect<A, E, R>) {
@@ -53,6 +56,17 @@ export const layer = Layer.effect(
     return LocationMiddleware.of((effect) =>
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest
+        const url = new URL(request.url, "http://localhost")
+        if (
+          Flag.OPENCODE_AVALONIA_DISABLE_WORKSPACE_ROUTING &&
+          (url.searchParams.has("location[workspace]") || request.headers["x-opencode-workspace"] !== undefined)
+        ) {
+          return yield* new InvalidRequestError({
+            message: "Workspace routing is disabled",
+            kind: "Query",
+            field: url.searchParams.has("location[workspace]") ? "location[workspace]" : "x-opencode-workspace",
+          })
+        }
         return yield* effect.pipe(Effect.provide(locations.get(ref(request))))
       }),
     )

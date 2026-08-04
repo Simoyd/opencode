@@ -5,14 +5,17 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Effect, Option } from "effect"
 import { Session as SessionNs } from "@/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
-import { MessageID, PartID, type SessionID } from "../../src/session/schema"
+import { MessageID, PartID, SessionID } from "../../src/session/schema"
+import { SessionLifecycle } from "@/session/lifecycle"
 
 import { NotFoundError } from "@/storage/storage"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 
-const it = testEffect(LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node])))
+const it = testEffect(
+  LayerNode.compile(LayerNode.group([SessionNs.node, SessionLifecycle.node, MessageV2.node, SessionProjector.node])),
+)
 
 const withSession = <A, E, R>(
   fn: (input: { session: SessionNs.Interface; sessionID: SessionID }) => Effect.Effect<A, E, R>,
@@ -24,7 +27,7 @@ const withSession = <A, E, R>(
       return { session, sessionID: created.id }
     }),
     fn,
-    (input) => input.session.remove(input.sessionID).pipe(Effect.ignore),
+    (input) => input.session.removeLeaf(input.sessionID).pipe(Effect.ignore),
   )
 
 // Helper functions using Effect.gen
@@ -286,8 +289,8 @@ describe("MessageV2.page", () => {
       expect(resultA.items.every((item) => item.info.sessionID === a.id)).toBe(true)
       expect(resultB.items.every((item) => item.info.sessionID === b.id)).toBe(true)
 
-      yield* session.remove(a.id)
-      yield* session.remove(b.id)
+      yield* session.removeLeaf(a.id)
+      yield* session.removeLeaf(b.id)
     }),
   )
 
@@ -384,7 +387,7 @@ describe("MessageV2.parts", () => {
       Effect.gen(function* () {
         const [id] = yield* fill(sessionID, 1)
 
-        const result = yield* MessageV2.parts(id)
+        const result = yield* MessageV2.parts({ sessionID, messageID: id })
         expect(result).toHaveLength(1)
         expect(result[0].type).toBe("text")
         expect((result[0] as SessionV1.TextPart).text).toBe("m0")
@@ -397,7 +400,7 @@ describe("MessageV2.parts", () => {
       Effect.gen(function* () {
         const id = yield* addUser(sessionID)
 
-        const result = yield* MessageV2.parts(id)
+        const result = yield* MessageV2.parts({ sessionID, messageID: id })
         expect(result).toEqual([])
       }),
     ),
@@ -423,7 +426,7 @@ describe("MessageV2.parts", () => {
           text: "third",
         })
 
-        const result = yield* MessageV2.parts(id)
+        const result = yield* MessageV2.parts({ sessionID, messageID: id })
         expect(result).toHaveLength(3)
         expect((result[0] as SessionV1.TextPart).text).toBe("m0")
         expect((result[1] as SessionV1.TextPart).text).toBe("second")
@@ -434,8 +437,10 @@ describe("MessageV2.parts", () => {
 
   it.instance("returns empty for non-existent message id", () =>
     Effect.gen(function* () {
-      yield* SessionNs.Service
-      const result = yield* MessageV2.parts(MessageID.ascending())
+      const result = yield* MessageV2.parts({
+        sessionID: SessionID.make("ses_missing"),
+        messageID: MessageID.ascending(),
+      })
       expect(result).toEqual([])
     }),
   )
@@ -445,7 +450,7 @@ describe("MessageV2.parts", () => {
       Effect.gen(function* () {
         const [id] = yield* fill(sessionID, 1)
 
-        const result = yield* MessageV2.parts(id)
+        const result = yield* MessageV2.parts({ sessionID, messageID: id })
         expect(result[0].sessionID).toBe(sessionID)
         expect(result[0].messageID).toBe(id)
       }),
@@ -493,8 +498,8 @@ describe("MessageV2.get", () => {
       const result = yield* MessageV2.get({ sessionID: a.id, messageID: id })
       expect(result.info.id).toBe(id)
 
-      yield* session.remove(a.id)
-      yield* session.remove(b.id)
+      yield* session.removeLeaf(a.id)
+      yield* session.removeLeaf(b.id)
     }),
   )
 
@@ -754,6 +759,7 @@ describe("MessageV2.filterCompacted", () => {
   it.instance("fork remaps compaction tail_start_id for filterCompacted", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service
+      const lifecycle = yield* SessionLifecycle.Service
       const created = yield* session.create({})
 
       const u1 = yield* addUser(created.id, "first")
@@ -800,7 +806,7 @@ describe("MessageV2.filterCompacted", () => {
       const parentFiltered = MessageV2.filterCompacted(yield* MessageV2.stream(created.id))
       expect(parentFiltered.map((item) => item.info.id)).toEqual([c1, s1, u2, a2, u3, a3])
 
-      const forked = yield* session.fork({ sessionID: created.id })
+      const forked = yield* lifecycle.fork({ sessionID: created.id })
       const childFiltered = MessageV2.filterCompacted(yield* MessageV2.stream(forked.id))
       expect(childFiltered).toHaveLength(parentFiltered.length)
 
@@ -810,8 +816,8 @@ describe("MessageV2.filterCompacted", () => {
       expect(tailPart.tail_start_id).toBeDefined()
       expect(childFiltered.some((m) => m.info.id === tailPart.tail_start_id)).toBe(true)
 
-      yield* session.remove(forked.id)
-      yield* session.remove(created.id)
+      yield* session.removeLeaf(forked.id)
+      yield* session.removeLeaf(created.id)
     }),
   )
 
@@ -1012,7 +1018,7 @@ describe("MessageV2 consistency", () => {
         const [id] = yield* fill(sessionID, 1)
 
         const got = yield* MessageV2.get({ sessionID, messageID: id })
-        const standalone = yield* MessageV2.parts(id)
+        const standalone = yield* MessageV2.parts({ sessionID, messageID: id })
         expect(got.parts).toEqual(standalone)
       }),
     ),

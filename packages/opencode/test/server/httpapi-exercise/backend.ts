@@ -1,8 +1,9 @@
 import { ConfigProvider, Effect, Layer } from "effect"
 import { HttpRouter } from "effect/unstable/http"
 import { parse } from "./assertions"
+import { exerciseAuthProbeDirectory } from "./environment"
 import { runtime, type Runtime } from "./runtime"
-import type { ActiveScenario, BackendApp, CallResult, CaptureMode, SeededContext } from "./types"
+import type { ActiveScenario, BackendApp, CallResult, CaptureMode, RequestSpec, SeededContext } from "./types"
 
 type CallOptions = {
   auth?: {
@@ -17,26 +18,45 @@ export function call(scenario: ActiveScenario, ctx: SeededContext<unknown>, opti
   )
 }
 
-export function callAuthProbe(scenario: ActiveScenario, credentials: "missing" | "valid" = "missing") {
+export function callAuthProbe(
+  scenario: ActiveScenario,
+  credentials: "missing" | "valid" = "missing",
+  request?: (input: Request) => Response | Promise<Response>,
+) {
   return Effect.promise(async () => {
+    if (credentials === "valid" && scenario.method === "PATCH") {
+      const fs = await import("fs/promises")
+      await fs.mkdir(exerciseAuthProbeDirectory, { recursive: true })
+    }
     const controller = new AbortController()
-    return Promise.race([
-      Promise.resolve(
-        app(await runtime(), { auth: { password: "secret" } }).request(
-          toAuthProbeRequest(scenario, credentials, controller.signal),
-        ),
-      ).then((response) => capture(response, scenario.capture)),
-      Bun.sleep(1_000).then(() => {
+    const send =
+      request ?? (async (input: Request) => app(await runtime(), { auth: { password: "secret" } }).request(input))
+    const pending = Promise.resolve(send(toAuthProbeRequest(scenario, credentials, controller.signal))).then(
+      (response) => capture(response, scenario.capture),
+    )
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => {
         controller.abort("auth probe timed out")
-        return {
-          status: 0,
-          contentType: "",
-          text: "auth probe timed out",
-          body: undefined,
-          timedOut: true,
-        }
-      }),
-    ])
+        resolve("timeout")
+      }, 1_000)
+    })
+    try {
+      const result = await Promise.race([pending, timeout])
+      if (result !== "timeout") return result
+      await pending.catch((error: unknown) => {
+        if (!controller.signal.aborted) throw error
+      })
+      return {
+        status: 0,
+        contentType: "",
+        text: "auth probe timed out",
+        body: undefined,
+        timedOut: true,
+      }
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
   })
 }
 
@@ -87,12 +107,18 @@ function toRequest(scenario: ActiveScenario, ctx: SeededContext<unknown>) {
 }
 
 function toAuthProbeRequest(scenario: ActiveScenario, credentials: "missing" | "valid", signal: AbortSignal) {
-  const spec = scenario.authProbe ?? {
-    path: authProbePath(scenario.path),
-    body: scenario.method === "GET" ? undefined : {},
-  }
+  const spec: RequestSpec =
+    credentials === "valid"
+      ? (scenario.authProbe ?? validAuthProbe(scenario.method))
+      : {
+          path: authProbePath(scenario.path),
+          body: scenario.method === "GET" ? undefined : {},
+        }
   const headers = {
     ...(spec.body === undefined ? {} : { "content-type": "application/json" }),
+    ...(credentials === "valid" && scenario.method === "PATCH"
+      ? { "x-opencode-directory": exerciseAuthProbeDirectory }
+      : {}),
     ...spec.headers,
     ...(credentials === "valid" ? { authorization: basic("opencode", "secret") } : {}),
   }
@@ -102,6 +128,14 @@ function toAuthProbeRequest(scenario: ActiveScenario, credentials: "missing" | "
     body: spec.body === undefined ? undefined : JSON.stringify(spec.body),
     signal,
   })
+}
+
+function validAuthProbe(method: ActiveScenario["method"]): { path: string; body?: unknown } {
+  if (method === "GET") return { path: "/path" }
+  if (method === "POST") return { path: "/log", body: {} }
+  if (method === "PATCH") return { path: "/config", body: {} }
+  if (method === "PUT") return { path: "/auth/auth_probe", body: {} }
+  return { path: "/auth/auth_probe" }
 }
 
 function basic(username: string, password: string) {

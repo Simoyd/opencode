@@ -252,7 +252,7 @@ describe("revert + compact workflow", () => {
           sessionInfo = yield* session.get(sessionID)
           expect(sessionInfo.revert).toBeUndefined()
 
-          yield* session.remove(sessionID)
+          yield* session.removeLeaf(sessionID)
         }),
       { git: true },
     ),
@@ -342,7 +342,7 @@ describe("revert + compact workflow", () => {
           const messages = yield* session.messages({ sessionID })
           expect(messages.length).toBe(0)
 
-          yield* session.remove(sessionID)
+          yield* session.removeLeaf(sessionID)
         }),
       { git: true },
     ),

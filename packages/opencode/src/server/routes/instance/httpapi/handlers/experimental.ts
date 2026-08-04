@@ -7,6 +7,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { MCP } from "@/mcp"
 import { Project } from "@/project/project"
 import { Session } from "@/session/session"
+import { SessionLifecycle } from "@/session/lifecycle"
 import type { SessionID } from "@/session/schema"
 import { ToolJsonSchema } from "@/tool/json-schema"
 import { ToolRegistry } from "@/tool/registry"
@@ -15,6 +16,7 @@ import { Effect, Option } from "effect"
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
+import * as SessionError from "./session-errors"
 import { ConsoleSwitchPayload, SessionListQuery, ToolListQuery, WorktreeApiError } from "../groups/experimental"
 
 function mapWorktreeError<A, R>(self: Effect.Effect<A, Worktree.Error, R>) {
@@ -35,6 +37,7 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
     const sessions = yield* Session.Service
     const background = yield* BackgroundJob.Service
     const flags = yield* RuntimeFlags.Service
+    const lifecycle = yield* SessionLifecycle.Service
 
     const capabilities = Effect.fn("ExperimentalHttpApi.capabilities")(function* () {
       return { backgroundSubagents: flags.experimentalBackgroundSubagents }
@@ -167,7 +170,20 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
           job.metadata?.parentSessionId === ctx.params.sessionID &&
           job.metadata.background !== true,
       )
-      const promoted = yield* Effect.forEach(jobs, (job) => background.promote(job.id), { concurrency: "unbounded" })
+      const promoted = yield* Effect.forEach(
+        jobs,
+        (job) =>
+          SessionError.mapBusy(
+            lifecycle
+              .admit(ctx.params.sessionID, background.promote(job.id))
+              .pipe(
+                Effect.mapError((error) =>
+                  Session.BusyError.isInstance(error) ? error : new HttpApiError.BadRequest({}),
+                ),
+              ),
+          ),
+        { concurrency: "unbounded" },
+      )
       return promoted.some((job) => job !== undefined)
     })
 

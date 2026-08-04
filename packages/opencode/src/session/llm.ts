@@ -7,6 +7,7 @@ import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Context, Effect, Layer } from "effect"
 import * as Stream from "effect/Stream"
 import { streamText, wrapLanguageModel, type ModelMessage, type Tool } from "ai"
+import type { LanguageModelV3Middleware } from "@ai-sdk/provider"
 import type { LLMEvent } from "@opencode-ai/llm"
 import { LLMClient } from "@opencode-ai/llm/route"
 import type { LLMClientService } from "@opencode-ai/llm/route"
@@ -45,6 +46,7 @@ export type StreamInput = {
   tools: Record<string, Tool>
   retries?: number
   toolChoice?: "auto" | "required" | "none"
+  providerStarted?: Effect.Effect<void>
 }
 
 export type StreamRequest = StreamInput & {
@@ -239,6 +241,7 @@ const live: Layer.Layer<
           providerOptions: prepared.params.options,
           headers: prepared.headers,
           abort: input.abort,
+          providerStarted: input.providerStarted,
         })
         if (native.type === "supported") {
           yield* Effect.logInfo("llm runtime selected", {
@@ -275,82 +278,91 @@ const live: Layer.Layer<
       })
       // Default runtime path: AI SDK owns provider execution and tool dispatch;
       // LLMAISDK.toLLMEvents below normalizes fullStream parts for the processor.
-      return {
-        type: "ai-sdk" as const,
-        result: streamText({
-          onError(error) {
-            bridge.fork(
-              Effect.logError("stream error", {
-                providerID: input.model.providerID,
-                modelID: input.model.id,
-                "session.id": input.sessionID,
-                small: (input.small ?? false).toString(),
-                agent: input.agent.name,
-                mode: input.agent.mode,
-                error,
-              }),
+      const middleware: LanguageModelV3Middleware = {
+        specificationVersion: "v3",
+        async transformParams(args) {
+          if (args.type === "stream") {
+            // @ts-expect-error
+            args.params.prompt = ProviderTransform.message(
+              args.params.prompt,
+              input.model,
+              prepared.messageTransformOptions,
             )
-          },
-          // Copilot returns the authoritative billed amount only in provider-specific response fields.
-          includeRawChunks: input.model.providerID.includes("github-copilot"),
-          async experimental_repairToolCall(failed) {
-            const lower = failed.toolCall.toolName.toLowerCase()
-            if (lower !== failed.toolCall.toolName && prepared.tools[lower]) {
-              return {
-                ...failed.toolCall,
-                toolName: lower,
-              }
+          }
+          return args.params
+        },
+        ...(input.providerStarted
+          ? {
+              async wrapStream({ doStream }) {
+                const response = await doStream()
+                await bridge.promise(input.providerStarted!)
+                return response
+              },
             }
+          : {}),
+      }
+      const streamOptions = {
+        onError(error: unknown) {
+          bridge.fork(
+            Effect.logError("stream error", {
+              providerID: input.model.providerID,
+              modelID: input.model.id,
+              "session.id": input.sessionID,
+              small: (input.small ?? false).toString(),
+              agent: input.agent.name,
+              mode: input.agent.mode,
+              error,
+            }),
+          )
+        },
+        // Copilot returns the authoritative billed amount only in provider-specific response fields.
+        includeRawChunks: input.model.providerID.includes("github-copilot"),
+        async experimental_repairToolCall(failed) {
+          const lower = failed.toolCall.toolName.toLowerCase()
+          if (lower !== failed.toolCall.toolName && prepared.tools[lower]) {
             return {
               ...failed.toolCall,
-              input: JSON.stringify({
-                tool: failed.toolCall.toolName,
-                error: failed.error.message,
-              }),
-              toolName: "invalid",
+              toolName: lower,
             }
-          },
-          temperature: prepared.params.temperature,
-          topP: prepared.params.topP,
-          topK: prepared.params.topK,
-          providerOptions: ProviderTransform.providerOptions(input.model, prepared.params.options),
-          activeTools: Object.keys(prepared.tools).filter((x) => x !== "invalid"),
-          tools: prepared.tools,
-          toolChoice: input.toolChoice,
-          maxOutputTokens: prepared.params.maxOutputTokens,
-          abortSignal: input.abort,
-          headers: prepared.headers,
-          maxRetries: input.retries ?? 0,
-          messages: prepared.messages,
-          model: wrapLanguageModel({
-            model: language,
-            middleware: [
-              {
-                specificationVersion: "v3" as const,
-                async transformParams(args) {
-                  if (args.type === "stream") {
-                    // @ts-expect-error
-                    args.params.prompt = ProviderTransform.message(
-                      args.params.prompt,
-                      input.model,
-                      prepared.messageTransformOptions,
-                    )
-                  }
-                  return args.params
-                },
-              },
-            ],
-          }),
-          experimental_telemetry: {
-            isEnabled: cfg.experimental?.openTelemetry,
-            functionId: "session.llm",
-            tracer: telemetryTracer,
-            metadata: {
-              userId: cfg.username ?? "unknown",
-              sessionId: input.sessionID,
-            },
-          },
+          }
+          return {
+            ...failed.toolCall,
+            input: JSON.stringify({
+              tool: failed.toolCall.toolName,
+              error: failed.error.message,
+            }),
+            toolName: "invalid",
+          }
+        },
+        temperature: prepared.params.temperature,
+        topP: prepared.params.topP,
+        topK: prepared.params.topK,
+        providerOptions: ProviderTransform.providerOptions(input.model, prepared.params.options),
+        activeTools: Object.keys(prepared.tools).filter((x) => x !== "invalid"),
+        tools: prepared.tools,
+        toolChoice: input.toolChoice,
+        maxOutputTokens: prepared.params.maxOutputTokens,
+        abortSignal: input.abort,
+        headers: prepared.headers,
+        maxRetries: input.retries ?? 0,
+        messages: prepared.messages,
+        model: wrapLanguageModel({
+          model: language,
+          middleware: [middleware],
         }),
+        experimental_telemetry: {
+          isEnabled: cfg.experimental?.openTelemetry,
+          functionId: "session.llm",
+          tracer: telemetryTracer,
+          metadata: {
+            userId: cfg.username ?? "unknown",
+            sessionId: input.sessionID,
+          },
+        },
+      } satisfies Parameters<typeof streamText>[0]
+      return {
+        type: "ai-sdk" as const,
+        result: streamText(streamOptions),
       }
     })
 
@@ -370,12 +382,13 @@ const live: Layer.Layer<
             // Adapter seam: both runtimes expose the same LLMEvent stream. Native
             // already returns one; AI SDK streams are converted here.
             const state = LLMAISDK.adapterState()
-            return Stream.fromAsyncIterable(result.result.fullStream, (e) =>
+            const stream = Stream.fromAsyncIterable(result.result.fullStream, (e) =>
               e instanceof Error ? e : new Error(String(e)),
             ).pipe(
               Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
               Stream.flatMap((events) => Stream.fromIterable(events)),
             )
+            return stream
           }),
         ),
       )

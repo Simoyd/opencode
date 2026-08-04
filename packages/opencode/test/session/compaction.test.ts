@@ -203,6 +203,9 @@ function fake(
       return msg
     },
     updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
+    registerToolCall: Effect.fn("TestSessionProcessor.registerToolCall")(() =>
+      Effect.die(new Error("unexpected registerToolCall in compaction fake")),
+    ),
     completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
     process: Effect.fn("TestSessionProcessor.process")(() => Effect.succeed(result)),
   } satisfies SessionProcessorModule.SessionProcessor.Handle

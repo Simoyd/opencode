@@ -4,7 +4,6 @@ import { Slug } from "@opencode-ai/core/util/slug"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import path from "path"
-import { BackgroundJob } from "@/background/job"
 import { Decimal } from "decimal.js"
 import type { ProviderMetadata, Usage } from "@opencode-ai/llm"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -408,14 +407,25 @@ export const getUsage = (input: { model: Provider.Model; usage: Usage; metadata?
 
 export class BusyError extends Schema.TaggedErrorClass<BusyError>()("SessionBusyError", {
   sessionID: SessionID,
-}) {}
+}) {
+  static isInstance(input: unknown): input is BusyError {
+    return typeof input === "object" && input !== null && (input as { _tag?: unknown })._tag === "SessionBusyError"
+  }
+}
 
 export type NotFound = NotFoundError
+
+export type ForkInput = { sessionID: SessionID; messageID?: MessageID }
+
+export type PreparedFork = {
+  readonly info: Info
+  readonly messages: SessionV1.WithParts[]
+}
 
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<Info[]>
   readonly listGlobal: (input?: GlobalListInput) => Effect.Effect<GlobalInfo[]>
-  readonly create: (input?: {
+  readonly prepare: (input?: {
     parentID?: SessionID
     title?: string
     agent?: string
@@ -424,7 +434,10 @@ export interface Interface {
     permission?: PermissionV1.Ruleset
     workspaceID?: WorkspaceV2.ID
   }) => Effect.Effect<Info>
-  readonly fork: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<Info, NotFound>
+  readonly createPrepared: (info: Info) => Effect.Effect<Info>
+  readonly create: (input?: CreateInput) => Effect.Effect<Info>
+  readonly prepareFork: (input: ForkInput) => Effect.Effect<PreparedFork, NotFound>
+  readonly forkPrepared: (input: PreparedFork) => Effect.Effect<Info>
   readonly touch: (sessionID: SessionID) => Effect.Effect<void>
   readonly get: (id: SessionID) => Effect.Effect<Info, NotFound>
   readonly setTitle: (input: { sessionID: SessionID; title: string }) => Effect.Effect<void>
@@ -449,7 +462,7 @@ export interface Interface {
   readonly diff: (sessionID: SessionID) => Effect.Effect<Snapshot.FileDiff[]>
   readonly messages: (input: { sessionID: SessionID; limit?: number }) => Effect.Effect<SessionV1.WithParts[], NotFound>
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
-  readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
+  readonly removeLeaf: (sessionID: SessionID) => Effect.Effect<void, NotFound>
   readonly updateMessage: <T extends SessionV1.Info>(msg: T) => Effect.Effect<T>
   readonly removeMessage: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<MessageID>
   readonly removePart: (input: { sessionID: SessionID; messageID: MessageID; partID: PartID }) => Effect.Effect<PartID>
@@ -488,17 +501,15 @@ export type Patch = Omit<Partial<Info>, "time" | "share" | "summary" | "revert" 
 const layer: Layer.Layer<
   Service,
   never,
-  BackgroundJob.Service | RuntimeFlags.Service | Database.Service | EventV2Bridge.Service
+  RuntimeFlags.Service | Database.Service | EventV2Bridge.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
     const { db } = yield* Database.Service
     const database = yield* Database.Service
-    const background = yield* BackgroundJob.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
-
-    const createNext = Effect.fn("Session.createNext")(function* (input: {
+    const prepareNext = Effect.fn("Session.prepare")(function* (input: {
       id?: SessionID
       title?: string
       agent?: string
@@ -512,30 +523,37 @@ const layer: Layer.Layer<
     }) {
       const ctx = yield* InstanceState.context
       const result: Info = {
-        id: SessionID.descending(input.id),
-        slug: Slug.create(),
-        version: InstallationVersion,
-        projectID: ctx.project.id,
-        directory: input.directory,
-        path: input.path,
-        workspaceID: input.workspaceID,
-        parentID: input.parentID,
-        title: input.title ?? (input.parentID ? childTitlePrefix : parentTitlePrefix) + new Date().toISOString(),
-        agent: input.agent,
-        model: input.model,
-        metadata: input.metadata,
-        permission: input.permission ? [...input.permission] : undefined,
-        cost: 0,
-        tokens: EmptyTokens,
-        time: {
-          created: Date.now(),
-          updated: Date.now(),
-        },
+            id: SessionID.descending(input.id),
+            slug: Slug.create(),
+            version: InstallationVersion,
+            projectID: ctx.project.id,
+            directory: input.directory,
+            path: input.path,
+            workspaceID: input.workspaceID,
+            parentID: input.parentID,
+            title: input.title ?? (input.parentID ? childTitlePrefix : parentTitlePrefix) + new Date().toISOString(),
+            agent: input.agent,
+            model: input.model,
+            metadata: input.metadata,
+            permission: input.permission ? [...input.permission] : undefined,
+            cost: 0,
+            tokens: EmptyTokens,
+            time: {
+              created: Date.now(),
+              updated: Date.now(),
+            },
       }
+      return result
+    })
+
+    const createNext = Effect.fn("Session.create")(function* (input: Parameters<typeof prepareNext>[0]) {
+      const result = yield* prepareNext(input)
+      return yield* createPrepared(result)
+    })
+
+    const createPrepared = Effect.fn("Session.createPrepared")(function* (result: Info) {
       yield* Effect.logInfo("created", result)
-
       yield* events.publish(SessionV1.Event.Created, { sessionID: result.id, info: result })
-
       return result
     })
 
@@ -605,27 +623,10 @@ const layer: Layer.Layer<
       return rows.map(fromRow)
     })
 
-    const remove: Interface["remove"] = Effect.fnUntraced(function* (sessionID: SessionID) {
+    const removeLeaf: Interface["removeLeaf"] = Effect.fnUntraced(function* (sessionID: SessionID) {
       const session = yield* get(sessionID)
-      try {
-        // `remove` needs to work in all cases, such as broken sessions that
-        // run cleanup without instance state.
-        const hasInstance = yield* InstanceState.directory.pipe(
-          Effect.as(true),
-          Effect.catchCause(() => Effect.succeed(false)),
-        )
-
-        if (hasInstance) yield* cancelBackgroundJobs(background, sessionID)
-        const kids = yield* children(sessionID)
-        for (const child of kids) {
-          yield* remove(child.id)
-        }
-
-        yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session })
-        yield* events.remove(sessionID)
-      } catch (error) {
-        yield* Effect.logError("failed to remove session", { sessionID, error })
-      }
+      yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session })
+      yield* events.remove(sessionID)
     })
 
     const updateMessage = <T extends SessionV1.Info>(msg: T): Effect.Effect<T> =>
@@ -690,22 +691,52 @@ const layer: Layer.Layer<
       })
     })
 
-    const fork = Effect.fn("Session.fork")(function* (input: { sessionID: SessionID; messageID?: MessageID }) {
+    const prepare = Effect.fn("Session.prepare")(function* (input?: {
+      parentID?: SessionID
+      title?: string
+      agent?: string
+      model?: Schema.Schema.Type<typeof Model>
+      metadata?: typeof Metadata.Type
+      permission?: PermissionV1.Ruleset
+      workspaceID?: WorkspaceV2.ID
+    }) {
+      const ctx = yield* InstanceState.context
+      const workspace = yield* InstanceState.workspaceID
+      return yield* prepareNext({
+        parentID: input?.parentID,
+        directory: ctx.directory,
+        path: sessionPath(ctx.worktree, ctx.directory),
+        title: input?.title,
+        agent: input?.agent,
+        model: input?.model,
+        metadata: input?.metadata,
+        permission: input?.permission,
+        workspaceID: input?.workspaceID ?? workspace,
+      })
+    })
+
+    const prepareFork = Effect.fn("Session.prepareFork")(function* (input: ForkInput) {
       const ctx = yield* InstanceState.context
       const original = yield* get(input.sessionID)
       const title = getForkedTitle(original.title)
-      const session = yield* createNext({
+      const msgs = yield* messages({ sessionID: input.sessionID })
+      const cutoffIndex = input.messageID ? msgs.findIndex((msg) => msg.info.id === input.messageID) : msgs.length
+      if (cutoffIndex < 0) return yield* new NotFoundError({ message: `Message not found: ${input.messageID}` })
+      const info = yield* prepareNext({
         directory: ctx.directory,
         path: sessionPath(ctx.worktree, ctx.directory),
         workspaceID: original.workspaceID,
         title,
         metadata: structuredClone(original.metadata),
       })
-      const msgs = yield* messages({ sessionID: input.sessionID })
+      return { info, messages: msgs.slice(0, cutoffIndex) }
+    })
+
+    const forkPrepared = Effect.fn("Session.forkPrepared")(function* (input: PreparedFork) {
+      const session = yield* createPrepared(input.info)
       const idMap = new Map<string, MessageID>()
 
-      for (const msg of msgs) {
-        if (input.messageID && msg.info.id >= input.messageID) break
+      for (const msg of input.messages) {
         const newID = MessageID.ascending()
         idMap.set(msg.info.id, newID)
 
@@ -726,6 +757,20 @@ const layer: Layer.Layer<
           }
           if (p.type === "compaction" && p.tail_start_id) {
             p.tail_start_id = idMap.get(p.tail_start_id)
+          }
+          if (p.type === "text" && p.metadata) {
+            const metadata = structuredClone(p.metadata)
+            for (const key of [
+              "compaction_owner_marker_id",
+              "compaction_replay_source_message_id",
+              "source_message_id",
+            ] as const) {
+              const sourceID = metadata[key]
+              if (typeof sourceID !== "string") continue
+              const mapped = idMap.get(sourceID)
+              if (mapped) metadata[key] = mapped
+            }
+            p.metadata = metadata
           }
           yield* updatePart(p)
         }
@@ -908,8 +953,11 @@ const layer: Layer.Layer<
     return Service.of({
       list,
       listGlobal,
+      prepare,
+      createPrepared,
       create,
-      fork,
+      prepareFork,
+      forkPrepared,
       touch,
       get,
       setTitle,
@@ -925,7 +973,7 @@ const layer: Layer.Layer<
       diff,
       messages,
       children,
-      remove,
+      removeLeaf,
       updateMessage,
       removeMessage,
       removePart,
@@ -936,23 +984,6 @@ const layer: Layer.Layer<
     })
   }),
 )
-
-const cancelBackgroundJobs = Effect.fn("Session.cancelBackgroundJobs")(function* (
-  background: BackgroundJob.Interface,
-  sessionID: SessionID,
-) {
-  const jobs = yield* background.list()
-  yield* Effect.forEach(
-    jobs.filter((job) => {
-      if (job.status !== "running") return false
-      if (job.id === sessionID) return true
-      if (job.metadata?.sessionId === sessionID) return true
-      return job.metadata?.parentSessionId === sessionID
-    }),
-    (job) => background.cancel(job.id),
-    { concurrency: "unbounded", discard: true },
-  )
-})
 
 function listByProject(
   db: Database.Interface["db"],
@@ -1012,7 +1043,7 @@ function listByProject(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [BackgroundJob.node, RuntimeFlags.node, Database.node, EventV2Bridge.node],
+  deps: [RuntimeFlags.node, Database.node, EventV2Bridge.node],
 })
 
 export * as Session from "./session"

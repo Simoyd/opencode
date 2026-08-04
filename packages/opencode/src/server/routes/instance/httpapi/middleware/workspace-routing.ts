@@ -84,7 +84,7 @@ function selectedV2WorkspaceID(
 }
 
 function defaultDirectory(request: HttpServerRequest.HttpServerRequest, url: URL): string {
-  return url.searchParams.get("directory") || request.headers["x-opencode-directory"] || process.cwd()
+  return request.headers["x-opencode-directory"] || url.searchParams.get("directory") || process.cwd()
 }
 
 function shouldStayOnControlPlane(request: HttpServerRequest.HttpServerRequest, url: URL): boolean {
@@ -157,16 +157,18 @@ function planWorkspaceRequest(
   })
 }
 
-function planRequest(
+function planRequestWithoutSession(
   request: HttpServerRequest.HttpServerRequest,
-  session?: Session.Info,
 ): Effect.Effect<RequestPlan, never, Workspace.Service> {
   return Effect.gen(function* () {
     const url = requestURL(request)
     const envWorkspaceID = configuredWorkspaceID()
+    if (Flag.OPENCODE_AVALONIA_DISABLE_WORKSPACE_ROUTING && (url.searchParams.has("workspace") || envWorkspaceID)) {
+      return RequestPlan.InvalidWorkspace()
+    }
     const workspaceID = url.pathname.startsWith("/api/")
-      ? selectedV2WorkspaceID(url, session?.workspaceID)
-      : selectedWorkspaceID(url, session?.workspaceID)
+      ? selectedV2WorkspaceID(url)
+      : selectedWorkspaceID(url)
     if (workspaceID === InvalidWorkspaceID) return RequestPlan.InvalidWorkspace()
     const workspace = yield* resolveWorkspace(workspaceID, envWorkspaceID)
 
@@ -179,9 +181,26 @@ function planRequest(
     }
 
     return RequestPlan.Local({
-      directory: session?.directory || defaultDirectory(request, url),
+      directory: defaultDirectory(request, url),
       workspaceID: envWorkspaceID ?? workspaceID,
     })
+  })
+}
+
+function planSessionRequest(
+  request: HttpServerRequest.HttpServerRequest,
+  session: Session.Info,
+): Effect.Effect<RequestPlan, never, Workspace.Service> {
+  return Effect.gen(function* () {
+    const url = requestURL(request)
+    const workspace = yield* resolveWorkspace(session.workspaceID, undefined)
+    if (session.workspaceID && workspace === undefined) {
+      return RequestPlan.MissingWorkspace({ workspaceID: session.workspaceID })
+    }
+    if (workspace !== undefined && !shouldStayOnControlPlane(request, url)) {
+      return yield* planWorkspaceRequest(request, url, workspace)
+    }
+    return RequestPlan.Local({ directory: session.directory, workspaceID: session.workspaceID })
   })
 }
 
@@ -220,16 +239,18 @@ function routeHttpApiWorkspace<E>(
   return Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest
     const sessionID = getWorkspaceRouteSessionID(requestURL(request))
-    const session = sessionID
-      ? yield* Session.Service.use((svc) => svc.get(sessionID)).pipe(
-          Effect.catchIf(
-            (error): error is NotFoundError => NotFoundError.isInstance(error),
-            () => Effect.succeed(undefined),
-          ),
-          Effect.catchDefect(() => Effect.succeed(undefined)),
-        )
-      : undefined
-    const plan = yield* planRequest(request, session)
+    if (!sessionID) {
+      const plan = yield* planRequestWithoutSession(request)
+      return yield* routeWorkspace(client, effect, plan)
+    }
+    const session = yield* Session.Service.use((svc) => svc.get(sessionID)).pipe(
+      Effect.map((value) => ({ found: true as const, value })),
+      Effect.catchIf(
+        (error): error is NotFoundError => NotFoundError.isInstance(error),
+        () => Effect.succeed({ found: false as const }),
+      ),
+    )
+    const plan = session.found ? yield* planSessionRequest(request, session.value) : yield* planRequestWithoutSession(request)
     return yield* routeWorkspace(client, effect, plan)
   })
 }

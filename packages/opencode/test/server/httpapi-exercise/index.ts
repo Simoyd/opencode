@@ -17,7 +17,7 @@
  * - `.json(...)` / `.jsonEffect(...)` assert response shape and optional side effects.
  * - `.mutating()` tells the runner to reset isolated state after destructive routes.
  */
-import { Effect } from "effect"
+import { Effect, Fiber } from "effect"
 import { OpenApi } from "effect/unstable/httpapi"
 import { TestLLMServer } from "../../lib/llm-server"
 import path from "path"
@@ -262,6 +262,12 @@ const scenarios: Scenario[] = [
     }))
     .status(204, undefined, "status"),
   http.protected.get("/provider", "provider.list").json(),
+  http.protected.get("/provider/runtime", "provider.runtime").json(200, (body) => {
+    object(body)
+    array(body.all)
+    object(body.default)
+    array(body.connected)
+  }),
   http.protected.get("/provider/auth", "provider.auth").json(),
   http.protected
     .post("/provider/{providerID}/oauth/authorize", "provider.oauth.authorize")
@@ -536,6 +542,7 @@ const scenarios: Scenario[] = [
   http.protected
     .post("/experimental/worktree", "worktree.create")
     .mutating()
+    .seeded((ctx) => ctx.worktreeReady("api-dsl").pipe(Effect.forkScoped))
     .at((ctx) => ({ path: "/experimental/worktree", headers: ctx.headers(), body: { name: "api-dsl" } }))
     .jsonEffect(
       200,
@@ -543,6 +550,7 @@ const scenarios: Scenario[] = [
         Effect.gen(function* () {
           object(body)
           check(typeof body.directory === "string", "created worktree should include directory")
+          yield* Fiber.join(ctx.state)
           yield* ctx.worktreeRemove(body.directory)
         }),
       "status",
@@ -1281,6 +1289,59 @@ const scenarios: Scenario[] = [
       check(body.length === 0, "new session should have no messages")
     }),
   http.protected
+    .post("/session/{sessionID}/context/stage", "session.context.stage")
+    .mutating()
+    .seeded((ctx) => ctx.session({ title: "Staged context session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/context/stage", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: { id: "ctx_httpapi", parts: [{ type: "text", text: "exercise staged context" }] },
+    }))
+    .json(200, (body) => {
+      object(body)
+      check(body.id === "ctx_httpapi", "staged context should preserve its requested ID")
+    }),
+  http.protected
+    .get("/session/{sessionID}/context/stage", "session.context.stage.list")
+    .seeded((ctx) => ctx.session({ title: "List staged context session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/context/stage", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, array),
+  http.protected
+    .delete("/session/{sessionID}/context/stage", "session.context.stage.clear")
+    .mutating()
+    .seeded((ctx) => ctx.session({ title: "Clear staged context session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/context/stage", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .status(204),
+  http.protected
+    .delete("/session/{sessionID}/context/stage/{contextID}", "session.context.stage.clear.item")
+    .mutating()
+    .seeded((ctx) => ctx.session({ title: "Clear staged context item session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/context/stage/{contextID}", {
+        sessionID: ctx.state.id,
+        contextID: "ctx_httpapi_missing",
+      }),
+      headers: ctx.headers(),
+    }))
+    .status(204),
+  http.protected
+    .get("/session/{sessionID}/compaction", "session.compaction.catalog")
+    .seeded((ctx) => ctx.session({ title: "Compaction catalog session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/compaction", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, (body) => {
+      object(body)
+      array(body.items)
+    }),
+  http.protected
     .get("/session/{sessionID}/message/{messageID}", "session.message")
     .seeded((ctx) =>
       Effect.gen(function* () {
@@ -1420,16 +1481,15 @@ const scenarios: Scenario[] = [
     .seeded((ctx) =>
       Effect.gen(function* () {
         const session = yield* ctx.session({ title: "Init session" })
-        const message = yield* ctx.message(session.id, { text: "initialize" })
         yield* ctx.llmText("initialized")
         yield* ctx.llmText("initialized")
-        return { session, message }
+        return { session, messageID: ctx.messageID() }
       }),
     )
     .at((ctx) => ({
       path: route("/session/{sessionID}/init", { sessionID: ctx.state.session.id }),
       headers: ctx.headers(),
-      body: { providerID: "test", modelID: "test-model", messageID: ctx.state.message.info.id },
+      body: { providerID: "test", modelID: "test-model", messageID: ctx.state.messageID },
     }))
     .jsonEffect(200, (body, ctx) =>
       Effect.gen(function* () {
@@ -1737,7 +1797,6 @@ const scenarios: Scenario[] = [
   http.protected
     .post("/global/upgrade", "global.upgrade")
     .global()
-    .probe({ path: "/global/upgrade", body: { target: 1 } })
     .at(() => ({ path: "/global/upgrade", body: { target: 1 } }))
     .status(400),
 ]

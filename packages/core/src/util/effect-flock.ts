@@ -99,7 +99,7 @@ export namespace EffectFlock {
     Effect.gen(function* () {
       const global = yield* Global.Service
       const fs = yield* FSUtil.Service
-      const lockRoot = path.join(global.state, "locks")
+      const lockRoot = global.locks
       const hostname = os.hostname()
       const ensuredDirs = new Set<string>()
 

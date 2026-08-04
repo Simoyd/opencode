@@ -34,7 +34,8 @@ import { LLM } from "@/session/llm"
 import { SessionProcessor } from "@/session/processor"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
-import { SessionRunState } from "@/session/run-state"
+import { SessionLifecycle } from "@/session/lifecycle"
+import { SessionStagedContext } from "@/session/staged-context"
 import { Session } from "@/session/session"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
@@ -130,9 +131,9 @@ const cors = (corsOptions?: CorsOptions) =>
 // Route tree:
 // - rootApiRoutes: typed /global/* and control routes; auth is declared by RootHttpApi.
 // - eventApiRoutes: typed SSE route with instance routing context and its existing API contract.
-// - ptyConnectApiRoutes: typed WebSocket upgrade route with ticket-aware auth.
+// - ptyConnectApiRoutes: typed WebSocket upgrade route with Basic auth and a secondary ticket guard.
 // - instanceApiRoutes: remaining typed instance routes.
-// - uiRoute: raw catch-all fallback; auth is router middleware so public static assets can bypass it.
+// - uiRoute: raw catch-all fallback protected by router-level Basic auth.
 const authOnlyRouterLayer = authorizationRouterMiddleware.layer.pipe(Layer.provide(ServerAuth.Config.layer))
 const httpApiAuthLayer = authorizationLayer.pipe(Layer.provide(ServerAuth.Config.layer))
 const ptyConnectHttpApiAuthLayer = ptyConnectAuthorizationLayer.pipe(Layer.provide(ServerAuth.Config.layer))
@@ -238,7 +239,8 @@ const app = LayerNode.group([
   BackgroundJob.node,
   RuntimeFlags.node,
   EventV2Bridge.node,
-  SessionRunState.node,
+  SessionLifecycle.node,
+  SessionStagedContext.node,
   SessionProcessor.node,
   SessionCompaction.node,
   SessionRevert.node,

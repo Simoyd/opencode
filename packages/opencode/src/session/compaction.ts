@@ -433,17 +433,47 @@ const layer = Layer.effect(
             tools: original.tools,
             system: original.system,
           })
+          const hasProtocolCarrier = replay.parts.some(
+            (part) => part.type === "text" || (part.type === "file" && MessageV2.isMedia(part.mime)),
+          )
           for (const part of replay.parts) {
             if (part.type === "compaction") continue
             const replayPart =
               part.type === "file" && MessageV2.isMedia(part.mime)
                 ? { type: "text" as const, text: `[Attached ${part.mime}: ${part.filename ?? "file"}]` }
                 : part
+            const metadata =
+              replayPart.type === "text"
+                ? {
+                    ...(part.type === "text" ? (part.metadata ?? {}) : {}),
+                    compaction_replay: true,
+                    compaction_owner_marker_id: userMessage.id,
+                    compaction_replay_source_message_id: original.id,
+                    source_message_id: part.messageID,
+                  }
+                : undefined
             yield* session.updatePart({
               ...replayPart,
               id: PartID.ascending(),
               messageID: replayMsg.id,
               sessionID: input.sessionID,
+              ...(metadata ? { metadata } : {}),
+            })
+          }
+          if (!hasProtocolCarrier) {
+            yield* session.updatePart({
+              id: PartID.ascending(),
+              messageID: replayMsg.id,
+              sessionID: input.sessionID,
+              type: "text",
+              text: "",
+              synthetic: true,
+              metadata: {
+                compaction_replay: true,
+                compaction_owner_marker_id: userMessage.id,
+                compaction_replay_source_message_id: original.id,
+              },
+              time: { start: Date.now(), end: Date.now() },
             })
           }
         }
@@ -491,7 +521,10 @@ const layer = Layer.effect(
               // Internal marker for auto-compaction followups so provider plugins
               // can distinguish them from manual post-compaction user prompts.
               // This is not a stable plugin contract and may change or disappear.
-              metadata: { compaction_continue: true },
+              metadata: {
+                compaction_continue: true,
+                compaction_owner_marker_id: userMessage.id,
+              },
               synthetic: true,
               text,
               time: {

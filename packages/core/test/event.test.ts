@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, Stream } from "effect"
+import { Cause, Context, DateTime, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, Scope, Stream } from "effect"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Event } from "@opencode-ai/schema/event"
 import { Session } from "@opencode-ai/schema/session"
@@ -210,6 +210,189 @@ describe("EventV2", () => {
       expect(
         yield* db.select().from(EventSequenceTable).where(eq(EventSequenceTable.aggregate_id, aggregateID)).all(),
       ).toEqual([])
+    }),
+  )
+
+  it.effect("publishes one durable transaction as an all-or-none batch", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const aggregateID = EventV2.ID.create()
+      const observed = new Array<string>()
+      yield* events.listen((event) =>
+        Effect.sync(() => {
+          observed.push((event.data as { text?: string }).text ?? "")
+        }),
+      )
+
+      const result = yield* events.publishTransaction((publisher) =>
+        Effect.gen(function* () {
+          yield* publisher.publish(SyncMessage, { id: aggregateID, text: "one" })
+          yield* publisher.publish(SyncMessage, { id: aggregateID, text: "two" })
+          return "committed"
+        }),
+      )
+      const rows = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, aggregateID))
+        .all()
+        .pipe(Effect.orDie)
+
+      expect(result).toBe("committed")
+      expect(rows.map((row) => row.seq)).toEqual([0, 1])
+      expect(observed).toEqual(["one", "two"])
+    }),
+  )
+
+  it.effect("rolls back every durable publication when a transaction member fails", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const aggregateID = EventV2.ID.create()
+      const observed = new Array<string>()
+      yield* events.listen((event) =>
+        Effect.sync(() => {
+          observed.push(event.type)
+        }),
+      )
+
+      const exit = yield* events
+        .publishTransaction((publisher) =>
+          Effect.gen(function* () {
+            yield* publisher.publish(SyncMessage, { id: aggregateID, text: "one" })
+            yield* publisher.publish(SyncMessage, { id: aggregateID, text: "two" }, {
+              commit: () => Effect.die("transaction member failed"),
+            })
+          }),
+        )
+        .pipe(Effect.exit)
+      const rows = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, aggregateID))
+        .all()
+        .pipe(Effect.orDie)
+
+      expect(String(exit)).toContain("transaction member failed")
+      expect(rows).toEqual([])
+      expect(observed).toEqual([])
+    }),
+  )
+
+  it.effect("closes admission without waiting for an already admitted listener", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const scope = yield* Scope.make()
+      const context = yield* Layer.buildWithScope(
+        EventV2.layerWith().pipe(Layer.provide(Layer.succeed(Database.Service, database))),
+        scope,
+      )
+      const events = Context.get(context, EventV2.Service)
+      const admitted = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const finished = yield* Deferred.make<void>()
+      yield* events.listen(() =>
+        Deferred.succeed(admitted, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.ensuring(Deferred.succeed(finished, undefined)),
+        ),
+      )
+
+      const publishing = yield* events.publish(SyncMessage, { id: "dispose", text: "blocked" }).pipe(Effect.forkChild)
+      yield* Deferred.await(admitted)
+      yield* Scope.close(scope, Exit.void)
+
+      const rejected = yield* events.publish(SyncMessage, { id: "after-dispose", text: "rejected" }).pipe(Effect.exit)
+      expect(Exit.isFailure(rejected) && Cause.hasInterrupts(rejected.cause)).toBeTrue()
+      expect(yield* Deferred.isDone(finished)).toBeFalse()
+
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(publishing)
+      yield* Deferred.await(finished)
+    }),
+  )
+
+  it.effect("rejects every late admission and live descendants after close", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const scope = yield* Scope.make()
+      const context = yield* Layer.buildWithScope(
+        EventV2.layerWith().pipe(Layer.provide(Layer.succeed(Database.Service, database))),
+        scope,
+      )
+      const events = Context.get(context, EventV2.Service)
+      const admitted = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const finished = yield* Deferred.make<void>()
+      let descendant: Exit.Exit<unknown> | undefined
+      yield* events.listen((event) => {
+        if (event.type !== Message.type || (event.data as { text?: unknown }).text !== "root") return Effect.void
+        return Deferred.succeed(admitted, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.andThen(events.publish(Message, { text: "descendant" }).pipe(Effect.exit)),
+          Effect.tap((exit) => Effect.sync(() => (descendant = exit))),
+          Effect.ensuring(Deferred.succeed(finished, undefined)),
+          Effect.asVoid,
+        )
+      })
+      const admittedStream = yield* events.all().pipe(Stream.runDrain, Effect.forkChild)
+      yield* Effect.yieldNow
+
+      yield* events.publish(Message, { text: "root" }, { awaitObservers: false })
+      yield* Deferred.await(admitted)
+      yield* Scope.close(scope, Exit.void)
+
+      const late = yield* Effect.all([
+        events.publish(Message, { text: "late" }).pipe(Effect.exit),
+        events.listen(() => Effect.void).pipe(Effect.exit),
+        events.afterNotify(() => Effect.void).pipe(Effect.exit),
+        events.project(Message, () => Effect.void).pipe(Effect.exit),
+        events.subscribe(Message).pipe(Stream.runHead, Effect.exit),
+        events.all().pipe(Stream.runHead, Effect.exit),
+        events.durable({ aggregateID: "late" }).pipe(Stream.runHead, Effect.exit),
+        events.route(() => undefined).pipe(Effect.exit),
+      ])
+      expect(
+        late.every((exit) => {
+          const result = exit as Exit.Exit<unknown, unknown>
+          return Exit.isFailure(result) && Cause.hasInterrupts(result.cause)
+        }),
+      ).toBeTrue()
+      expect(yield* Deferred.isDone(finished)).toBeFalse()
+
+      yield* Deferred.succeed(release, undefined)
+      yield* Deferred.await(finished)
+      expect(Exit.isFailure(descendant!) && Cause.hasInterrupts(descendant!.cause)).toBeTrue()
+      expect(Exit.isFailure(yield* Fiber.await(admittedStream))).toBeFalse()
+    }),
+  )
+
+  it.effect("admits controlled route queues in order without serializing arbitrary observer batches", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const admitted = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const finished = yield* Deferred.make<void>()
+      const routed = new Array<string>()
+      yield* events.listen((event) => {
+        if ((event.data as { text?: unknown }).text !== "busy") return Effect.void
+        return Deferred.succeed(admitted, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.ensuring(Deferred.succeed(finished, undefined)),
+          Effect.asVoid,
+        )
+      })
+      yield* events.route((event) => routed.push((event.data as { text: string }).text))
+
+      yield* events.publish(Message, { text: "busy" }, { awaitObservers: false })
+      yield* Deferred.await(admitted)
+      yield* events.publish(Message, { text: "later" }, { awaitObservers: false })
+
+      expect(routed).toEqual(["busy", "later"])
+      expect(yield* Deferred.isDone(finished)).toBeFalse()
+      yield* Deferred.succeed(release, undefined)
+      yield* Deferred.await(finished)
     }),
   )
 

@@ -12,6 +12,7 @@ import { HttpApiBuilder } from "effect/unstable/httpapi"
 import * as Sse from "effect/unstable/encoding/Sse"
 import { RootHttpApi } from "../api"
 import { GlobalUpgradeInput } from "../groups/global"
+import { SelectedEventProjection } from "@/server/shared/selected-event-projection"
 
 function eventData(data: unknown): Sse.Event {
   return {
@@ -32,21 +33,33 @@ function parseBody(body: string) {
 
 function eventResponse() {
   return Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest
+    const selectedProjection = SelectedEventProjection.selected(request)
+    // Register eagerly so events published after request admission cannot be
+    // lost while the response body starts or emits server.connected.
+    const queue = yield* Queue.unbounded<GlobalBusEvent>()
+    const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
+    GlobalBus.on("event", handler)
+    yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", handler)))
     yield* Effect.logInfo("global event connected")
-    const events = Stream.callback<GlobalBusEvent>((queue) => {
-      const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
-      return Effect.acquireRelease(
-        Effect.sync(() => GlobalBus.on("event", handler)),
-        () => Effect.sync(() => GlobalBus.off("event", handler)),
-      )
-    })
+    const events = Stream.fromQueue(queue).pipe(
+      Stream.filter((event) =>
+        selectedProjection
+          ? SelectedEventProjection.includesInstanceEvent({
+              type: event.payload.type ?? "",
+              properties: event.payload.properties,
+            })
+          : event.payload.type !== SelectedEventProjection.CatalogChangedType,
+      ),
+    )
     const heartbeat = Stream.tick("10 seconds").pipe(
       Stream.drop(1),
       Stream.map(() => ({ payload: { id: EventV2.ID.create(), type: "server.heartbeat", properties: {} } })),
     )
 
+    const connected = { payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }
     return HttpServerResponse.stream(
-      Stream.make({ payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }).pipe(
+      Stream.make(connected).pipe(
         Stream.concat(events.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
         Stream.map(eventData),
         Stream.pipeThroughChannel(Sse.encode()),
@@ -59,6 +72,7 @@ function eventResponse() {
           "Cache-Control": "no-cache, no-transform",
           "X-Accel-Buffering": "no",
           "X-Content-Type-Options": "nosniff",
+          ...SelectedEventProjection.acknowledgement(selectedProjection),
         },
       },
     )

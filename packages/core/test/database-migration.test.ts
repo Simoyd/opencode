@@ -15,6 +15,7 @@ import eventSourcedSessionInputMigration from "@opencode-ai/core/database/migrat
 import contextEpochAgentMigration from "@opencode-ai/core/database/migration/20260605042240_add_context_epoch_agent"
 import simplifyIntegrationCredentialsMigration from "@opencode-ai/core/database/migration/20260611192811_lush_chimera"
 import simplifySessionInputMigration from "@opencode-ai/core/database/migration/20260622202450_simplify_session_input"
+import compactionRegionMigration from "@opencode-ai/core/database/migration/20260722200939_compaction_region"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -95,6 +96,57 @@ describe("DatabaseMigration", () => {
           { name: "session_message_session_time_created_id_idx" },
           { name: "session_message_session_type_seq_idx" },
         ])
+      }),
+    )
+  })
+
+  test("backfills populated compaction regions with fresh-schema-equivalent structure", async () => {
+    await run(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        yield* DatabaseMigration.apply(db)
+        const freshColumns = yield* db.all<{ name: string; type: string; notnull: number; pk: number }>(
+          sql`SELECT name, type, "notnull", pk FROM pragma_table_info('compaction_region') ORDER BY cid`,
+        )
+        const freshIndexes = yield* db.all<{ name: string; unique: number }>(
+          sql`SELECT name, "unique" FROM pragma_index_list('compaction_region') WHERE origin != 'pk' ORDER BY name`,
+        )
+        yield* db.run(sql`DROP TABLE compaction_region`)
+        yield* db.run(sql`DELETE FROM migration WHERE id = ${compactionRegionMigration.id}`)
+        yield* db.run(
+          sql`INSERT INTO project (id, worktree, time_created, time_updated, sandboxes) VALUES ('global', '/project', 1, 1, '[]')`,
+        )
+        yield* db.run(
+          sql`INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) VALUES ('ses_compact', 'global', 'compact', '/project', 'Compact', 'test', 1, 1)`,
+        )
+        yield* db.run(
+          sql`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES ('msg_source', 'ses_compact', 1, 1, '{"role":"user","agent":"build","model":{"providerID":"test","modelID":"test"},"time":{"created":1}}'), ('msg_marker', 'ses_compact', 2, 2, '{"role":"user","agent":"build","model":{"providerID":"test","modelID":"test"},"time":{"created":2}}'), ('msg_summary', 'ses_compact', 3, 3, '{"role":"assistant","parentID":"msg_marker","summary":true,"finish":"stop","time":{"created":3}}')`,
+        )
+        yield* db.run(
+          sql`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES ('part_source', 'msg_source', 'ses_compact', 1, 1, '{"type":"text","text":"source"}'), ('part_marker', 'msg_marker', 'ses_compact', 2, 2, '{"type":"compaction","auto":false}'), ('part_summary', 'msg_summary', 'ses_compact', 3, 3, '{"type":"text","text":"summary text"}')`,
+        )
+
+        yield* DatabaseMigration.applyOnly(db, [compactionRegionMigration])
+
+        expect(yield* db.all(sql`SELECT * FROM compaction_region`)).toEqual([
+          {
+            session_id: "ses_compact",
+            marker_id: "msg_marker",
+            start_message_id: "msg_source",
+            summary_message_id: "msg_summary",
+            summary_preview: "summary text",
+            physical_message_count: 1,
+            semantic_message_count: 1,
+          },
+        ])
+        expect(
+          yield* db.all(sql`SELECT name, type, "notnull", pk FROM pragma_table_info('compaction_region') ORDER BY cid`),
+        ).toEqual(freshColumns)
+        expect(
+          yield* db.all(
+            sql`SELECT name, "unique" FROM pragma_index_list('compaction_region') WHERE origin != 'pk' ORDER BY name`,
+          ),
+        ).toEqual(freshIndexes)
       }),
     )
   })

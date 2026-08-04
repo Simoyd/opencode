@@ -18,6 +18,7 @@ import { described } from "./metadata"
 import { QueryBoolean } from "./query"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { SessionBusyError } from "../errors"
 
 const ConsoleStateResponse = Schema.Struct({
   consoleManagedProviders: Schema.mutable(Schema.Array(Schema.String)),
@@ -236,7 +237,7 @@ export const ExperimentalApi = HttpApi.make("experimental")
           params: { sessionID: SessionID },
           query: WorkspaceRoutingQuery,
           success: described(Schema.Boolean, "Backgrounded subagents"),
-          error: HttpApiError.BadRequest,
+          error: [HttpApiError.BadRequest, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "experimental.session.background",

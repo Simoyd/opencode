@@ -9,6 +9,8 @@ import { DataProvider, useData } from "../../../src/context/data"
 import { createEventSource, createFetch, directory, json } from "../../fixture/tui-sdk"
 import { TestTuiContexts } from "../../fixture/tui-environment"
 
+type RoutedGlobalEvent = Extract<GlobalEvent, { directory: string }>
+
 async function wait(fn: () => boolean, timeout = 2000) {
   const start = Date.now()
   while (!fn()) {
@@ -17,8 +19,8 @@ async function wait(fn: () => boolean, timeout = 2000) {
   }
 }
 
-function global(payload: Event): GlobalEvent {
-  return { directory, project: "proj_test", payload }
+function global(payload: Event): RoutedGlobalEvent {
+  return { directory, project: "proj_test", payload: payload as RoutedGlobalEvent["payload"] }
 }
 
 function emitEvent(events: ReturnType<typeof createEventSource>, payload: Event) {

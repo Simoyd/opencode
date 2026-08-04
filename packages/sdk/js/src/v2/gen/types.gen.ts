@@ -5,17 +5,31 @@ export type ClientOptions = {
 }
 
 export type Event =
+  | SelectedEventSessionCreated
+  | SelectedEventSessionUpdated
+  | SelectedEventSessionDeleted
+  | SelectedEventMessageUpdated
+  | SelectedEventMessageRemoved
+  | SelectedEventMessagePartUpdated
+  | SelectedEventMessagePartRemoved
+  | SelectedEventMessagePartDelta
+  | SelectedEventSessionError
+  | SelectedEventTodoUpdated
+  | SelectedEventPermissionAsked
+  | SelectedEventPermissionReplied
+  | SelectedEventSessionStatus
+  | SelectedEventQuestionAsked
+  | SelectedEventQuestionReplied
+  | SelectedEventQuestionRejected
+  | SelectedEventSessionCompacted
+  | SelectedEventCompactionCatalogChanged
+  | SelectedEventServerConnected
+  | SelectedEventServerHeartbeat
+  | SelectedEventGlobalDisposed
   | EventModelsDevRefreshed
   | EventIntegrationUpdated
   | EventIntegrationConnectionUpdated
   | EventCatalogUpdated
-  | EventSessionCreated
-  | EventSessionUpdated
-  | EventSessionDeleted
-  | EventMessageUpdated
-  | EventMessageRemoved
-  | EventMessagePartUpdated
-  | EventMessagePartRemoved
   | EventSessionNextAgentSwitched
   | EventSessionNextModelSwitched
   | EventSessionNextMoved
@@ -48,9 +62,7 @@ export type Event =
   | EventSessionNextRevertStaged
   | EventSessionNextRevertCleared
   | EventSessionNextRevertCommitted
-  | EventMessagePartDelta
   | EventSessionDiff
-  | EventSessionError
   | EventInstallationUpdated
   | EventInstallationUpdateAvailable
   | EventFileEdited
@@ -67,32 +79,22 @@ export type Event =
   | EventQuestionV2Asked
   | EventQuestionV2Replied
   | EventQuestionV2Rejected
-  | EventTodoUpdated
   | EventLspUpdated
-  | EventPermissionAsked
-  | EventPermissionReplied
-  | EventTuiPromptAppend2
-  | EventTuiCommandExecute2
-  | EventTuiToastShow2
-  | EventTuiSessionSelect2
+  | EventTuiPromptAppend
+  | EventTuiCommandExecute
+  | EventTuiToastShow
+  | EventTuiSessionSelect
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
   | EventCommandExecuted
   | EventProjectUpdated
-  | EventSessionStatus
   | EventSessionIdle
-  | EventQuestionAsked
-  | EventQuestionReplied
-  | EventQuestionRejected
-  | EventSessionCompacted
   | EventVcsBranchUpdated
   | EventWorkspaceReady
   | EventWorkspaceFailed
   | EventWorkspaceStatus
   | EventWorktreeReady
   | EventWorktreeFailed
-  | EventServerConnected
-  | EventGlobalDisposed
   | EventServerInstanceDisposed
 
 export type QuestionReplied = {
@@ -220,21 +222,19 @@ export type Session = {
   }
 }
 
-export type OutputFormatText = {
-  type: "text"
-}
-
 export type JsonSchema = {
   [key: string]: unknown
 }
 
-export type OutputFormatJsonSchema = {
-  type: "json_schema"
-  schema: JsonSchema
-  retryCount?: number
-}
-
-export type OutputFormat = OutputFormatText | OutputFormatJsonSchema
+export type OutputFormat =
+  | {
+      type: "text"
+    }
+  | {
+      type: "json_schema"
+      schema: JsonSchema
+      retryCount?: number
+    }
 
 export type UserMessage = {
   id: string
@@ -638,23 +638,6 @@ export type Part =
   | RetryPart
   | CompactionPart
 
-export type Prompt = {
-  text: string
-  files?: Array<PromptFileAttachment>
-  agents?: Array<PromptAgentAttachment>
-}
-
-export type Pty = {
-  id: string
-  title: string
-  command: string
-  args: Array<string>
-  cwd: string
-  status: "running" | "exited"
-  pid: number
-  exitCode?: number
-}
-
 export type Todo = {
   /**
    * Brief description of the task
@@ -727,916 +710,953 @@ export type QuestionTool = {
 
 export type QuestionAnswer = Array<string>
 
-export type GlobalEvent = {
-  directory: string
-  project?: string
-  workspace?: string
-  payload:
-    | {
-        id: string
-        type: "models-dev.refreshed"
-        properties: {
-          [key: string]: unknown
-        }
-      }
-    | {
-        id: string
-        type: "integration.updated"
-        properties: {
-          [key: string]: unknown
-        }
-      }
-    | {
-        id: string
-        type: "integration.connection.updated"
-        properties: {
-          integrationID: string
-        }
-      }
-    | {
-        id: string
-        type: "catalog.updated"
-        properties: {
-          [key: string]: unknown
-        }
-      }
-    | {
-        id: string
-        type: "session.created"
-        properties: {
-          sessionID: string
-          info: Session
-        }
-      }
-    | {
-        id: string
-        type: "session.updated"
-        properties: {
-          sessionID: string
-          info: Session
-        }
-      }
-    | {
-        id: string
-        type: "session.deleted"
-        properties: {
-          sessionID: string
-          info: Session
-        }
-      }
-    | {
-        id: string
-        type: "message.updated"
-        properties: {
-          sessionID: string
-          info: Message
-        }
-      }
-    | {
-        id: string
-        type: "message.removed"
-        properties: {
-          sessionID: string
-          messageID: string
-        }
-      }
-    | {
-        id: string
-        type: "message.part.updated"
-        properties: {
-          sessionID: string
-          part: Part
-          time: number
-        }
-      }
-    | {
-        id: string
-        type: "message.part.removed"
-        properties: {
-          sessionID: string
-          messageID: string
-          partID: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.agent.switched"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-          agent: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.model.switched"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-          model: ModelRef
-        }
-      }
-    | {
-        id: string
-        type: "session.next.moved"
-        properties: {
-          timestamp: number
-          sessionID: string
-          location: LocationRef
-          subdirectory?: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.prompted"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-          prompt: Prompt
-          delivery: "steer" | "queue"
-        }
-      }
-    | {
-        id: string
-        type: "session.next.prompt.admitted"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-          prompt: Prompt
-          delivery: "steer" | "queue"
-        }
-      }
-    | {
-        id: string
-        type: "session.next.context.updated"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-          text: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.synthetic"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-          text: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.shell.started"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-          callID: string
-          command: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.shell.ended"
-        properties: {
-          timestamp: number
-          sessionID: string
-          callID: string
-          output: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.step.started"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          agent: string
-          model: ModelRef
-          snapshot?: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.step.ended"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          finish: string
-          cost: number
-          tokens: {
-            input: number
-            output: number
-            reasoning: number
-            cache: {
-              read: number
-              write: number
+export type Prompt = {
+  text: string
+  files?: Array<PromptFileAttachment>
+  agents?: Array<PromptAgentAttachment>
+}
+
+export type Pty = {
+  id: string
+  title: string
+  command: string
+  args: Array<string>
+  cwd: string
+  status: "running" | "exited"
+  pid: number
+  exitCode?: number
+}
+
+export type GlobalEvent =
+  | {
+      payload:
+        | {
+            id: string
+            type: "server.connected"
+            properties: {
+              [key: string]: never
             }
           }
-          snapshot?: string
-          files?: Array<string>
-        }
-      }
-    | {
-        id: string
-        type: "session.next.step.failed"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          error: SessionErrorUnknown
-        }
-      }
-    | {
-        id: string
-        type: "session.next.text.started"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          textID: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.text.delta"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          textID: string
-          delta: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.text.ended"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          textID: string
-          text: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.reasoning.started"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          reasoningID: string
-          providerMetadata?: LlmProviderMetadata
-        }
-      }
-    | {
-        id: string
-        type: "session.next.reasoning.delta"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          reasoningID: string
-          delta: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.reasoning.ended"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          reasoningID: string
-          text: string
-          providerMetadata?: LlmProviderMetadata
-        }
-      }
-    | {
-        id: string
-        type: "session.next.tool.input.started"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          callID: string
-          name: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.tool.input.delta"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          callID: string
-          delta: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.tool.input.ended"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          callID: string
-          text: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.tool.called"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          callID: string
-          tool: string
-          input: {
-            [key: string]: unknown
+        | {
+            id: string
+            type: "server.heartbeat"
+            properties: {
+              [key: string]: never
+            }
           }
-          provider: {
-            executed: boolean
-            metadata?: LlmProviderMetadata
+    }
+  | {
+      directory: string
+      project?: string
+      workspace?: string
+      payload:
+        | {
+            id: string
+            type: "session.created"
+            properties: {
+              sessionID: string
+              info: Session
+            }
           }
-        }
-      }
-    | {
-        id: string
-        type: "session.next.tool.progress"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          callID: string
-          structured: {
-            [key: string]: unknown
+        | {
+            id: string
+            type: "session.updated"
+            properties: {
+              sessionID: string
+              info: Session
+            }
           }
-          content: Array<LlmToolContent>
-        }
-      }
-    | {
-        id: string
-        type: "session.next.tool.success"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          callID: string
-          structured: {
-            [key: string]: unknown
+        | {
+            id: string
+            type: "session.deleted"
+            properties: {
+              sessionID: string
+              info: Session
+            }
           }
-          content: Array<LlmToolContent>
-          outputPaths?: Array<string>
-          result?: unknown
-          provider: {
-            executed: boolean
-            metadata?: LlmProviderMetadata
+        | {
+            id: string
+            type: "message.updated"
+            properties: {
+              sessionID: string
+              info: Message
+            }
           }
-        }
-      }
-    | {
-        id: string
-        type: "session.next.tool.failed"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID: string
-          callID: string
-          error: SessionErrorUnknown
-          result?: unknown
-          provider: {
-            executed: boolean
-            metadata?: LlmProviderMetadata
+        | {
+            id: string
+            type: "message.removed"
+            properties: {
+              sessionID: string
+              messageID: string
+            }
           }
-        }
-      }
-    | {
-        id: string
-        type: "session.next.retried"
-        properties: {
-          timestamp: number
-          sessionID: string
-          attempt: number
-          error: SessionNextRetryError
-        }
-      }
-    | {
-        id: string
-        type: "session.next.compaction.started"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-          reason: "auto" | "manual"
-        }
-      }
-    | {
-        id: string
-        type: "session.next.compaction.delta"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-          text: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.compaction.ended"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-          reason: "auto" | "manual"
-          text: string
-          recent: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.revert.staged"
-        properties: {
-          timestamp: number
-          sessionID: string
-          revert: RevertState
-        }
-      }
-    | {
-        id: string
-        type: "session.next.revert.cleared"
-        properties: {
-          timestamp: number
-          sessionID: string
-        }
-      }
-    | {
-        id: string
-        type: "session.next.revert.committed"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-        }
-      }
-    | {
-        id: string
-        type: "message.part.delta"
-        properties: {
-          sessionID: string
-          messageID: string
-          partID: string
-          field: string
-          delta: string
-        }
-      }
-    | {
-        id: string
-        type: "session.diff"
-        properties: {
-          sessionID: string
-          diff: Array<SnapshotFileDiff>
-        }
-      }
-    | {
-        id: string
-        type: "session.error"
-        properties: {
-          sessionID?: string
-          error?:
-            | ProviderAuthError
-            | UnknownError
-            | MessageOutputLengthError
-            | MessageAbortedError
-            | StructuredOutputError
-            | ContextOverflowError
-            | ContentFilterError
-            | ApiError
-        }
-      }
-    | {
-        id: string
-        type: "installation.updated"
-        properties: {
-          version: string
-        }
-      }
-    | {
-        id: string
-        type: "installation.update-available"
-        properties: {
-          version: string
-        }
-      }
-    | {
-        id: string
-        type: "file.edited"
-        properties: {
-          file: string
-        }
-      }
-    | {
-        id: string
-        type: "reference.updated"
-        properties: {
-          [key: string]: unknown
-        }
-      }
-    | {
-        id: string
-        type: "permission.v2.asked"
-        properties: {
-          id: string
-          sessionID: string
-          action: string
-          resources: Array<string>
-          save?: Array<string>
-          metadata?: {
-            [key: string]: unknown
+        | {
+            id: string
+            type: "message.part.updated"
+            properties: {
+              sessionID: string
+              part: Part
+              time: number
+            }
           }
-          source?: PermissionV2Source
-        }
-      }
-    | {
-        id: string
-        type: "permission.v2.replied"
-        properties: {
-          sessionID: string
-          requestID: string
-          reply: PermissionV2Reply
-        }
-      }
-    | {
-        id: string
-        type: "plugin.added"
-        properties: {
-          id: string
-        }
-      }
-    | {
-        id: string
-        type: "project.directories.updated"
-        properties: {
-          projectID: string
-        }
-      }
-    | {
-        id: string
-        type: "file.watcher.updated"
-        properties: {
-          file: string
-          event: "add" | "change" | "unlink"
-        }
-      }
-    | {
-        id: string
-        type: "pty.created"
-        properties: {
-          info: Pty
-        }
-      }
-    | {
-        id: string
-        type: "pty.updated"
-        properties: {
-          info: Pty
-        }
-      }
-    | {
-        id: string
-        type: "pty.exited"
-        properties: {
-          id: string
-          exitCode: number
-        }
-      }
-    | {
-        id: string
-        type: "pty.deleted"
-        properties: {
-          id: string
-        }
-      }
-    | {
-        id: string
-        type: "question.v2.asked"
-        properties: {
-          id: string
-          sessionID: string
-          /**
-           * Questions to ask
-           */
-          questions: Array<QuestionV2Info>
-          tool?: QuestionV2Tool
-        }
-      }
-    | {
-        id: string
-        type: "question.v2.replied"
-        properties: {
-          sessionID: string
-          requestID: string
-          answers: Array<QuestionV2Answer>
-        }
-      }
-    | {
-        id: string
-        type: "question.v2.rejected"
-        properties: {
-          sessionID: string
-          requestID: string
-        }
-      }
-    | {
-        id: string
-        type: "todo.updated"
-        properties: {
-          sessionID: string
-          todos: Array<Todo>
-        }
-      }
-    | {
-        id: string
-        type: "lsp.updated"
-        properties: {
-          [key: string]: unknown
-        }
-      }
-    | {
-        id: string
-        type: "permission.asked"
-        properties: {
-          id: string
-          sessionID: string
-          permission: string
-          patterns: Array<string>
-          metadata: {
-            [key: string]: unknown
+        | {
+            id: string
+            type: "message.part.removed"
+            properties: {
+              sessionID: string
+              messageID: string
+              partID: string
+            }
           }
-          always: Array<string>
-          tool?: {
-            messageID: string
-            callID: string
+        | {
+            id: string
+            type: "message.part.delta"
+            properties: {
+              sessionID: string
+              messageID: string
+              partID: string
+              field: string
+              delta: string
+            }
           }
-        }
-      }
-    | {
-        id: string
-        type: "permission.replied"
-        properties: {
-          sessionID: string
-          requestID: string
-          reply: "once" | "always" | "reject"
-        }
-      }
-    | {
-        id: string
-        type: "tui.prompt.append"
-        properties: {
-          text: string
-        }
-      }
-    | {
-        id: string
-        type: "tui.command.execute"
-        properties: {
-          command:
-            | "session.list"
-            | "session.new"
-            | "session.share"
-            | "session.interrupt"
-            | "session.compact"
-            | "session.page.up"
-            | "session.page.down"
-            | "session.line.up"
-            | "session.line.down"
-            | "session.half.page.up"
-            | "session.half.page.down"
-            | "session.first"
-            | "session.last"
-            | "prompt.clear"
-            | "prompt.submit"
-            | "agent.cycle"
-            | string
-        }
-      }
-    | {
-        id: string
-        type: "tui.toast.show"
-        properties: {
-          title?: string
-          message: string
-          variant: "info" | "success" | "warning" | "error"
-          duration?: number
-        }
-      }
-    | {
-        id: string
-        type: "tui.session.select"
-        properties: {
-          /**
-           * Session ID to navigate to
-           */
-          sessionID: string
-        }
-      }
-    | {
-        id: string
-        type: "mcp.tools.changed"
-        properties: {
-          server: string
-        }
-      }
-    | {
-        id: string
-        type: "mcp.browser.open.failed"
-        properties: {
-          mcpName: string
-          url: string
-        }
-      }
-    | {
-        id: string
-        type: "command.executed"
-        properties: {
-          name: string
-          sessionID: string
-          arguments: string
-          messageID: string
-        }
-      }
-    | {
-        id: string
-        type: "project.updated"
-        properties: {
-          id: string
-          worktree: string
-          vcs?: ProjectVcs
-          name?: string
-          icon?: ProjectIcon
-          commands?: ProjectCommands
-          time: ProjectTime
-          sandboxes: Array<string>
-        }
-      }
-    | {
-        id: string
-        type: "session.status"
-        properties: {
-          sessionID: string
-          status: SessionStatus
-        }
-      }
-    | {
-        id: string
-        type: "session.idle"
-        properties: {
-          sessionID: string
-        }
-      }
-    | {
-        id: string
-        type: "question.asked"
-        properties: {
-          id: string
-          sessionID: string
-          /**
-           * Questions to ask
-           */
-          questions: Array<QuestionInfo>
-          tool?: QuestionTool
-        }
-      }
-    | {
-        id: string
-        type: "question.replied"
-        properties: {
-          sessionID: string
-          requestID: string
-          answers: Array<QuestionAnswer>
-        }
-      }
-    | {
-        id: string
-        type: "question.rejected"
-        properties: {
-          sessionID: string
-          requestID: string
-        }
-      }
-    | {
-        id: string
-        type: "session.compacted"
-        properties: {
-          sessionID: string
-        }
-      }
-    | {
-        id: string
-        type: "vcs.branch.updated"
-        properties: {
-          branch?: string
-        }
-      }
-    | {
-        id: string
-        type: "workspace.ready"
-        properties: {
-          name: string
-        }
-      }
-    | {
-        id: string
-        type: "workspace.failed"
-        properties: {
-          message: string
-        }
-      }
-    | {
-        id: string
-        type: "workspace.status"
-        properties: {
-          workspaceID: string
-          status: "connected" | "connecting" | "disconnected" | "error"
-        }
-      }
-    | {
-        id: string
-        type: "worktree.ready"
-        properties: {
-          name: string
-          branch?: string
-        }
-      }
-    | {
-        id: string
-        type: "worktree.failed"
-        properties: {
-          message: string
-        }
-      }
-    | {
-        id: string
-        type: "server.connected"
-        properties: {
-          [key: string]: unknown
-        }
-      }
-    | {
-        id: string
-        type: "global.disposed"
-        properties: {
-          [key: string]: unknown
-        }
-      }
-    | EventServerInstanceDisposed
-    | SyncEventSessionCreated
-    | SyncEventSessionUpdated
-    | SyncEventSessionDeleted
-    | SyncEventMessageUpdated
-    | SyncEventMessageRemoved
-    | SyncEventMessagePartUpdated
-    | SyncEventMessagePartRemoved
-    | SyncEventSessionNextAgentSwitched
-    | SyncEventSessionNextModelSwitched
-    | SyncEventSessionNextMoved
-    | SyncEventSessionNextPrompted
-    | SyncEventSessionNextPromptAdmitted
-    | SyncEventSessionNextContextUpdated
-    | SyncEventSessionNextSynthetic
-    | SyncEventSessionNextShellStarted
-    | SyncEventSessionNextShellEnded
-    | SyncEventSessionNextStepStarted
-    | SyncEventSessionNextStepEnded
-    | SyncEventSessionNextStepFailed
-    | SyncEventSessionNextTextStarted
-    | SyncEventSessionNextTextEnded
-    | SyncEventSessionNextReasoningStarted
-    | SyncEventSessionNextReasoningEnded
-    | SyncEventSessionNextToolInputStarted
-    | SyncEventSessionNextToolInputEnded
-    | SyncEventSessionNextToolCalled
-    | SyncEventSessionNextToolProgress
-    | SyncEventSessionNextToolSuccess
-    | SyncEventSessionNextToolFailed
-    | SyncEventSessionNextRetried
-    | SyncEventSessionNextCompactionStarted
-    | SyncEventSessionNextCompactionEnded
-    | SyncEventSessionNextRevertStaged
-    | SyncEventSessionNextRevertCleared
-    | SyncEventSessionNextRevertCommitted
-}
+        | {
+            id: string
+            type: "session.error"
+            properties: {
+              sessionID?: string
+              error?:
+                | ProviderAuthError
+                | UnknownError
+                | MessageOutputLengthError
+                | MessageAbortedError
+                | StructuredOutputError
+                | ContextOverflowError
+                | ContentFilterError
+                | ApiError
+            }
+          }
+        | {
+            id: string
+            type: "todo.updated"
+            properties: {
+              sessionID: string
+              todos: Array<Todo>
+            }
+          }
+        | {
+            id: string
+            type: "permission.asked"
+            properties: {
+              id: string
+              sessionID: string
+              permission: string
+              patterns: Array<string>
+              metadata: {
+                [key: string]: unknown
+              }
+              always: Array<string>
+              tool?: {
+                messageID: string
+                callID: string
+              }
+            }
+          }
+        | {
+            id: string
+            type: "permission.replied"
+            properties: {
+              sessionID: string
+              requestID: string
+              reply: "once" | "always" | "reject"
+            }
+          }
+        | {
+            id: string
+            type: "session.status"
+            properties: {
+              sessionID: string
+              status: SessionStatus
+            }
+          }
+        | {
+            id: string
+            type: "question.asked"
+            properties: {
+              id: string
+              sessionID: string
+              /**
+               * Questions to ask
+               */
+              questions: Array<QuestionInfo>
+              tool?: QuestionTool
+            }
+          }
+        | {
+            id: string
+            type: "question.replied"
+            properties: {
+              sessionID: string
+              requestID: string
+              answers: Array<QuestionAnswer>
+            }
+          }
+        | {
+            id: string
+            type: "question.rejected"
+            properties: {
+              sessionID: string
+              requestID: string
+            }
+          }
+        | {
+            id: string
+            type: "session.compacted"
+            properties: {
+              sessionID: string
+            }
+          }
+        | {
+            id: string
+            type: "compaction.catalog.changed"
+            properties: {
+              sessionID: string
+            }
+          }
+        | {
+            id: string
+            type: "global.disposed"
+            properties: {
+              [key: string]: never
+            }
+          }
+        | {
+            id: string
+            type: "models-dev.refreshed"
+            properties: {
+              [key: string]: unknown
+            }
+          }
+        | {
+            id: string
+            type: "integration.updated"
+            properties: {
+              [key: string]: unknown
+            }
+          }
+        | {
+            id: string
+            type: "integration.connection.updated"
+            properties: {
+              integrationID: string
+            }
+          }
+        | {
+            id: string
+            type: "catalog.updated"
+            properties: {
+              [key: string]: unknown
+            }
+          }
+        | {
+            id: string
+            type: "session.next.agent.switched"
+            properties: {
+              timestamp: number
+              sessionID: string
+              messageID: string
+              agent: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.model.switched"
+            properties: {
+              timestamp: number
+              sessionID: string
+              messageID: string
+              model: ModelRef
+            }
+          }
+        | {
+            id: string
+            type: "session.next.moved"
+            properties: {
+              timestamp: number
+              sessionID: string
+              location: LocationRef
+              subdirectory?: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.prompted"
+            properties: {
+              timestamp: number
+              sessionID: string
+              messageID: string
+              prompt: Prompt
+              delivery: "steer" | "queue"
+            }
+          }
+        | {
+            id: string
+            type: "session.next.prompt.admitted"
+            properties: {
+              timestamp: number
+              sessionID: string
+              messageID: string
+              prompt: Prompt
+              delivery: "steer" | "queue"
+            }
+          }
+        | {
+            id: string
+            type: "session.next.context.updated"
+            properties: {
+              timestamp: number
+              sessionID: string
+              messageID: string
+              text: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.synthetic"
+            properties: {
+              timestamp: number
+              sessionID: string
+              messageID: string
+              text: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.shell.started"
+            properties: {
+              timestamp: number
+              sessionID: string
+              messageID: string
+              callID: string
+              command: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.shell.ended"
+            properties: {
+              timestamp: number
+              sessionID: string
+              callID: string
+              output: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.step.started"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              agent: string
+              model: ModelRef
+              snapshot?: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.step.ended"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              finish: string
+              cost: number
+              tokens: {
+                input: number
+                output: number
+                reasoning: number
+                cache: {
+                  read: number
+                  write: number
+                }
+              }
+              snapshot?: string
+              files?: Array<string>
+            }
+          }
+        | {
+            id: string
+            type: "session.next.step.failed"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              error: SessionErrorUnknown
+            }
+          }
+        | {
+            id: string
+            type: "session.next.text.started"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              textID: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.text.delta"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              textID: string
+              delta: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.text.ended"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              textID: string
+              text: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.reasoning.started"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              reasoningID: string
+              providerMetadata?: LlmProviderMetadata
+            }
+          }
+        | {
+            id: string
+            type: "session.next.reasoning.delta"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              reasoningID: string
+              delta: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.reasoning.ended"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              reasoningID: string
+              text: string
+              providerMetadata?: LlmProviderMetadata
+            }
+          }
+        | {
+            id: string
+            type: "session.next.tool.input.started"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              callID: string
+              name: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.tool.input.delta"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              callID: string
+              delta: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.tool.input.ended"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              callID: string
+              text: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.tool.called"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              callID: string
+              tool: string
+              input: {
+                [key: string]: unknown
+              }
+              provider: {
+                executed: boolean
+                metadata?: LlmProviderMetadata
+              }
+            }
+          }
+        | {
+            id: string
+            type: "session.next.tool.progress"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              callID: string
+              structured: {
+                [key: string]: unknown
+              }
+              content: Array<LlmToolContent>
+            }
+          }
+        | {
+            id: string
+            type: "session.next.tool.success"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              callID: string
+              structured: {
+                [key: string]: unknown
+              }
+              content: Array<LlmToolContent>
+              outputPaths?: Array<string>
+              result?: unknown
+              provider: {
+                executed: boolean
+                metadata?: LlmProviderMetadata
+              }
+            }
+          }
+        | {
+            id: string
+            type: "session.next.tool.failed"
+            properties: {
+              timestamp: number
+              sessionID: string
+              assistantMessageID: string
+              callID: string
+              error: SessionErrorUnknown
+              result?: unknown
+              provider: {
+                executed: boolean
+                metadata?: LlmProviderMetadata
+              }
+            }
+          }
+        | {
+            id: string
+            type: "session.next.retried"
+            properties: {
+              timestamp: number
+              sessionID: string
+              attempt: number
+              error: SessionNextRetryError
+            }
+          }
+        | {
+            id: string
+            type: "session.next.compaction.started"
+            properties: {
+              timestamp: number
+              sessionID: string
+              messageID: string
+              reason: "auto" | "manual"
+            }
+          }
+        | {
+            id: string
+            type: "session.next.compaction.delta"
+            properties: {
+              timestamp: number
+              sessionID: string
+              messageID: string
+              text: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.compaction.ended"
+            properties: {
+              timestamp: number
+              sessionID: string
+              messageID: string
+              reason: "auto" | "manual"
+              text: string
+              recent: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.revert.staged"
+            properties: {
+              timestamp: number
+              sessionID: string
+              revert: RevertState
+            }
+          }
+        | {
+            id: string
+            type: "session.next.revert.cleared"
+            properties: {
+              timestamp: number
+              sessionID: string
+            }
+          }
+        | {
+            id: string
+            type: "session.next.revert.committed"
+            properties: {
+              timestamp: number
+              sessionID: string
+              messageID: string
+            }
+          }
+        | {
+            id: string
+            type: "session.diff"
+            properties: {
+              sessionID: string
+              diff: Array<SnapshotFileDiff>
+            }
+          }
+        | {
+            id: string
+            type: "installation.updated"
+            properties: {
+              version: string
+            }
+          }
+        | {
+            id: string
+            type: "installation.update-available"
+            properties: {
+              version: string
+            }
+          }
+        | {
+            id: string
+            type: "file.edited"
+            properties: {
+              file: string
+            }
+          }
+        | {
+            id: string
+            type: "reference.updated"
+            properties: {
+              [key: string]: unknown
+            }
+          }
+        | {
+            id: string
+            type: "permission.v2.asked"
+            properties: {
+              id: string
+              sessionID: string
+              action: string
+              resources: Array<string>
+              save?: Array<string>
+              metadata?: {
+                [key: string]: unknown
+              }
+              source?: PermissionV2Source
+            }
+          }
+        | {
+            id: string
+            type: "permission.v2.replied"
+            properties: {
+              sessionID: string
+              requestID: string
+              reply: PermissionV2Reply
+            }
+          }
+        | {
+            id: string
+            type: "plugin.added"
+            properties: {
+              id: string
+            }
+          }
+        | {
+            id: string
+            type: "project.directories.updated"
+            properties: {
+              projectID: string
+            }
+          }
+        | {
+            id: string
+            type: "file.watcher.updated"
+            properties: {
+              file: string
+              event: "add" | "change" | "unlink"
+            }
+          }
+        | {
+            id: string
+            type: "pty.created"
+            properties: {
+              info: Pty
+            }
+          }
+        | {
+            id: string
+            type: "pty.updated"
+            properties: {
+              info: Pty
+            }
+          }
+        | {
+            id: string
+            type: "pty.exited"
+            properties: {
+              id: string
+              exitCode: number
+            }
+          }
+        | {
+            id: string
+            type: "pty.deleted"
+            properties: {
+              id: string
+            }
+          }
+        | {
+            id: string
+            type: "question.v2.asked"
+            properties: {
+              id: string
+              sessionID: string
+              /**
+               * Questions to ask
+               */
+              questions: Array<QuestionV2Info>
+              tool?: QuestionV2Tool
+            }
+          }
+        | {
+            id: string
+            type: "question.v2.replied"
+            properties: {
+              sessionID: string
+              requestID: string
+              answers: Array<QuestionV2Answer>
+            }
+          }
+        | {
+            id: string
+            type: "question.v2.rejected"
+            properties: {
+              sessionID: string
+              requestID: string
+            }
+          }
+        | {
+            id: string
+            type: "lsp.updated"
+            properties: {
+              [key: string]: unknown
+            }
+          }
+        | {
+            id: string
+            type: "tui.prompt.append"
+            properties: {
+              text: string
+            }
+          }
+        | {
+            id: string
+            type: "tui.command.execute"
+            properties: {
+              command:
+                | "session.list"
+                | "session.new"
+                | "session.share"
+                | "session.interrupt"
+                | "session.compact"
+                | "session.page.up"
+                | "session.page.down"
+                | "session.line.up"
+                | "session.line.down"
+                | "session.half.page.up"
+                | "session.half.page.down"
+                | "session.first"
+                | "session.last"
+                | "prompt.clear"
+                | "prompt.submit"
+                | "agent.cycle"
+                | string
+            }
+          }
+        | {
+            id: string
+            type: "tui.toast.show"
+            properties: {
+              title?: string
+              message: string
+              variant: "info" | "success" | "warning" | "error"
+              duration?: number
+            }
+          }
+        | {
+            id: string
+            type: "tui.session.select"
+            properties: {
+              /**
+               * Session ID to navigate to
+               */
+              sessionID: string
+            }
+          }
+        | {
+            id: string
+            type: "mcp.tools.changed"
+            properties: {
+              server: string
+            }
+          }
+        | {
+            id: string
+            type: "mcp.browser.open.failed"
+            properties: {
+              mcpName: string
+              url: string
+            }
+          }
+        | {
+            id: string
+            type: "command.executed"
+            properties: {
+              name: string
+              sessionID: string
+              arguments: string
+              messageID: string
+            }
+          }
+        | {
+            id: string
+            type: "project.updated"
+            properties: {
+              id: string
+              worktree: string
+              vcs?: ProjectVcs
+              name?: string
+              icon?: ProjectIcon
+              commands?: ProjectCommands
+              time: ProjectTime
+              sandboxes: Array<string>
+            }
+          }
+        | {
+            id: string
+            type: "session.idle"
+            properties: {
+              sessionID: string
+            }
+          }
+        | {
+            id: string
+            type: "vcs.branch.updated"
+            properties: {
+              branch?: string
+            }
+          }
+        | {
+            id: string
+            type: "workspace.ready"
+            properties: {
+              name: string
+            }
+          }
+        | {
+            id: string
+            type: "workspace.failed"
+            properties: {
+              message: string
+            }
+          }
+        | {
+            id: string
+            type: "workspace.status"
+            properties: {
+              workspaceID: string
+              status: "connected" | "connecting" | "disconnected" | "error"
+            }
+          }
+        | {
+            id: string
+            type: "worktree.ready"
+            properties: {
+              name: string
+              branch?: string
+            }
+          }
+        | {
+            id: string
+            type: "worktree.failed"
+            properties: {
+              message: string
+            }
+          }
+        | EventServerInstanceDisposed
+        | SyncEventSessionCreated
+        | SyncEventSessionUpdated
+        | SyncEventSessionDeleted
+        | SyncEventMessageUpdated
+        | SyncEventMessageRemoved
+        | SyncEventMessagePartUpdated
+        | SyncEventMessagePartRemoved
+        | SyncEventSessionNextAgentSwitched
+        | SyncEventSessionNextModelSwitched
+        | SyncEventSessionNextMoved
+        | SyncEventSessionNextPrompted
+        | SyncEventSessionNextPromptAdmitted
+        | SyncEventSessionNextContextUpdated
+        | SyncEventSessionNextSynthetic
+        | SyncEventSessionNextShellStarted
+        | SyncEventSessionNextShellEnded
+        | SyncEventSessionNextStepStarted
+        | SyncEventSessionNextStepEnded
+        | SyncEventSessionNextStepFailed
+        | SyncEventSessionNextTextStarted
+        | SyncEventSessionNextTextEnded
+        | SyncEventSessionNextReasoningStarted
+        | SyncEventSessionNextReasoningEnded
+        | SyncEventSessionNextToolInputStarted
+        | SyncEventSessionNextToolInputEnded
+        | SyncEventSessionNextToolCalled
+        | SyncEventSessionNextToolProgress
+        | SyncEventSessionNextToolSuccess
+        | SyncEventSessionNextToolFailed
+        | SyncEventSessionNextRetried
+        | SyncEventSessionNextCompactionStarted
+        | SyncEventSessionNextCompactionEnded
+        | SyncEventSessionNextRevertStaged
+        | SyncEventSessionNextRevertCleared
+        | SyncEventSessionNextRevertCommitted
+    }
+
+export type GlobalEventStream = string
 
 /**
  * Log level
@@ -2029,6 +2049,63 @@ export type Config = {
   }
 }
 
+export type EventTuiPromptAppend = {
+  id: string
+  type: "tui.prompt.append"
+  properties: {
+    text: string
+  }
+}
+
+export type EventTuiCommandExecute = {
+  id: string
+  type: "tui.command.execute"
+  properties: {
+    command:
+      | "session.list"
+      | "session.new"
+      | "session.share"
+      | "session.interrupt"
+      | "session.compact"
+      | "session.page.up"
+      | "session.page.down"
+      | "session.line.up"
+      | "session.line.down"
+      | "session.half.page.up"
+      | "session.half.page.down"
+      | "session.first"
+      | "session.last"
+      | "prompt.clear"
+      | "prompt.submit"
+      | "agent.cycle"
+      | string
+  }
+}
+
+export type EventTuiToastShow = {
+  id: string
+  type: "tui.toast.show"
+  properties: {
+    title?: string
+    message: string
+    variant: "info" | "success" | "warning" | "error"
+    duration?: number
+  }
+}
+
+export type EventTuiSessionSelect = {
+  id: string
+  type: "tui.session.select"
+  properties: {
+    /**
+     * Session ID to navigate to
+     */
+    sessionID: string
+  }
+}
+
+export type EventStream = string
+
 export type Model = {
   id: string
   providerID: string
@@ -2244,6 +2321,12 @@ export type GlobalSession = {
     diff?: string
   }
   project: ProjectSummary | null
+}
+
+export type SessionBusyError = {
+  _tag: "SessionBusyError"
+  sessionID: string
+  message: string
 }
 
 export type McpResource = {
@@ -2547,6 +2630,54 @@ export type NotFoundError = {
   }
 }
 
+export type OutputFormatText = {
+  type: "text"
+}
+
+export type OutputFormatJsonSchema = {
+  type: "json_schema"
+  schema: JsonSchema
+  retryCount?: number
+}
+
+export type OutputFormat1 = OutputFormatText | OutputFormatJsonSchema
+
+export type StagedContextTextPartInput = {
+  type: "text"
+  text: string
+  label?: string
+}
+
+export type StagedContextInfo = {
+  id: string
+  sessionID: string
+  mode: "next_prompt"
+  visibility: "provider_only"
+  consume: "once"
+  parts: Array<StagedContextTextPartInput>
+  time: {
+    created: number
+  }
+}
+
+export type CompactionRegionDescriptor = {
+  startMessageID: string
+  startTimeCreated: number
+  markerID: string
+  markerTimeCreated: number
+  endExclusiveCursor: string
+  physicalMessageCount: number
+  semanticMessageCount: number
+  summaryMessageID: string
+  summaryPreview: string
+  precedingSummaryMessageID?: string
+}
+
+export type CompactionCatalogResponse = {
+  items: Array<CompactionRegionDescriptor>
+  nextCursor?: string
+}
+
 export type TextPartInput = {
   id?: string
   type: "text"
@@ -2595,20 +2726,14 @@ export type SubtaskPartInput = {
   command?: string
 }
 
-export type SessionBusyError = {
-  _tag: "SessionBusyError"
-  sessionID: string
-  message: string
-}
-
-export type EventTuiPromptAppend = {
+export type EventTuiPromptAppend2 = {
   type: "tui.prompt.append"
   properties: {
     text: string
   }
 }
 
-export type EventTuiCommandExecute = {
+export type EventTuiCommandExecute2 = {
   type: "tui.command.execute"
   properties: {
     command:
@@ -2632,7 +2757,7 @@ export type EventTuiCommandExecute = {
   }
 }
 
-export type EventTuiToastShow = {
+export type EventTuiToastShow2 = {
   type: "tui.toast.show"
   properties: {
     title?: string
@@ -2642,7 +2767,7 @@ export type EventTuiToastShow = {
   }
 }
 
-export type EventTuiSessionSelect = {
+export type EventTuiSessionSelect2 = {
   type: "tui.session.select"
   properties: {
     /**
@@ -2730,7 +2855,7 @@ export type MessageNotFoundError = {
   message: string
 }
 
-export type UnknownError1 = {
+export type UnknownError2 = {
   _tag: "UnknownError"
   message: string
   ref?: string
@@ -2786,16 +2911,6 @@ export type ProviderNotFoundError = {
   providerID: string
   message: string
 }
-
-export type OutputFormat1 =
-  | {
-      type: "text"
-    }
-  | {
-      type: "json_schema"
-      schema: JsonSchema
-      retryCount?: number
-    }
 
 export type SessionStatus2 = {
   id: string
@@ -2933,6 +3048,7 @@ export type V2Event =
   | QuestionReplied2
   | QuestionRejected2
   | SessionCompacted
+  | CompactionCatalogChanged
   | VcsBranchUpdated
   | WorkspaceReady
   | WorkspaceFailed
@@ -2940,6 +3056,7 @@ export type V2Event =
   | WorktreeReady
   | WorktreeFailed
   | ServerConnected
+  | ServerHeartbeat
   | GlobalDisposed
 
 export type V2EventStream = string
@@ -2961,60 +3078,7 @@ export type EffectHttpApiErrorForbidden = {
   _tag: "Forbidden"
 }
 
-export type EventTuiPromptAppend2 = {
-  id: string
-  type: "tui.prompt.append"
-  properties: {
-    text: string
-  }
-}
-
-export type EventTuiCommandExecute2 = {
-  id: string
-  type: "tui.command.execute"
-  properties: {
-    command:
-      | "session.list"
-      | "session.new"
-      | "session.share"
-      | "session.interrupt"
-      | "session.compact"
-      | "session.page.up"
-      | "session.page.down"
-      | "session.line.up"
-      | "session.line.down"
-      | "session.half.page.up"
-      | "session.half.page.down"
-      | "session.first"
-      | "session.last"
-      | "prompt.clear"
-      | "prompt.submit"
-      | "agent.cycle"
-      | string
-  }
-}
-
-export type EventTuiToastShow2 = {
-  id: string
-  type: "tui.toast.show"
-  properties: {
-    title?: string
-    message: string
-    variant: "info" | "success" | "warning" | "error"
-    duration?: number
-  }
-}
-
-export type EventTuiSessionSelect2 = {
-  id: string
-  type: "tui.session.select"
-  properties: {
-    /**
-     * Session ID to navigate to
-     */
-    sessionID: string
-  }
-}
+export type OutputFormat2 = OutputFormatText | OutputFormatJsonSchema
 
 export type CredentialValue = CredentialOAuth | CredentialKey
 
@@ -3842,6 +3906,923 @@ export type ConfigV2ExperimentalPolicy = {
   action: "provider.use"
   effect: PolicyEffect
   resource: string
+}
+
+export type SelectedEventSessionCreated = {
+  id: string
+  type: "session.created"
+  properties: {
+    sessionID: string
+    info: Session
+  }
+}
+
+export type SelectedEventSessionUpdated = {
+  id: string
+  type: "session.updated"
+  properties: {
+    sessionID: string
+    info: Session
+  }
+}
+
+export type SelectedEventSessionDeleted = {
+  id: string
+  type: "session.deleted"
+  properties: {
+    sessionID: string
+    info: Session
+  }
+}
+
+export type SelectedEventMessageUpdated = {
+  id: string
+  type: "message.updated"
+  properties: {
+    sessionID: string
+    info: Message
+  }
+}
+
+export type SelectedEventMessageRemoved = {
+  id: string
+  type: "message.removed"
+  properties: {
+    sessionID: string
+    messageID: string
+  }
+}
+
+export type SelectedEventMessagePartUpdated = {
+  id: string
+  type: "message.part.updated"
+  properties: {
+    sessionID: string
+    part: Part
+    time: number
+  }
+}
+
+export type SelectedEventMessagePartRemoved = {
+  id: string
+  type: "message.part.removed"
+  properties: {
+    sessionID: string
+    messageID: string
+    partID: string
+  }
+}
+
+export type SelectedEventMessagePartDelta = {
+  id: string
+  type: "message.part.delta"
+  properties: {
+    sessionID: string
+    messageID: string
+    partID: string
+    field: string
+    delta: string
+  }
+}
+
+export type SelectedEventSessionError = {
+  id: string
+  type: "session.error"
+  properties: {
+    sessionID?: string
+    error?:
+      | ProviderAuthError
+      | UnknownError
+      | MessageOutputLengthError
+      | MessageAbortedError
+      | StructuredOutputError
+      | ContextOverflowError
+      | ContentFilterError
+      | ApiError
+  }
+}
+
+export type SelectedEventTodoUpdated = {
+  id: string
+  type: "todo.updated"
+  properties: {
+    sessionID: string
+    todos: Array<Todo>
+  }
+}
+
+export type SelectedEventPermissionAsked = {
+  id: string
+  type: "permission.asked"
+  properties: {
+    id: string
+    sessionID: string
+    permission: string
+    patterns: Array<string>
+    metadata: {
+      [key: string]: unknown
+    }
+    always: Array<string>
+    tool?: {
+      messageID: string
+      callID: string
+    }
+  }
+}
+
+export type SelectedEventPermissionReplied = {
+  id: string
+  type: "permission.replied"
+  properties: {
+    sessionID: string
+    requestID: string
+    reply: "once" | "always" | "reject"
+  }
+}
+
+export type SelectedEventSessionStatus = {
+  id: string
+  type: "session.status"
+  properties: {
+    sessionID: string
+    status: SessionStatus
+  }
+}
+
+export type SelectedEventQuestionAsked = {
+  id: string
+  type: "question.asked"
+  properties: {
+    id: string
+    sessionID: string
+    /**
+     * Questions to ask
+     */
+    questions: Array<QuestionInfo>
+    tool?: QuestionTool
+  }
+}
+
+export type SelectedEventQuestionReplied = {
+  id: string
+  type: "question.replied"
+  properties: {
+    sessionID: string
+    requestID: string
+    answers: Array<QuestionAnswer>
+  }
+}
+
+export type SelectedEventQuestionRejected = {
+  id: string
+  type: "question.rejected"
+  properties: {
+    sessionID: string
+    requestID: string
+  }
+}
+
+export type SelectedEventSessionCompacted = {
+  id: string
+  type: "session.compacted"
+  properties: {
+    sessionID: string
+  }
+}
+
+export type SelectedEventCompactionCatalogChanged = {
+  id: string
+  type: "compaction.catalog.changed"
+  properties: {
+    sessionID: string
+  }
+}
+
+export type SelectedEventServerConnected = {
+  id: string
+  type: "server.connected"
+  properties: {
+    [key: string]: never
+  }
+}
+
+export type SelectedEventServerHeartbeat = {
+  id: string
+  type: "server.heartbeat"
+  properties: {
+    [key: string]: never
+  }
+}
+
+export type SelectedEventGlobalDisposed = {
+  id: string
+  type: "global.disposed"
+  properties: {
+    [key: string]: never
+  }
+}
+
+export type EventModelsDevRefreshed = {
+  id: string
+  type: "models-dev.refreshed"
+  properties: {
+    [key: string]: unknown
+  }
+}
+
+export type EventIntegrationUpdated = {
+  id: string
+  type: "integration.updated"
+  properties: {
+    [key: string]: unknown
+  }
+}
+
+export type EventIntegrationConnectionUpdated = {
+  id: string
+  type: "integration.connection.updated"
+  properties: {
+    integrationID: string
+  }
+}
+
+export type EventCatalogUpdated = {
+  id: string
+  type: "catalog.updated"
+  properties: {
+    [key: string]: unknown
+  }
+}
+
+export type EventSessionNextAgentSwitched = {
+  id: string
+  type: "session.next.agent.switched"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    agent: string
+  }
+}
+
+export type EventSessionNextModelSwitched = {
+  id: string
+  type: "session.next.model.switched"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    model: ModelRef
+  }
+}
+
+export type EventSessionNextMoved = {
+  id: string
+  type: "session.next.moved"
+  properties: {
+    timestamp: number
+    sessionID: string
+    location: LocationRef
+    subdirectory?: string
+  }
+}
+
+export type EventSessionNextPrompted = {
+  id: string
+  type: "session.next.prompted"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    prompt: Prompt
+    delivery: "steer" | "queue"
+  }
+}
+
+export type EventSessionNextPromptAdmitted = {
+  id: string
+  type: "session.next.prompt.admitted"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    prompt: Prompt
+    delivery: "steer" | "queue"
+  }
+}
+
+export type EventSessionNextContextUpdated = {
+  id: string
+  type: "session.next.context.updated"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    text: string
+  }
+}
+
+export type EventSessionNextSynthetic = {
+  id: string
+  type: "session.next.synthetic"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    text: string
+  }
+}
+
+export type EventSessionNextShellStarted = {
+  id: string
+  type: "session.next.shell.started"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    callID: string
+    command: string
+  }
+}
+
+export type EventSessionNextShellEnded = {
+  id: string
+  type: "session.next.shell.ended"
+  properties: {
+    timestamp: number
+    sessionID: string
+    callID: string
+    output: string
+  }
+}
+
+export type EventSessionNextStepStarted = {
+  id: string
+  type: "session.next.step.started"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    agent: string
+    model: ModelRef
+    snapshot?: string
+  }
+}
+
+export type EventSessionNextStepEnded = {
+  id: string
+  type: "session.next.step.ended"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    finish: string
+    cost: number
+    tokens: {
+      input: number
+      output: number
+      reasoning: number
+      cache: {
+        read: number
+        write: number
+      }
+    }
+    snapshot?: string
+    files?: Array<string>
+  }
+}
+
+export type EventSessionNextStepFailed = {
+  id: string
+  type: "session.next.step.failed"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    error: SessionErrorUnknown
+  }
+}
+
+export type EventSessionNextTextStarted = {
+  id: string
+  type: "session.next.text.started"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    textID: string
+  }
+}
+
+export type EventSessionNextTextDelta = {
+  id: string
+  type: "session.next.text.delta"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    textID: string
+    delta: string
+  }
+}
+
+export type EventSessionNextTextEnded = {
+  id: string
+  type: "session.next.text.ended"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    textID: string
+    text: string
+  }
+}
+
+export type EventSessionNextReasoningStarted = {
+  id: string
+  type: "session.next.reasoning.started"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    reasoningID: string
+    providerMetadata?: LlmProviderMetadata
+  }
+}
+
+export type EventSessionNextReasoningDelta = {
+  id: string
+  type: "session.next.reasoning.delta"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    reasoningID: string
+    delta: string
+  }
+}
+
+export type EventSessionNextReasoningEnded = {
+  id: string
+  type: "session.next.reasoning.ended"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    reasoningID: string
+    text: string
+    providerMetadata?: LlmProviderMetadata
+  }
+}
+
+export type EventSessionNextToolInputStarted = {
+  id: string
+  type: "session.next.tool.input.started"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    callID: string
+    name: string
+  }
+}
+
+export type EventSessionNextToolInputDelta = {
+  id: string
+  type: "session.next.tool.input.delta"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    callID: string
+    delta: string
+  }
+}
+
+export type EventSessionNextToolInputEnded = {
+  id: string
+  type: "session.next.tool.input.ended"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    callID: string
+    text: string
+  }
+}
+
+export type EventSessionNextToolCalled = {
+  id: string
+  type: "session.next.tool.called"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    callID: string
+    tool: string
+    input: {
+      [key: string]: unknown
+    }
+    provider: {
+      executed: boolean
+      metadata?: LlmProviderMetadata
+    }
+  }
+}
+
+export type EventSessionNextToolProgress = {
+  id: string
+  type: "session.next.tool.progress"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    callID: string
+    structured: {
+      [key: string]: unknown
+    }
+    content: Array<LlmToolContent>
+  }
+}
+
+export type EventSessionNextToolSuccess = {
+  id: string
+  type: "session.next.tool.success"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    callID: string
+    structured: {
+      [key: string]: unknown
+    }
+    content: Array<LlmToolContent>
+    outputPaths?: Array<string>
+    result?: unknown
+    provider: {
+      executed: boolean
+      metadata?: LlmProviderMetadata
+    }
+  }
+}
+
+export type EventSessionNextToolFailed = {
+  id: string
+  type: "session.next.tool.failed"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    callID: string
+    error: SessionErrorUnknown
+    result?: unknown
+    provider: {
+      executed: boolean
+      metadata?: LlmProviderMetadata
+    }
+  }
+}
+
+export type EventSessionNextRetried = {
+  id: string
+  type: "session.next.retried"
+  properties: {
+    timestamp: number
+    sessionID: string
+    attempt: number
+    error: SessionNextRetryError
+  }
+}
+
+export type EventSessionNextCompactionStarted = {
+  id: string
+  type: "session.next.compaction.started"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    reason: "auto" | "manual"
+  }
+}
+
+export type EventSessionNextCompactionDelta = {
+  id: string
+  type: "session.next.compaction.delta"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    text: string
+  }
+}
+
+export type EventSessionNextCompactionEnded = {
+  id: string
+  type: "session.next.compaction.ended"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    reason: "auto" | "manual"
+    text: string
+    recent: string
+  }
+}
+
+export type EventSessionNextRevertStaged = {
+  id: string
+  type: "session.next.revert.staged"
+  properties: {
+    timestamp: number
+    sessionID: string
+    revert: RevertState
+  }
+}
+
+export type EventSessionNextRevertCleared = {
+  id: string
+  type: "session.next.revert.cleared"
+  properties: {
+    timestamp: number
+    sessionID: string
+  }
+}
+
+export type EventSessionNextRevertCommitted = {
+  id: string
+  type: "session.next.revert.committed"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+  }
+}
+
+export type EventSessionDiff = {
+  id: string
+  type: "session.diff"
+  properties: {
+    sessionID: string
+    diff: Array<SnapshotFileDiff>
+  }
+}
+
+export type EventInstallationUpdated = {
+  id: string
+  type: "installation.updated"
+  properties: {
+    version: string
+  }
+}
+
+export type EventInstallationUpdateAvailable = {
+  id: string
+  type: "installation.update-available"
+  properties: {
+    version: string
+  }
+}
+
+export type EventFileEdited = {
+  id: string
+  type: "file.edited"
+  properties: {
+    file: string
+  }
+}
+
+export type EventReferenceUpdated = {
+  id: string
+  type: "reference.updated"
+  properties: {
+    [key: string]: unknown
+  }
+}
+
+export type EventPermissionV2Asked = {
+  id: string
+  type: "permission.v2.asked"
+  properties: {
+    id: string
+    sessionID: string
+    action: string
+    resources: Array<string>
+    save?: Array<string>
+    metadata?: {
+      [key: string]: unknown
+    }
+    source?: PermissionV2Source
+  }
+}
+
+export type EventPermissionV2Replied = {
+  id: string
+  type: "permission.v2.replied"
+  properties: {
+    sessionID: string
+    requestID: string
+    reply: PermissionV2Reply
+  }
+}
+
+export type EventPluginAdded = {
+  id: string
+  type: "plugin.added"
+  properties: {
+    id: string
+  }
+}
+
+export type EventProjectDirectoriesUpdated = {
+  id: string
+  type: "project.directories.updated"
+  properties: {
+    projectID: string
+  }
+}
+
+export type EventFileWatcherUpdated = {
+  id: string
+  type: "file.watcher.updated"
+  properties: {
+    file: string
+    event: "add" | "change" | "unlink"
+  }
+}
+
+export type EventPtyCreated = {
+  id: string
+  type: "pty.created"
+  properties: {
+    info: Pty
+  }
+}
+
+export type EventPtyUpdated = {
+  id: string
+  type: "pty.updated"
+  properties: {
+    info: Pty
+  }
+}
+
+export type EventPtyExited = {
+  id: string
+  type: "pty.exited"
+  properties: {
+    id: string
+    exitCode: number
+  }
+}
+
+export type EventPtyDeleted = {
+  id: string
+  type: "pty.deleted"
+  properties: {
+    id: string
+  }
+}
+
+export type EventQuestionV2Asked = {
+  id: string
+  type: "question.v2.asked"
+  properties: {
+    id: string
+    sessionID: string
+    /**
+     * Questions to ask
+     */
+    questions: Array<QuestionV2Info>
+    tool?: QuestionV2Tool
+  }
+}
+
+export type EventQuestionV2Replied = {
+  id: string
+  type: "question.v2.replied"
+  properties: {
+    sessionID: string
+    requestID: string
+    answers: Array<QuestionV2Answer>
+  }
+}
+
+export type EventQuestionV2Rejected = {
+  id: string
+  type: "question.v2.rejected"
+  properties: {
+    sessionID: string
+    requestID: string
+  }
+}
+
+export type EventLspUpdated = {
+  id: string
+  type: "lsp.updated"
+  properties: {
+    [key: string]: unknown
+  }
+}
+
+export type EventMcpToolsChanged = {
+  id: string
+  type: "mcp.tools.changed"
+  properties: {
+    server: string
+  }
+}
+
+export type EventMcpBrowserOpenFailed = {
+  id: string
+  type: "mcp.browser.open.failed"
+  properties: {
+    mcpName: string
+    url: string
+  }
+}
+
+export type EventCommandExecuted = {
+  id: string
+  type: "command.executed"
+  properties: {
+    name: string
+    sessionID: string
+    arguments: string
+    messageID: string
+  }
+}
+
+export type EventProjectUpdated = {
+  id: string
+  type: "project.updated"
+  properties: {
+    id: string
+    worktree: string
+    vcs?: ProjectVcs
+    name?: string
+    icon?: ProjectIcon
+    commands?: ProjectCommands
+    time: ProjectTime
+    sandboxes: Array<string>
+  }
+}
+
+export type EventSessionIdle = {
+  id: string
+  type: "session.idle"
+  properties: {
+    sessionID: string
+  }
+}
+
+export type EventVcsBranchUpdated = {
+  id: string
+  type: "vcs.branch.updated"
+  properties: {
+    branch?: string
+  }
+}
+
+export type EventWorkspaceReady = {
+  id: string
+  type: "workspace.ready"
+  properties: {
+    name: string
+  }
+}
+
+export type EventWorkspaceFailed = {
+  id: string
+  type: "workspace.failed"
+  properties: {
+    message: string
+  }
+}
+
+export type EventWorkspaceStatus = {
+  id: string
+  type: "workspace.status"
+  properties: {
+    workspaceID: string
+    status: "connected" | "connecting" | "disconnected" | "error"
+  }
+}
+
+export type EventWorktreeReady = {
+  id: string
+  type: "worktree.ready"
+  properties: {
+    name: string
+    branch?: string
+  }
+}
+
+export type EventWorktreeFailed = {
+  id: string
+  type: "worktree.failed"
+  properties: {
+    message: string
+  }
 }
 
 export type ProjectDirectories = Array<{
@@ -5967,6 +6948,23 @@ export type SessionCompacted = {
   }
 }
 
+export type CompactionCatalogChanged = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "compaction.catalog.changed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+  }
+}
+
 export type VcsBranchUpdated = {
   id: string
   metadata?: {
@@ -6084,7 +7082,24 @@ export type ServerConnected = {
   }
   location?: LocationRef
   data: {
+    [key: string]: never
+  }
+}
+
+export type ServerHeartbeat = {
+  id: string
+  metadata?: {
     [key: string]: unknown
+  }
+  type: "server.heartbeat"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    [key: string]: never
   }
 }
 
@@ -6101,7 +7116,7 @@ export type GlobalDisposed = {
   }
   location?: LocationRef
   data: {
-    [key: string]: unknown
+    [key: string]: never
   }
 }
 
@@ -6149,907 +7164,6 @@ export type ReferenceInfo = {
 
 export type ProjectCopyCopy = {
   directory: string
-}
-
-export type EventModelsDevRefreshed = {
-  id: string
-  type: "models-dev.refreshed"
-  properties: {
-    [key: string]: unknown
-  }
-}
-
-export type EventIntegrationUpdated = {
-  id: string
-  type: "integration.updated"
-  properties: {
-    [key: string]: unknown
-  }
-}
-
-export type EventIntegrationConnectionUpdated = {
-  id: string
-  type: "integration.connection.updated"
-  properties: {
-    integrationID: string
-  }
-}
-
-export type EventCatalogUpdated = {
-  id: string
-  type: "catalog.updated"
-  properties: {
-    [key: string]: unknown
-  }
-}
-
-export type EventSessionCreated = {
-  id: string
-  type: "session.created"
-  properties: {
-    sessionID: string
-    info: Session
-  }
-}
-
-export type EventSessionUpdated = {
-  id: string
-  type: "session.updated"
-  properties: {
-    sessionID: string
-    info: Session
-  }
-}
-
-export type EventSessionDeleted = {
-  id: string
-  type: "session.deleted"
-  properties: {
-    sessionID: string
-    info: Session
-  }
-}
-
-export type EventMessageUpdated = {
-  id: string
-  type: "message.updated"
-  properties: {
-    sessionID: string
-    info: Message
-  }
-}
-
-export type EventMessageRemoved = {
-  id: string
-  type: "message.removed"
-  properties: {
-    sessionID: string
-    messageID: string
-  }
-}
-
-export type EventMessagePartUpdated = {
-  id: string
-  type: "message.part.updated"
-  properties: {
-    sessionID: string
-    part: Part
-    time: number
-  }
-}
-
-export type EventMessagePartRemoved = {
-  id: string
-  type: "message.part.removed"
-  properties: {
-    sessionID: string
-    messageID: string
-    partID: string
-  }
-}
-
-export type EventSessionNextAgentSwitched = {
-  id: string
-  type: "session.next.agent.switched"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-    agent: string
-  }
-}
-
-export type EventSessionNextModelSwitched = {
-  id: string
-  type: "session.next.model.switched"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-    model: ModelRef
-  }
-}
-
-export type EventSessionNextMoved = {
-  id: string
-  type: "session.next.moved"
-  properties: {
-    timestamp: number
-    sessionID: string
-    location: LocationRef
-    subdirectory?: string
-  }
-}
-
-export type EventSessionNextPrompted = {
-  id: string
-  type: "session.next.prompted"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-    prompt: Prompt
-    delivery: "steer" | "queue"
-  }
-}
-
-export type EventSessionNextPromptAdmitted = {
-  id: string
-  type: "session.next.prompt.admitted"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-    prompt: Prompt
-    delivery: "steer" | "queue"
-  }
-}
-
-export type EventSessionNextContextUpdated = {
-  id: string
-  type: "session.next.context.updated"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-    text: string
-  }
-}
-
-export type EventSessionNextSynthetic = {
-  id: string
-  type: "session.next.synthetic"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-    text: string
-  }
-}
-
-export type EventSessionNextShellStarted = {
-  id: string
-  type: "session.next.shell.started"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-    callID: string
-    command: string
-  }
-}
-
-export type EventSessionNextShellEnded = {
-  id: string
-  type: "session.next.shell.ended"
-  properties: {
-    timestamp: number
-    sessionID: string
-    callID: string
-    output: string
-  }
-}
-
-export type EventSessionNextStepStarted = {
-  id: string
-  type: "session.next.step.started"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    agent: string
-    model: ModelRef
-    snapshot?: string
-  }
-}
-
-export type EventSessionNextStepEnded = {
-  id: string
-  type: "session.next.step.ended"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    finish: string
-    cost: number
-    tokens: {
-      input: number
-      output: number
-      reasoning: number
-      cache: {
-        read: number
-        write: number
-      }
-    }
-    snapshot?: string
-    files?: Array<string>
-  }
-}
-
-export type EventSessionNextStepFailed = {
-  id: string
-  type: "session.next.step.failed"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    error: SessionErrorUnknown
-  }
-}
-
-export type EventSessionNextTextStarted = {
-  id: string
-  type: "session.next.text.started"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    textID: string
-  }
-}
-
-export type EventSessionNextTextDelta = {
-  id: string
-  type: "session.next.text.delta"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    textID: string
-    delta: string
-  }
-}
-
-export type EventSessionNextTextEnded = {
-  id: string
-  type: "session.next.text.ended"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    textID: string
-    text: string
-  }
-}
-
-export type EventSessionNextReasoningStarted = {
-  id: string
-  type: "session.next.reasoning.started"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    reasoningID: string
-    providerMetadata?: LlmProviderMetadata
-  }
-}
-
-export type EventSessionNextReasoningDelta = {
-  id: string
-  type: "session.next.reasoning.delta"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    reasoningID: string
-    delta: string
-  }
-}
-
-export type EventSessionNextReasoningEnded = {
-  id: string
-  type: "session.next.reasoning.ended"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    reasoningID: string
-    text: string
-    providerMetadata?: LlmProviderMetadata
-  }
-}
-
-export type EventSessionNextToolInputStarted = {
-  id: string
-  type: "session.next.tool.input.started"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    callID: string
-    name: string
-  }
-}
-
-export type EventSessionNextToolInputDelta = {
-  id: string
-  type: "session.next.tool.input.delta"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    callID: string
-    delta: string
-  }
-}
-
-export type EventSessionNextToolInputEnded = {
-  id: string
-  type: "session.next.tool.input.ended"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    callID: string
-    text: string
-  }
-}
-
-export type EventSessionNextToolCalled = {
-  id: string
-  type: "session.next.tool.called"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    callID: string
-    tool: string
-    input: {
-      [key: string]: unknown
-    }
-    provider: {
-      executed: boolean
-      metadata?: LlmProviderMetadata
-    }
-  }
-}
-
-export type EventSessionNextToolProgress = {
-  id: string
-  type: "session.next.tool.progress"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    callID: string
-    structured: {
-      [key: string]: unknown
-    }
-    content: Array<LlmToolContent>
-  }
-}
-
-export type EventSessionNextToolSuccess = {
-  id: string
-  type: "session.next.tool.success"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    callID: string
-    structured: {
-      [key: string]: unknown
-    }
-    content: Array<LlmToolContent>
-    outputPaths?: Array<string>
-    result?: unknown
-    provider: {
-      executed: boolean
-      metadata?: LlmProviderMetadata
-    }
-  }
-}
-
-export type EventSessionNextToolFailed = {
-  id: string
-  type: "session.next.tool.failed"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    callID: string
-    error: SessionErrorUnknown
-    result?: unknown
-    provider: {
-      executed: boolean
-      metadata?: LlmProviderMetadata
-    }
-  }
-}
-
-export type EventSessionNextRetried = {
-  id: string
-  type: "session.next.retried"
-  properties: {
-    timestamp: number
-    sessionID: string
-    attempt: number
-    error: SessionNextRetryError
-  }
-}
-
-export type EventSessionNextCompactionStarted = {
-  id: string
-  type: "session.next.compaction.started"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-    reason: "auto" | "manual"
-  }
-}
-
-export type EventSessionNextCompactionDelta = {
-  id: string
-  type: "session.next.compaction.delta"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-    text: string
-  }
-}
-
-export type EventSessionNextCompactionEnded = {
-  id: string
-  type: "session.next.compaction.ended"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-    reason: "auto" | "manual"
-    text: string
-    recent: string
-  }
-}
-
-export type EventSessionNextRevertStaged = {
-  id: string
-  type: "session.next.revert.staged"
-  properties: {
-    timestamp: number
-    sessionID: string
-    revert: RevertState
-  }
-}
-
-export type EventSessionNextRevertCleared = {
-  id: string
-  type: "session.next.revert.cleared"
-  properties: {
-    timestamp: number
-    sessionID: string
-  }
-}
-
-export type EventSessionNextRevertCommitted = {
-  id: string
-  type: "session.next.revert.committed"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-  }
-}
-
-export type EventMessagePartDelta = {
-  id: string
-  type: "message.part.delta"
-  properties: {
-    sessionID: string
-    messageID: string
-    partID: string
-    field: string
-    delta: string
-  }
-}
-
-export type EventSessionDiff = {
-  id: string
-  type: "session.diff"
-  properties: {
-    sessionID: string
-    diff: Array<SnapshotFileDiff>
-  }
-}
-
-export type EventSessionError = {
-  id: string
-  type: "session.error"
-  properties: {
-    sessionID?: string
-    error?:
-      | ProviderAuthError
-      | UnknownError
-      | MessageOutputLengthError
-      | MessageAbortedError
-      | StructuredOutputError
-      | ContextOverflowError
-      | ContentFilterError
-      | ApiError
-  }
-}
-
-export type EventInstallationUpdated = {
-  id: string
-  type: "installation.updated"
-  properties: {
-    version: string
-  }
-}
-
-export type EventInstallationUpdateAvailable = {
-  id: string
-  type: "installation.update-available"
-  properties: {
-    version: string
-  }
-}
-
-export type EventFileEdited = {
-  id: string
-  type: "file.edited"
-  properties: {
-    file: string
-  }
-}
-
-export type EventReferenceUpdated = {
-  id: string
-  type: "reference.updated"
-  properties: {
-    [key: string]: unknown
-  }
-}
-
-export type EventPermissionV2Asked = {
-  id: string
-  type: "permission.v2.asked"
-  properties: {
-    id: string
-    sessionID: string
-    action: string
-    resources: Array<string>
-    save?: Array<string>
-    metadata?: {
-      [key: string]: unknown
-    }
-    source?: PermissionV2Source
-  }
-}
-
-export type EventPermissionV2Replied = {
-  id: string
-  type: "permission.v2.replied"
-  properties: {
-    sessionID: string
-    requestID: string
-    reply: PermissionV2Reply
-  }
-}
-
-export type EventPluginAdded = {
-  id: string
-  type: "plugin.added"
-  properties: {
-    id: string
-  }
-}
-
-export type EventProjectDirectoriesUpdated = {
-  id: string
-  type: "project.directories.updated"
-  properties: {
-    projectID: string
-  }
-}
-
-export type EventFileWatcherUpdated = {
-  id: string
-  type: "file.watcher.updated"
-  properties: {
-    file: string
-    event: "add" | "change" | "unlink"
-  }
-}
-
-export type EventPtyCreated = {
-  id: string
-  type: "pty.created"
-  properties: {
-    info: Pty
-  }
-}
-
-export type EventPtyUpdated = {
-  id: string
-  type: "pty.updated"
-  properties: {
-    info: Pty
-  }
-}
-
-export type EventPtyExited = {
-  id: string
-  type: "pty.exited"
-  properties: {
-    id: string
-    exitCode: number
-  }
-}
-
-export type EventPtyDeleted = {
-  id: string
-  type: "pty.deleted"
-  properties: {
-    id: string
-  }
-}
-
-export type EventQuestionV2Asked = {
-  id: string
-  type: "question.v2.asked"
-  properties: {
-    id: string
-    sessionID: string
-    /**
-     * Questions to ask
-     */
-    questions: Array<QuestionV2Info>
-    tool?: QuestionV2Tool
-  }
-}
-
-export type EventQuestionV2Replied = {
-  id: string
-  type: "question.v2.replied"
-  properties: {
-    sessionID: string
-    requestID: string
-    answers: Array<QuestionV2Answer>
-  }
-}
-
-export type EventQuestionV2Rejected = {
-  id: string
-  type: "question.v2.rejected"
-  properties: {
-    sessionID: string
-    requestID: string
-  }
-}
-
-export type EventTodoUpdated = {
-  id: string
-  type: "todo.updated"
-  properties: {
-    sessionID: string
-    todos: Array<Todo>
-  }
-}
-
-export type EventLspUpdated = {
-  id: string
-  type: "lsp.updated"
-  properties: {
-    [key: string]: unknown
-  }
-}
-
-export type EventPermissionAsked = {
-  id: string
-  type: "permission.asked"
-  properties: {
-    id: string
-    sessionID: string
-    permission: string
-    patterns: Array<string>
-    metadata: {
-      [key: string]: unknown
-    }
-    always: Array<string>
-    tool?: {
-      messageID: string
-      callID: string
-    }
-  }
-}
-
-export type EventPermissionReplied = {
-  id: string
-  type: "permission.replied"
-  properties: {
-    sessionID: string
-    requestID: string
-    reply: "once" | "always" | "reject"
-  }
-}
-
-export type EventMcpToolsChanged = {
-  id: string
-  type: "mcp.tools.changed"
-  properties: {
-    server: string
-  }
-}
-
-export type EventMcpBrowserOpenFailed = {
-  id: string
-  type: "mcp.browser.open.failed"
-  properties: {
-    mcpName: string
-    url: string
-  }
-}
-
-export type EventCommandExecuted = {
-  id: string
-  type: "command.executed"
-  properties: {
-    name: string
-    sessionID: string
-    arguments: string
-    messageID: string
-  }
-}
-
-export type EventProjectUpdated = {
-  id: string
-  type: "project.updated"
-  properties: {
-    id: string
-    worktree: string
-    vcs?: ProjectVcs
-    name?: string
-    icon?: ProjectIcon
-    commands?: ProjectCommands
-    time: ProjectTime
-    sandboxes: Array<string>
-  }
-}
-
-export type EventSessionStatus = {
-  id: string
-  type: "session.status"
-  properties: {
-    sessionID: string
-    status: SessionStatus
-  }
-}
-
-export type EventSessionIdle = {
-  id: string
-  type: "session.idle"
-  properties: {
-    sessionID: string
-  }
-}
-
-export type EventQuestionAsked = {
-  id: string
-  type: "question.asked"
-  properties: {
-    id: string
-    sessionID: string
-    /**
-     * Questions to ask
-     */
-    questions: Array<QuestionInfo>
-    tool?: QuestionTool
-  }
-}
-
-export type EventQuestionReplied = {
-  id: string
-  type: "question.replied"
-  properties: {
-    sessionID: string
-    requestID: string
-    answers: Array<QuestionAnswer>
-  }
-}
-
-export type EventQuestionRejected = {
-  id: string
-  type: "question.rejected"
-  properties: {
-    sessionID: string
-    requestID: string
-  }
-}
-
-export type EventSessionCompacted = {
-  id: string
-  type: "session.compacted"
-  properties: {
-    sessionID: string
-  }
-}
-
-export type EventVcsBranchUpdated = {
-  id: string
-  type: "vcs.branch.updated"
-  properties: {
-    branch?: string
-  }
-}
-
-export type EventWorkspaceReady = {
-  id: string
-  type: "workspace.ready"
-  properties: {
-    name: string
-  }
-}
-
-export type EventWorkspaceFailed = {
-  id: string
-  type: "workspace.failed"
-  properties: {
-    message: string
-  }
-}
-
-export type EventWorkspaceStatus = {
-  id: string
-  type: "workspace.status"
-  properties: {
-    workspaceID: string
-    status: "connected" | "connecting" | "disconnected" | "error"
-  }
-}
-
-export type EventWorktreeReady = {
-  id: string
-  type: "worktree.ready"
-  properties: {
-    name: string
-    branch?: string
-  }
-}
-
-export type EventWorktreeFailed = {
-  id: string
-  type: "worktree.failed"
-  properties: {
-    message: string
-  }
-}
-
-export type EventServerConnected = {
-  id: string
-  type: "server.connected"
-  properties: {
-    [key: string]: unknown
-  }
-}
-
-export type EventGlobalDisposed = {
-  id: string
-  type: "global.disposed"
-  properties: {
-    [key: string]: unknown
-  }
 }
 
 export type CredentialOAuth = {
@@ -7254,22 +7368,24 @@ export type GlobalHealthResponse = GlobalHealthResponses[keyof GlobalHealthRespo
 export type GlobalEventData = {
   body?: never
   path?: never
-  query?: never
+  query?: {
+    oca_event_projection?: "transcript-history-v1"
+  }
   url: "/global/event"
 }
 
 export type GlobalEventErrors = {
   /**
-   * Bad request
+   * BadRequest | InvalidRequestError
    */
-  400: BadRequestError
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
 }
 
 export type GlobalEventError = GlobalEventErrors[keyof GlobalEventErrors]
 
 export type GlobalEventResponses = {
   /**
-   * Event stream
+   * Success
    */
   200: GlobalEvent
 }
@@ -7392,13 +7508,25 @@ export type EventSubscribeData = {
   query?: {
     directory?: string
     workspace?: string
+    sessionID?: string
+    type?: string
+    oca_event_projection?: "transcript-history-v1"
   }
   url: "/event"
 }
 
+export type EventSubscribeErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type EventSubscribeError = EventSubscribeErrors[keyof EventSubscribeErrors]
+
 export type EventSubscribeResponses = {
   /**
-   * Event stream
+   * Success
    */
   200: Event
 }
@@ -7843,6 +7971,10 @@ export type ExperimentalSessionBackgroundErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type ExperimentalSessionBackgroundError =
@@ -9332,6 +9464,59 @@ export type ProviderListResponses = {
 
 export type ProviderListResponse = ProviderListResponses[keyof ProviderListResponses]
 
+export type ProviderRuntimeListData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/provider/runtime"
+}
+
+export type ProviderRuntimeListErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ProviderRuntimeListError = ProviderRuntimeListErrors[keyof ProviderRuntimeListErrors]
+
+export type ProviderRuntimeListResponses = {
+  /**
+   * Connected provider model-selection facts
+   */
+  200: {
+    all: Array<{
+      id: string
+      name: string
+      models: {
+        [key: string]: {
+          id: string
+          providerID: string
+          name: string
+          capabilities: {
+            reasoning: boolean
+          }
+          limit: {
+            context: number
+          }
+          variants?: {
+            [key: string]: null
+          }
+        }
+      }
+    }>
+    default: {
+      [key: string]: string
+    }
+    connected: Array<string>
+  }
+}
+
+export type ProviderRuntimeListResponse = ProviderRuntimeListResponses[keyof ProviderRuntimeListResponses]
+
 export type ProviderAuthData = {
   body?: never
   path?: never
@@ -9499,6 +9684,14 @@ export type SessionCreateErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type SessionCreateError = SessionCreateErrors[keyof SessionCreateErrors]
@@ -9563,6 +9756,10 @@ export type SessionDeleteErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type SessionDeleteError = SessionDeleteErrors[keyof SessionDeleteErrors]
@@ -9597,6 +9794,10 @@ export type SessionGetErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type SessionGetError = SessionGetErrors[keyof SessionGetErrors]
@@ -9640,6 +9841,10 @@ export type SessionUpdateErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type SessionUpdateError = SessionUpdateErrors[keyof SessionUpdateErrors]
@@ -9803,7 +10008,7 @@ export type SessionPromptData = {
     tools?: {
       [key: string]: boolean
     }
-    format?: OutputFormat
+    format?: OutputFormat1
     system?: string
     variant?: string
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
@@ -9827,6 +10032,10 @@ export type SessionPromptErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type SessionPromptError = SessionPromptErrors[keyof SessionPromptErrors]
@@ -9920,6 +10129,201 @@ export type SessionMessageResponses = {
 
 export type SessionMessageResponse = SessionMessageResponses[keyof SessionMessageResponses]
 
+export type SessionContextClearStagedData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/context/stage"
+}
+
+export type SessionContextClearStagedErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
+}
+
+export type SessionContextClearStagedError = SessionContextClearStagedErrors[keyof SessionContextClearStagedErrors]
+
+export type SessionContextClearStagedResponses = {
+  /**
+   * Staged context cleared
+   */
+  204: void
+}
+
+export type SessionContextClearStagedResponse =
+  SessionContextClearStagedResponses[keyof SessionContextClearStagedResponses]
+
+export type SessionContextListStagedData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/context/stage"
+}
+
+export type SessionContextListStagedErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionContextListStagedError = SessionContextListStagedErrors[keyof SessionContextListStagedErrors]
+
+export type SessionContextListStagedResponses = {
+  /**
+   * Staged contexts
+   */
+  200: Array<StagedContextInfo>
+}
+
+export type SessionContextListStagedResponse =
+  SessionContextListStagedResponses[keyof SessionContextListStagedResponses]
+
+export type SessionContextStageData = {
+  body?: {
+    id?: string
+    mode?: "next_prompt"
+    visibility?: "provider_only"
+    consume?: "once"
+    parts: Array<StagedContextTextPartInput>
+  }
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/context/stage"
+}
+
+export type SessionContextStageErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
+}
+
+export type SessionContextStageError = SessionContextStageErrors[keyof SessionContextStageErrors]
+
+export type SessionContextStageResponses = {
+  /**
+   * Staged context
+   */
+  200: StagedContextInfo
+}
+
+export type SessionContextStageResponse = SessionContextStageResponses[keyof SessionContextStageResponses]
+
+export type SessionContextClearStagedItemData = {
+  body?: never
+  path: {
+    sessionID: string
+    contextID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/context/stage/{contextID}"
+}
+
+export type SessionContextClearStagedItemErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
+}
+
+export type SessionContextClearStagedItemError =
+  SessionContextClearStagedItemErrors[keyof SessionContextClearStagedItemErrors]
+
+export type SessionContextClearStagedItemResponses = {
+  /**
+   * Staged context cleared
+   */
+  204: void
+}
+
+export type SessionContextClearStagedItemResponse =
+  SessionContextClearStagedItemResponses[keyof SessionContextClearStagedItemResponses]
+
+export type SessionCompactionCatalogData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+    cursor?: string
+  }
+  url: "/session/{sessionID}/compaction"
+}
+
+export type SessionCompactionCatalogErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionCompactionCatalogError = SessionCompactionCatalogErrors[keyof SessionCompactionCatalogErrors]
+
+export type SessionCompactionCatalogResponses = {
+  /**
+   * Compaction region metadata catalog page
+   */
+  200: CompactionCatalogResponse
+}
+
+export type SessionCompactionCatalogResponse =
+  SessionCompactionCatalogResponses[keyof SessionCompactionCatalogResponses]
+
 export type SessionForkData = {
   body?: {
     messageID?: string
@@ -9943,6 +10347,10 @@ export type SessionForkErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type SessionForkError = SessionForkErrors[keyof SessionForkErrors]
@@ -9973,6 +10381,10 @@ export type SessionAbortErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type SessionAbortError = SessionAbortErrors[keyof SessionAbortErrors]
@@ -10011,6 +10423,10 @@ export type SessionInitErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type SessionInitError = SessionInitErrors[keyof SessionInitErrors]
@@ -10045,6 +10461,10 @@ export type SessionUnshareErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
   /**
    * InternalServerError
    */
@@ -10083,6 +10503,10 @@ export type SessionShareErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
   /**
    * InternalServerError
    */
@@ -10125,6 +10549,10 @@ export type SessionSummarizeErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type SessionSummarizeError = SessionSummarizeErrors[keyof SessionSummarizeErrors]
@@ -10150,7 +10578,7 @@ export type SessionPromptAsyncData = {
     tools?: {
       [key: string]: boolean
     }
-    format?: OutputFormat
+    format?: OutputFormat1
     system?: string
     variant?: string
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
@@ -10174,6 +10602,10 @@ export type SessionPromptAsyncErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type SessionPromptAsyncError = SessionPromptAsyncErrors[keyof SessionPromptAsyncErrors]
@@ -10223,6 +10655,10 @@ export type SessionCommandErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type SessionCommandError = SessionCommandErrors[keyof SessionCommandErrors]
@@ -10391,6 +10827,10 @@ export type PermissionRespondErrors = {
    * NotFoundError | PermissionNotFoundError
    */
   404: NotFoundError | PermissionNotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type PermissionRespondError = PermissionRespondErrors[keyof PermissionRespondErrors]
@@ -10427,6 +10867,10 @@ export type PartDeleteErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type PartDeleteError = PartDeleteErrors[keyof PartDeleteErrors]
@@ -10463,6 +10907,10 @@ export type PartUpdateErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type PartUpdateError = PartUpdateErrors[keyof PartUpdateErrors]
@@ -10877,7 +11325,7 @@ export type TuiShowToastResponses = {
 export type TuiShowToastResponse = TuiShowToastResponses[keyof TuiShowToastResponses]
 
 export type TuiPublishData = {
-  body?: EventTuiPromptAppend | EventTuiCommandExecute | EventTuiToastShow | EventTuiSessionSelect
+  body?: EventTuiPromptAppend2 | EventTuiCommandExecute2 | EventTuiToastShow2 | EventTuiSessionSelect2
   path?: never
   query?: {
     directory?: string
@@ -11702,7 +12150,7 @@ export type V2SessionRevertStageErrors = {
   /**
    * UnknownError
    */
-  500: UnknownError1
+  500: UnknownError2
 }
 
 export type V2SessionRevertStageError = V2SessionRevertStageErrors[keyof V2SessionRevertStageErrors]
@@ -11743,7 +12191,7 @@ export type V2SessionRevertClearErrors = {
   /**
    * UnknownError
    */
-  500: UnknownError1
+  500: UnknownError2
 }
 
 export type V2SessionRevertClearError = V2SessionRevertClearErrors[keyof V2SessionRevertClearErrors]
@@ -11817,7 +12265,7 @@ export type V2SessionContextErrors = {
   /**
    * UnknownError
    */
-  500: UnknownError1
+  500: UnknownError2
 }
 
 export type V2SessionContextError = V2SessionContextErrors[keyof V2SessionContextErrors]
@@ -12017,7 +12465,7 @@ export type V2SessionMessagesErrors = {
   /**
    * UnknownError
    */
-  500: UnknownError1
+  500: UnknownError2
 }
 
 export type V2SessionMessagesError = V2SessionMessagesErrors[keyof V2SessionMessagesErrors]
@@ -12987,7 +13435,7 @@ export type V2EventSubscribeError = V2EventSubscribeErrors[keyof V2EventSubscrib
 
 export type V2EventSubscribeResponses = {
   /**
-   * Event stream
+   * Success
    */
   200: V2Event
 }

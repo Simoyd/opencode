@@ -1,8 +1,6 @@
 import type { AgentSideConnection } from "@agentclientprotocol/sdk"
 import type {
   Event,
-  EventMessagePartDelta,
-  EventMessagePartUpdated,
   OpencodeClient,
   Part,
   SessionMessageResponse,
@@ -29,6 +27,8 @@ type GlobalEventEnvelope = {
 type GlobalEventStream = {
   stream: AsyncIterable<GlobalEventEnvelope>
 }
+type EventMessagePartUpdated = Extract<Event, { type: "message.part.updated" }>
+type EventMessagePartDelta = Extract<Event, { type: "message.part.delta" }>
 
 export function start(input: { sdk: OpencodeClient; connection: Connection; session: ACPSession.Interface }) {
   const subscription = new Subscription(input)
@@ -115,7 +115,7 @@ export class Subscription {
 
   private async run() {
     while (!this.abort.signal.aborted) {
-      const events = (await this.input.sdk.global.event({
+      const events = (await this.input.sdk.global.event(undefined, {
         signal: this.abort.signal,
       })) as GlobalEventStream
 

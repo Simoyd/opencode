@@ -15,7 +15,13 @@ type OpenApiSchema = {
 }
 type OpenApiResponse = {
   readonly description?: string
-  readonly content?: Record<string, { readonly schema?: OpenApiSchema }>
+  readonly content?: Record<
+    string,
+    {
+      readonly schema?: OpenApiSchema
+      readonly "x-effect-stream"?: { readonly causeSchema?: OpenApiSchema }
+    }
+  >
 }
 type OpenApiOperation = {
   readonly parameters?: ReadonlyArray<{
@@ -114,6 +120,15 @@ describe("PublicApi OpenAPI v2 errors", () => {
     expect(spec.paths["/api/event"]?.get?.responses?.["200"]?.content?.["text/event-stream"]?.schema).toEqual({
       $ref: "#/components/schemas/V2Event",
     })
+  })
+
+  test("preserves Effect stream metadata while selecting public event schemas", () => {
+    const spec = OpenApi.fromApi(PublicApi) as OpenApiSpec
+
+    for (const path of ["/event", "/global/event", "/api/event"]) {
+      const media = spec.paths[path]?.get?.responses?.["200"]?.content?.["text/event-stream"]
+      expect(media?.["x-effect-stream"]?.causeSchema, path).toBeDefined()
+    }
   })
 
   test("preserves /api auth responses", () => {

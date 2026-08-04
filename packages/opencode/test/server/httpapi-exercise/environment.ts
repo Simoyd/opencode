@@ -13,6 +13,7 @@ process.env.XDG_CACHE_HOME = path.join(exerciseGlobalRoot, "cache")
 process.env.OPENCODE_DISABLE_SHARE = "true"
 export const exerciseConfigDirectory = path.join(exerciseGlobalRoot, "config", "opencode")
 export const exerciseDataDirectory = path.join(exerciseGlobalRoot, "data", "opencode")
+export const exerciseAuthProbeDirectory = path.join(exerciseGlobalRoot, "auth-probe")
 
 const preserveExerciseDatabase = !!process.env.OPENCODE_HTTPAPI_EXERCISE_DB
 export const exerciseDatabasePath =

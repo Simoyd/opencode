@@ -6,15 +6,17 @@ import { Database } from "../database/database"
 import { EventV2 } from "../event"
 import { makeGlobalNode } from "../effect/app-node"
 import { SessionEvent } from "./event"
-import { SessionV1 } from "../v1/session"
+import { SessionV1, type MessageID } from "../v1/session"
 import { WorkspaceTable } from "../control-plane/workspace.sql"
 import { SessionMessage } from "./message"
 import { SessionMessageUpdater } from "./message-updater"
 import { SessionInput } from "./input"
 import { WorkspaceV2 } from "../workspace"
 import { SessionContextEpoch } from "./context-epoch"
+import { CompactionRegionProjection } from "./compaction-region"
 import { MessageTable, PartTable, SessionInputTable, SessionMessageTable, SessionTable } from "./sql"
 import type { DeepMutable } from "../schema"
+import type { SessionSchema } from "./schema"
 
 type DatabaseService = Database.Interface["db"]
 
@@ -107,6 +109,22 @@ function applyUsage(
     .where(eq(SessionTable.id, sessionID))
     .run()
     .pipe(Effect.orDie)
+}
+
+function reconcileRegions(
+  db: DatabaseService,
+  event: EventV2.Payload,
+  sessionID: SessionSchema.ID,
+  input: {
+    messageID?: MessageID
+    removed?: { id: MessageID; time_created: number; marker: boolean }
+  },
+) {
+  return CompactionRegionProjection.reconcile(db, { sessionID, ...input }).pipe(
+    Effect.tap((didChange) =>
+      didChange ? Effect.sync(() => CompactionRegionProjection.markInvalidation(event.data)) : Effect.void,
+    ),
+  )
 }
 
 function run(db: DatabaseService, event: SessionEvent.Event) {
@@ -214,6 +232,7 @@ const layer = Layer.effectDiscard(
     const { db } = yield* Database.Service
     yield* events.project(SessionV1.Event.Created, (event) =>
       Effect.gen(function* () {
+        requireMatchingSessionOwner(event.type, event.data.sessionID, event.data.info.id)
         const stored = yield* db
           .insert(SessionTable)
           .values(sessionRow(event.data.info))
@@ -233,12 +252,24 @@ const layer = Layer.effectDiscard(
       }),
     )
     yield* events.project(SessionV1.Event.Updated, (event) =>
-      db
-        .update(SessionTable)
-        .set(sessionRow(event.data.info))
-        .where(eq(SessionTable.id, event.data.sessionID))
-        .run()
-        .pipe(Effect.orDie),
+      Effect.gen(function* () {
+        requireMatchingSessionOwner(event.type, event.data.sessionID, event.data.info.id)
+        const stored = yield* db
+          .update(SessionTable)
+          .set(sessionRow(event.data.info))
+          .where(eq(SessionTable.id, event.data.sessionID))
+          .returning({ sessionID: SessionTable.id })
+          .get()
+          .pipe(Effect.orDie)
+        if (!stored || stored.sessionID !== event.data.sessionID) {
+          return yield* Effect.die(
+            new EventV2.InvalidDurableEventError({
+              type: event.type,
+              message: `Session update requires canonical session ${event.data.sessionID}`,
+            }),
+          )
+        }
+      }),
     )
     yield* events.project(SessionEvent.Moved, (event) =>
       Effect.gen(function* () {
@@ -257,24 +288,69 @@ const layer = Layer.effectDiscard(
       }),
     )
     yield* events.project(SessionV1.Event.Deleted, (event) =>
-      db.delete(SessionTable).where(eq(SessionTable.id, event.data.sessionID)).run().pipe(Effect.orDie),
+      Effect.gen(function* () {
+        requireMatchingSessionOwner(event.type, event.data.sessionID, event.data.info.id)
+        const stored = yield* db
+          .delete(SessionTable)
+          .where(eq(SessionTable.id, event.data.sessionID))
+          .returning({ sessionID: SessionTable.id })
+          .get()
+          .pipe(Effect.orDie)
+        if (!stored || stored.sessionID !== event.data.sessionID) {
+          return yield* Effect.die(
+            new EventV2.InvalidDurableEventError({
+              type: event.type,
+              message: `Session deletion requires canonical session ${event.data.sessionID}`,
+            }),
+          )
+        }
+      }),
     )
     yield* events.project(SessionV1.Event.MessageUpdated, (event) =>
       Effect.gen(function* () {
+        requireMatchingSessionOwner(event.type, event.data.sessionID, event.data.info.sessionID)
         const time_created = event.data.info.time.created
         const id = event.data.info.id
         const sessionID = event.data.info.sessionID
         const data = messageData(event.data.info)
+        const prior = yield* db
+          .select({
+            session_id: MessageTable.session_id,
+            time_created: MessageTable.time_created,
+          })
+          .from(MessageTable)
+          .where(eq(MessageTable.id, id))
+          .get()
+          .pipe(Effect.orDie)
+        if (prior && (prior.session_id !== sessionID || prior.time_created !== time_created)) {
+          return yield* Effect.die(`Message ${id} collides with a different persisted owner or physical position`)
+        }
         yield* db
           .insert(MessageTable)
           .values({ id, session_id: sessionID, time_created, data })
           .onConflictDoUpdate({ target: MessageTable.id, set: { data } })
           .run()
           .pipe(Effect.orDie)
+        yield* reconcileRegions(db, event, sessionID, { messageID: id })
       }),
     )
     yield* events.project(SessionV1.Event.MessageRemoved, (event) =>
       Effect.gen(function* () {
+        const message = yield* db
+          .select({ sessionID: MessageTable.session_id, time: MessageTable.time_created })
+          .from(MessageTable)
+          .where(eq(MessageTable.id, event.data.messageID))
+          .get()
+          .pipe(Effect.orDie)
+        if (!message) {
+          return yield* Effect.die(new EventV2.InvalidDurableEventError({
+            type: event.type,
+            message: `Message removal requires canonical message ${event.data.messageID}`,
+          }))
+        }
+        if (message.sessionID !== event.data.sessionID) {
+          return yield* Effect.die(`Message ${event.data.messageID} collides with a different persisted owner`)
+        }
         const rows = yield* db
           .select()
           .from(PartTable)
@@ -285,11 +361,25 @@ const layer = Layer.effectDiscard(
           const previous = usage(row.data)
           if (previous) yield* applyUsage(db, event.data.sessionID, previous, -1)
         }
-        yield* db
+        const removed = yield* db
           .delete(MessageTable)
           .where(and(eq(MessageTable.id, event.data.messageID), eq(MessageTable.session_id, event.data.sessionID)))
-          .run()
+          .returning({ id: MessageTable.id })
+          .get()
           .pipe(Effect.orDie)
+        if (!removed) {
+          return yield* Effect.die(new EventV2.InvalidDurableEventError({
+            type: event.type,
+            message: `Message removal did not mutate canonical message ${event.data.messageID}`,
+          }))
+        }
+        yield* reconcileRegions(db, event, event.data.sessionID, {
+          removed: {
+            id: event.data.messageID,
+            time_created: message.time,
+            marker: rows.some((row) => row.data.type === "compaction"),
+          },
+        })
       }),
     )
     yield* events.project(SessionV1.Event.PartRemoved, (event) =>
@@ -297,25 +387,74 @@ const layer = Layer.effectDiscard(
         const row = yield* db
           .select()
           .from(PartTable)
-          .where(and(eq(PartTable.id, event.data.partID), eq(PartTable.session_id, event.data.sessionID)))
+          .where(eq(PartTable.id, event.data.partID))
           .get()
           .pipe(Effect.orDie)
-        const previous = row && usage(row.data)
-        if (previous) yield* applyUsage(db, event.data.sessionID, previous, -1)
-        yield* db
-          .delete(PartTable)
-          .where(and(eq(PartTable.id, event.data.partID), eq(PartTable.session_id, event.data.sessionID)))
-          .run()
+        if (!row) {
+          return yield* Effect.die(new EventV2.InvalidDurableEventError({
+            type: event.type,
+            message: `Part removal requires canonical part ${event.data.partID}`,
+          }))
+        }
+        if (row.message_id !== event.data.messageID || row.session_id !== event.data.sessionID) {
+          return yield* Effect.die(`Part ${event.data.partID} collides with a different persisted owner`)
+        }
+        const parent = yield* db
+          .select({ id: MessageTable.id, session_id: MessageTable.session_id, time_created: MessageTable.time_created })
+          .from(MessageTable)
+          .where(and(eq(MessageTable.id, row.message_id), eq(MessageTable.session_id, row.session_id)))
+          .get()
           .pipe(Effect.orDie)
+        if (!parent) return yield* Effect.die(`Part ${row.id} has no canonical parent message owner`)
+        const previous = usage(row.data)
+        if (previous) yield* applyUsage(db, parent.session_id, previous, -1)
+        const removed = yield* db
+          .delete(PartTable)
+          .where(
+            and(
+              eq(PartTable.id, row.id),
+              eq(PartTable.message_id, parent.id),
+              eq(PartTable.session_id, parent.session_id),
+            ),
+          )
+          .returning({ id: PartTable.id })
+          .get()
+          .pipe(Effect.orDie)
+        if (!removed) {
+          return yield* Effect.die(new EventV2.InvalidDurableEventError({
+            type: event.type,
+            message: `Part removal did not mutate canonical part ${event.data.partID}`,
+          }))
+        }
+        yield* reconcileRegions(db, event, parent.session_id, {
+          messageID: parent.id,
+          removed:
+            row.data.type === "compaction"
+              ? { id: parent.id, time_created: parent.time_created, marker: true }
+              : undefined,
+        })
       }),
     )
     yield* events.project(SessionV1.Event.PartUpdated, (event) =>
       Effect.gen(function* () {
+        requireMatchingSessionOwner(event.type, event.data.sessionID, event.data.part.sessionID)
         const id = event.data.part.id
         const messageID = event.data.part.messageID
         const sessionID = event.data.part.sessionID
         const data = partData(event.data.part)
+        const parent = yield* db
+          .select({ id: MessageTable.id, session_id: MessageTable.session_id, time_created: MessageTable.time_created })
+          .from(MessageTable)
+          .where(eq(MessageTable.id, messageID))
+          .get()
+          .pipe(Effect.orDie)
+        if (!parent || parent.session_id !== sessionID) {
+          return yield* Effect.die(`Part ${id} has no canonical parent in session ${sessionID}`)
+        }
         const row = yield* db.select().from(PartTable).where(eq(PartTable.id, id)).get().pipe(Effect.orDie)
+        if (row && (row.session_id !== sessionID || row.message_id !== messageID)) {
+          return yield* Effect.die(`Part ${id} collides with a different persisted owner`)
+        }
         yield* db
           .insert(PartTable)
           .values({ id, message_id: messageID, session_id: sessionID, time_created: event.data.time, data })
@@ -326,6 +465,13 @@ const layer = Layer.effectDiscard(
         const next = usage(event.data.part)
         if (previous) yield* applyUsage(db, row.session_id, previous, -1)
         if (next) yield* applyUsage(db, sessionID, next)
+        yield* reconcileRegions(db, event, sessionID, {
+          messageID,
+          removed:
+            row?.data.type === "compaction" && event.data.part.type !== "compaction"
+              ? { id: parent.id, time_created: parent.time_created, marker: true }
+              : undefined,
+        })
       }),
     )
     yield* events.project(SessionEvent.AgentSwitched, (event) =>
@@ -456,3 +602,12 @@ const layer = Layer.effectDiscard(
 )
 
 export const node = makeGlobalNode({ name: "session-projector", layer, deps: [EventV2.node, Database.node] })
+
+function requireMatchingSessionOwner(type: string, outerSessionID: string, nestedSessionID: string) {
+  if (outerSessionID !== nestedSessionID) {
+    throw new EventV2.InvalidDurableEventError({
+      type,
+      message: `${type} contains contradictory outer and nested session ownership`,
+    })
+  }
+}

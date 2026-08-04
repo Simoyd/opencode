@@ -87,7 +87,7 @@ function createHarness(messages: Record<string, SessionMessageResponse> = {}) {
   const events = createEventStream()
   const sdk = {
     global: {
-      event: (options?: { signal?: AbortSignal }) => {
+      event: (_parameters?: unknown, options?: { signal?: AbortSignal }) => {
         calls.eventSubscribe++
         return Promise.resolve({ stream: events.stream(options?.signal) })
       },
@@ -449,7 +449,8 @@ describe("acp event routing", () => {
     const service = ACPService.make({
       sdk: {
         global: {
-          event: (options?: { signal?: AbortSignal }) => Promise.resolve({ stream: events.stream(options?.signal) }),
+          event: (_parameters?: unknown, options?: { signal?: AbortSignal }) =>
+            Promise.resolve({ stream: events.stream(options?.signal) }),
         },
         session: {
           get: () => Promise.resolve({ data: { id: "ses_loaded" } }),

@@ -21,7 +21,7 @@ const schema = <const Definitions extends ReadonlyArray<Definition>>(definitions
           Schema.Struct({
             ...fields,
             type: Schema.Literal("server.connected"),
-            data: Schema.Struct({}),
+            data: Schema.Record(Schema.String, Schema.Never),
           }).annotate({ identifier: "V2Event.server.connected" }),
         ]),
   ]).annotate({ identifier: "V2Event" })

@@ -24,11 +24,12 @@ import type {
   ConfigProvidersResponses,
   ConfigUpdateErrors,
   ConfigUpdateResponses,
+  EventSubscribeErrors,
   EventSubscribeResponses,
-  EventTuiCommandExecute,
-  EventTuiPromptAppend,
-  EventTuiSessionSelect,
-  EventTuiToastShow,
+  EventTuiCommandExecute2,
+  EventTuiPromptAppend2,
+  EventTuiSessionSelect2,
+  EventTuiToastShow2,
   ExperimentalCapabilitiesGetErrors,
   ExperimentalCapabilitiesGetResponses,
   ExperimentalConsoleGetErrors,
@@ -113,7 +114,7 @@ import type {
   McpStatusResponses,
   ModelRef,
   MoveSessionDestination,
-  OutputFormat,
+  OutputFormat1,
   Part as Part2,
   PartDeleteErrors,
   PartDeleteResponses,
@@ -151,6 +152,8 @@ import type {
   ProviderOauthAuthorizeResponses,
   ProviderOauthCallbackErrors,
   ProviderOauthCallbackResponses,
+  ProviderRuntimeListErrors,
+  ProviderRuntimeListResponses,
   PtyConnectErrors,
   PtyConnectResponses,
   PtyConnectTokenErrors,
@@ -181,6 +184,16 @@ import type {
   SessionChildrenResponses,
   SessionCommandErrors,
   SessionCommandResponses,
+  SessionCompactionCatalogErrors,
+  SessionCompactionCatalogResponses,
+  SessionContextClearStagedErrors,
+  SessionContextClearStagedItemErrors,
+  SessionContextClearStagedItemResponses,
+  SessionContextClearStagedResponses,
+  SessionContextListStagedErrors,
+  SessionContextListStagedResponses,
+  SessionContextStageErrors,
+  SessionContextStageResponses,
   SessionCreateErrors,
   SessionCreateResponses,
   SessionDeleteErrors,
@@ -223,6 +236,7 @@ import type {
   SessionUnshareResponses,
   SessionUpdateErrors,
   SessionUpdateResponses,
+  StagedContextTextPartInput,
   SubtaskPartInput,
   SyncHistoryListErrors,
   SyncHistoryListResponses,
@@ -1333,10 +1347,17 @@ export class Global extends HeyApiClient {
    *
    * Subscribe to global events from the OpenCode system using server-sent events.
    */
-  public event<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
+  public event<ThrowOnError extends boolean = false>(
+    parameters?: {
+      oca_event_projection?: "transcript-history-v1"
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "query", key: "oca_event_projection" }] }])
     return (options?.client ?? this.client).sse.get<GlobalEventResponses, GlobalEventErrors, ThrowOnError>({
       url: "/global/event",
       ...options,
+      ...params,
     })
   }
 
@@ -1392,6 +1413,9 @@ export class Event extends HeyApiClient {
     parameters?: {
       directory?: string
       workspace?: string
+      sessionID?: string
+      type?: string
+      oca_event_projection?: "transcript-history-v1"
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -1402,11 +1426,14 @@ export class Event extends HeyApiClient {
           args: [
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
+            { in: "query", key: "sessionID" },
+            { in: "query", key: "type" },
+            { in: "query", key: "oca_event_projection" },
           ],
         },
       ],
     )
-    return (options?.client ?? this.client).sse.get<EventSubscribeResponses, unknown, ThrowOnError>({
+    return (options?.client ?? this.client).sse.get<EventSubscribeResponses, EventSubscribeErrors, ThrowOnError>({
       url: "/event",
       ...options,
       ...params,
@@ -3324,6 +3351,36 @@ export class Provider extends HeyApiClient {
   }
 
   /**
+   * List connected provider models
+   *
+   * Get the compact connected-provider model facts used by embedded runtimes.
+   */
+  public runtimeList<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<ProviderRuntimeListResponses, ProviderRuntimeListErrors, ThrowOnError>({
+      url: "/provider/runtime",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
    * Get provider auth methods
    *
    * Retrieve available authentication methods for all AI providers.
@@ -3356,6 +3413,152 @@ export class Provider extends HeyApiClient {
   private _oauth?: Oauth
   get oauth(): Oauth {
     return (this._oauth ??= new Oauth({ client: this.client }))
+  }
+}
+
+export class Context extends HeyApiClient {
+  public clearStaged<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).delete<
+      SessionContextClearStagedResponses,
+      SessionContextClearStagedErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/context/stage",
+      ...options,
+      ...params,
+    })
+  }
+
+  public listStaged<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      SessionContextListStagedResponses,
+      SessionContextListStagedErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/context/stage",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Stage provider-only context
+   *
+   * Stage provider-only context for the next real prompt in this session without creating transcript messages or submitting a prompt.
+   */
+  public stage<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+      id?: string
+      mode?: "next_prompt"
+      visibility?: "provider_only"
+      consume?: "once"
+      parts?: Array<StagedContextTextPartInput>
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "id" },
+            { in: "body", key: "mode" },
+            { in: "body", key: "visibility" },
+            { in: "body", key: "consume" },
+            { in: "body", key: "parts" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionContextStageResponses, SessionContextStageErrors, ThrowOnError>(
+      {
+        url: "/session/{sessionID}/context/stage",
+        ...options,
+        ...params,
+        headers: {
+          "Content-Type": "application/json",
+          ...options?.headers,
+          ...params.headers,
+        },
+      },
+    )
+  }
+
+  public clearStagedItem<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      contextID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "contextID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).delete<
+      SessionContextClearStagedItemResponses,
+      SessionContextClearStagedItemErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/context/stage/{contextID}",
+      ...options,
+      ...params,
+    })
   }
 }
 
@@ -3737,7 +3940,7 @@ export class Session2 extends HeyApiClient {
   /**
    * Send message
    *
-   * Create and send a new message to a session, streaming the AI response.
+   * Create and send a new message to a session. With noReply=true, return the committed user message without starting model execution.
    */
   public prompt<ThrowOnError extends boolean = false>(
     parameters: {
@@ -3754,7 +3957,7 @@ export class Session2 extends HeyApiClient {
       tools?: {
         [key: string]: boolean
       }
-      format?: OutputFormat
+      format?: OutputFormat1
       system?: string
       variant?: string
       parts?: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
@@ -3861,6 +4064,44 @@ export class Session2 extends HeyApiClient {
     )
     return (options?.client ?? this.client).get<SessionMessageResponses, SessionMessageErrors, ThrowOnError>({
       url: "/session/{sessionID}/message/{messageID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get compaction region catalog
+   *
+   * Return one fixed page of compact-region metadata without transcript bodies.
+   */
+  public compactionCatalog<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+      cursor?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "cursor" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      SessionCompactionCatalogResponses,
+      SessionCompactionCatalogErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/compaction",
       ...options,
       ...params,
     })
@@ -4090,7 +4331,7 @@ export class Session2 extends HeyApiClient {
   /**
    * Send async message
    *
-   * Create and send a new message to a session asynchronously, starting the session if needed and returning immediately.
+   * Commit a new user message before returning 204. Unless noReply=true, start or join session execution asynchronously after admission.
    */
   public promptAsync<ThrowOnError extends boolean = false>(
     parameters: {
@@ -4107,7 +4348,7 @@ export class Session2 extends HeyApiClient {
       tools?: {
         [key: string]: boolean
       }
-      format?: OutputFormat
+      format?: OutputFormat1
       system?: string
       variant?: string
       parts?: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
@@ -4324,6 +4565,11 @@ export class Session2 extends HeyApiClient {
       ...options,
       ...params,
     })
+  }
+
+  private _context?: Context
+  get context(): Context {
+    return (this._context ??= new Context({ client: this.client }))
   }
 }
 
@@ -4950,7 +5196,7 @@ export class Tui extends HeyApiClient {
     parameters?: {
       directory?: string
       workspace?: string
-      body?: EventTuiPromptAppend | EventTuiCommandExecute | EventTuiToastShow | EventTuiSessionSelect
+      body?: EventTuiPromptAppend2 | EventTuiCommandExecute2 | EventTuiToastShow2 | EventTuiSessionSelect2
     },
     options?: Options<never, ThrowOnError>,
   ) {

@@ -14,7 +14,7 @@ const it = testEffect(
 
 const withSession = (input?: Parameters<SessionNs.Interface["create"]>[0]) =>
   Effect.acquireRelease(SessionNs.use.create(input), (created) =>
-    SessionNs.Service.use((session) => session.remove(created.id).pipe(Effect.ignore)),
+    SessionNs.Service.use((session) => session.removeLeaf(created.id).pipe(Effect.ignore)),
   )
 
 describe("session.listGlobal", () => {

@@ -49,7 +49,7 @@ type OpenApiSchema = {
 
 type OpenApiResponse = {
   description?: string
-  content?: Record<string, { schema?: OpenApiSchema }>
+  content?: Record<string, { schema?: OpenApiSchema; "x-effect-stream"?: unknown }>
 }
 
 // Query schemas describe decoded Effect values, but the generated SDK needs the
@@ -153,12 +153,15 @@ function matchLegacyOpenApi(input: Record<string, unknown>) {
       }
       normalizeLegacyOperation(operation, path, method)
       if ((path === "/event" || path === "/global/event" || path === "/api/event") && method === "get") {
-        // HttpApi has no first-class SSE response schema, and these handlers are
-        // raw/streaming routes. Document the actual wire protocol explicitly.
+        // Preserve the typed SSE response and its headers while selecting the
+        // legacy schema name consumed by the checked-in SDK.
+        const response = operation.responses!["200"] ?? { description: "Event stream" }
         operation.responses!["200"] = {
-          description: "Event stream",
+          ...response,
           content: {
+            ...response.content,
             "text/event-stream": {
+              ...response.content?.["text/event-stream"],
               schema:
                 path === "/event"
                   ? { $ref: "#/components/schemas/Event" }

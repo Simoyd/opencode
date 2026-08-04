@@ -10,4 +10,11 @@ export const Compacted = Event.define({
   },
 })
 
-export const Definitions = Event.inventory(Compacted)
+export const CatalogChanged = Event.define({
+  type: "compaction.catalog.changed",
+  schema: {
+    sessionID: SessionID,
+  },
+})
+
+export const Definitions = Event.inventory(Compacted, CatalogChanged)

@@ -5,6 +5,7 @@ import type { FooterApi, FooterEvent, LocalReplayRow, RunFilePart, StreamCommit 
 
 type EventStream = Awaited<ReturnType<OpencodeClient["event"]["subscribe"]>>["stream"]
 type GlobalEventStream = Awaited<ReturnType<OpencodeClient["global"]["event"]>>["stream"]
+type RoutedGlobalEvent = Extract<GlobalEvent, { directory: string }>
 type SdkEvent = EventStream extends AsyncGenerator<infer T, unknown, unknown> ? T : never
 type SessionMessage = NonNullable<Awaited<ReturnType<OpencodeClient["session"]["messages"]>>["data"]>[number]
 type SessionChild = NonNullable<Awaited<ReturnType<OpencodeClient["session"]["children"]>>["data"]>[number]
@@ -363,11 +364,11 @@ function child(id: string): SessionChild {
   }
 }
 
-function globalEvent(payload: GlobalEvent["payload"]): GlobalEvent {
+function globalEvent(payload: SdkEvent): RoutedGlobalEvent {
   return {
     directory: "/tmp",
     project: "project-1",
-    payload,
+    payload: payload as RoutedGlobalEvent["payload"],
   }
 }
 

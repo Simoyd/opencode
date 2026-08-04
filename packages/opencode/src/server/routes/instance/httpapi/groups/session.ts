@@ -6,6 +6,7 @@ import { Session } from "@/session/session"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
+import { SessionStagedContext } from "@/session/staged-context"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
@@ -25,6 +26,7 @@ import { described } from "./metadata"
 import { QueryBoolean } from "./query"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { NonNegativeInt } from "@opencode-ai/core/schema"
 
 const root = "/session"
 export const ListQuery = Schema.Struct({
@@ -45,6 +47,26 @@ export const MessagesQuery = Schema.Struct({
   limit: Schema.optional(Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
   before: Schema.optional(Schema.String),
 })
+export const CompactionCatalogQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
+  cursor: Schema.optional(Schema.String),
+})
+export const CompactionRegionDescriptor = Schema.Struct({
+  startMessageID: MessageID,
+  startTimeCreated: Schema.Finite,
+  markerID: MessageID,
+  markerTimeCreated: Schema.Finite,
+  endExclusiveCursor: Schema.String,
+  physicalMessageCount: NonNegativeInt,
+  semanticMessageCount: NonNegativeInt,
+  summaryMessageID: MessageID,
+  summaryPreview: Schema.String,
+  precedingSummaryMessageID: Schema.optional(MessageID),
+}).annotate({ identifier: "CompactionRegionDescriptor" })
+export const CompactionCatalogResponse = Schema.Struct({
+  items: Schema.Array(CompactionRegionDescriptor),
+  nextCursor: Schema.optional(Schema.String),
+}).annotate({ identifier: "CompactionCatalogResponse" })
 export const StatusMap = Schema.Record(Schema.String, SessionStatus.Info)
 export const UpdatePayload = Schema.Struct({
   title: Schema.optional(Schema.String),
@@ -68,6 +90,7 @@ export const SummarizePayload = Schema.Struct({
   auto: Schema.optional(Schema.Boolean),
 })
 export const PromptPayload = Schema.Struct(Struct.omit(SessionPrompt.PromptInput.fields, ["sessionID"]))
+export const StagedContextPayload = Schema.Struct(Struct.omit(SessionStagedContext.StageInput.fields, ["sessionID"]))
 export const CommandPayload = Schema.Struct(Struct.omit(SessionPrompt.CommandInput.fields, ["sessionID"]))
 export const ShellPayload = Schema.Struct(Struct.omit(SessionPrompt.ShellInput.fields, ["sessionID"]))
 export const RevertPayload = Schema.Struct(Struct.omit(SessionRevert.RevertInput.fields, ["sessionID"]))
@@ -84,6 +107,9 @@ export const SessionPaths = {
   diff: `${root}/:sessionID/diff`,
   messages: `${root}/:sessionID/message`,
   message: `${root}/:sessionID/message/:messageID`,
+  contextStage: `${root}/:sessionID/context/stage`,
+  contextStageItem: `${root}/:sessionID/context/stage/:contextID`,
+  compactionCatalog: `${root}/:sessionID/compaction`,
   create: root,
   remove: `${root}/:sessionID`,
   update: `${root}/:sessionID`,
@@ -133,7 +159,7 @@ export const SessionApi = HttpApi.make("session")
           params: { sessionID: SessionID },
           query: WorkspaceRoutingQuery,
           success: described(Session.Info, "Get session"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.get",
@@ -200,11 +226,55 @@ export const SessionApi = HttpApi.make("session")
             description: "Retrieve a specific message from a session by its message ID.",
           }),
         ),
+        HttpApiEndpoint.post("contextStage", SessionPaths.contextStage, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          payload: StagedContextPayload,
+          success: described(SessionStagedContext.Info, "Staged context"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.context.stage",
+            summary: "Stage provider-only context",
+            description:
+              "Stage provider-only context for the next real prompt in this session without creating transcript messages or submitting a prompt.",
+          }),
+        ),
+        HttpApiEndpoint.get("contextListStaged", SessionPaths.contextStage, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(Schema.Array(SessionStagedContext.Info), "Staged contexts"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(OpenApi.annotations({ identifier: "session.context.listStaged" })),
+        HttpApiEndpoint.delete("contextClearStaged", SessionPaths.contextStage, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(HttpApiSchema.NoContent, "Staged context cleared"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
+        }).annotateMerge(OpenApi.annotations({ identifier: "session.context.clearStaged" })),
+        HttpApiEndpoint.delete("contextClearStagedItem", SessionPaths.contextStageItem, {
+          params: { sessionID: SessionID, contextID: SessionStagedContext.ContextID },
+          query: WorkspaceRoutingQuery,
+          success: described(HttpApiSchema.NoContent, "Staged context cleared"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
+        }).annotateMerge(OpenApi.annotations({ identifier: "session.context.clearStagedItem" })),
+        HttpApiEndpoint.get("compactionCatalog", SessionPaths.compactionCatalog, {
+          params: { sessionID: SessionID },
+          query: CompactionCatalogQuery,
+          success: described(CompactionCatalogResponse, "Compaction region metadata catalog page"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.compactionCatalog",
+            summary: "Get compaction region catalog",
+            description: "Return one fixed page of compact-region metadata without transcript bodies.",
+          }),
+        ),
         HttpApiEndpoint.post("create", SessionPaths.create, {
           query: WorkspaceRoutingQuery,
           payload: [HttpApiSchema.NoContent, Session.CreateInput],
           success: described(Session.Info, "Successfully created session"),
-          error: HttpApiError.BadRequest,
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.create",
@@ -216,7 +286,7 @@ export const SessionApi = HttpApi.make("session")
           params: { sessionID: SessionID },
           query: WorkspaceRoutingQuery,
           success: described(Schema.Boolean, "Successfully deleted session"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.delete",
@@ -229,7 +299,7 @@ export const SessionApi = HttpApi.make("session")
           query: WorkspaceRoutingQuery,
           payload: UpdatePayload,
           success: described(Session.Info, "Successfully updated session"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.update",
@@ -242,7 +312,7 @@ export const SessionApi = HttpApi.make("session")
           query: WorkspaceRoutingQuery,
           payload: [HttpApiSchema.NoContent, ForkPayload],
           success: described(Session.Info, "200"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.fork",
@@ -254,7 +324,7 @@ export const SessionApi = HttpApi.make("session")
           params: { sessionID: SessionID },
           query: WorkspaceRoutingQuery,
           success: described(Schema.Boolean, "Aborted session"),
-          error: HttpApiError.BadRequest,
+          error: [HttpApiError.BadRequest, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.abort",
@@ -267,7 +337,7 @@ export const SessionApi = HttpApi.make("session")
           query: WorkspaceRoutingQuery,
           payload: InitPayload,
           success: described(Schema.Boolean, "200"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.init",
@@ -280,7 +350,7 @@ export const SessionApi = HttpApi.make("session")
           params: { sessionID: SessionID },
           query: WorkspaceRoutingQuery,
           success: described(Session.Info, "Successfully shared session"),
-          error: [HttpApiError.InternalServerError, ApiNotFoundError],
+          error: [HttpApiError.InternalServerError, ApiNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.share",
@@ -292,7 +362,7 @@ export const SessionApi = HttpApi.make("session")
           params: { sessionID: SessionID },
           query: WorkspaceRoutingQuery,
           success: described(Session.Info, "Successfully unshared session"),
-          error: [HttpApiError.InternalServerError, ApiNotFoundError],
+          error: [HttpApiError.InternalServerError, ApiNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.unshare",
@@ -305,7 +375,7 @@ export const SessionApi = HttpApi.make("session")
           query: WorkspaceRoutingQuery,
           payload: SummarizePayload,
           success: described(Schema.Boolean, "Summarized session"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.summarize",
@@ -318,12 +388,13 @@ export const SessionApi = HttpApi.make("session")
           query: WorkspaceRoutingQuery,
           payload: PromptPayload,
           success: described(SessionV1.WithParts, "Created message"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.prompt",
             summary: "Send message",
-            description: "Create and send a new message to a session, streaming the AI response.",
+            description:
+              "Create and send a new message to a session. With noReply=true, return the committed user message without starting model execution.",
           }),
         ),
         HttpApiEndpoint.post("promptAsync", SessionPaths.promptAsync, {
@@ -331,13 +402,13 @@ export const SessionApi = HttpApi.make("session")
           query: WorkspaceRoutingQuery,
           payload: PromptPayload,
           success: described(HttpApiSchema.NoContent, "Prompt accepted"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.prompt_async",
             summary: "Send async message",
             description:
-              "Create and send a new message to a session asynchronously, starting the session if needed and returning immediately.",
+              "Commit a new user message before returning 204. Unless noReply=true, start or join session execution asynchronously after admission.",
           }),
         ),
         HttpApiEndpoint.post("command", SessionPaths.command, {
@@ -345,7 +416,7 @@ export const SessionApi = HttpApi.make("session")
           query: WorkspaceRoutingQuery,
           payload: CommandPayload,
           success: described(SessionV1.WithParts, "Created message"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.command",
@@ -397,7 +468,7 @@ export const SessionApi = HttpApi.make("session")
           query: WorkspaceRoutingQuery,
           payload: PermissionResponsePayload,
           success: described(Schema.Boolean, "Permission processed successfully"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError, PermissionNotFoundError],
+          error: [HttpApiError.BadRequest, ApiNotFoundError, PermissionNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "permission.respond",
@@ -423,7 +494,7 @@ export const SessionApi = HttpApi.make("session")
           params: { sessionID: SessionID, messageID: MessageID, partID: PartID },
           query: WorkspaceRoutingQuery,
           success: described(Schema.Boolean, "Successfully deleted part"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "part.delete",
@@ -435,7 +506,7 @@ export const SessionApi = HttpApi.make("session")
           query: WorkspaceRoutingQuery,
           payload: SessionV1.Part,
           success: described(SessionV1.Part, "Successfully updated part"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "part.update",

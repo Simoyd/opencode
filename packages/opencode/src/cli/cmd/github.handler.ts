@@ -21,6 +21,7 @@ import { ModelsDev } from "@opencode-ai/core/models-dev"
 import { InstanceRef } from "@/effect/instance-ref"
 import { SessionShare } from "@/share/session"
 import { Session } from "@/session/session"
+import { SessionLifecycle } from "@/session/lifecycle"
 import type { SessionID } from "../../session/schema"
 import { MessageID, PartID } from "../../session/schema"
 import { Provider } from "@/provider/provider"
@@ -378,6 +379,7 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
   if (!ctx) return yield* Effect.die("InstanceRef not provided")
   const gitSvc = yield* Git.Service
   const sessionSvc = yield* Session.Service
+  const lifecycle = yield* SessionLifecycle.Service
   const sessionShare = yield* SessionShare.Service
   const sessionPrompt = yield* SessionPrompt.Service
   const events = yield* EventV2Bridge.Service
@@ -497,7 +499,7 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
       // Setup opencode session
       const repoData = await fetchRepo()
       session = await runLocalEffect(
-        sessionSvc.create({
+        lifecycle.create({
           permission: [
             {
               permission: "question",

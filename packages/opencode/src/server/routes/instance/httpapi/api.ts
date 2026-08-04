@@ -1,16 +1,13 @@
-import { Schema } from "effect"
 import { HttpApi } from "effect/unstable/httpapi"
-import { EventV2 } from "@opencode-ai/core/event"
 import { EventManifest } from "@/event-manifest"
 import { Credential } from "@opencode-ai/core/credential"
 import { Integration } from "@opencode-ai/core/integration"
 import { SkillV2 } from "@opencode-ai/core/skill"
-import { InstanceDisposed } from "@/server/event"
 import { Question } from "@/question"
 import { ConfigApi } from "./groups/config"
 import { ControlApi } from "./groups/control"
 import { ControlPlaneApi } from "./groups/control-plane"
-import { EventApi } from "./groups/event"
+import { EventApi, EventSchema } from "./groups/event"
 import { ExperimentalApi } from "./groups/experimental"
 import { FileApi } from "./groups/file"
 import { InstanceApi } from "./groups/instance"
@@ -31,19 +28,6 @@ import { SessionLocationMiddleware } from "@opencode-ai/server/middleware/sessio
 import { GlobalApi } from "./groups/global"
 import { Authorization } from "./middleware/authorization"
 import { SchemaErrorMiddleware } from "./middleware/schema-error"
-
-const EventSchema = Schema.Union([
-  ...EventManifest.Latest.values()
-    .map((definition) =>
-      Schema.Struct({
-        id: EventV2.ID,
-        type: Schema.Literal(definition.type),
-        properties: definition.data,
-      }).annotate({ identifier: `Event.${definition.type}` }),
-    )
-    .toArray(),
-  InstanceDisposed,
-]).annotate({ identifier: "Event" })
 
 export const ServerApi = makeApi({
   definitions: EventManifest.Latest.values().toArray(),

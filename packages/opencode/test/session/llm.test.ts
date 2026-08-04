@@ -1369,6 +1369,7 @@ describe("session.llm.stream", () => {
           },
         ]
         const request = waitRequest("/responses", createEventResponse(chunks, true))
+        let providerStarts = 0
 
         const resolved = yield* Provider.use.getModel(ProviderV2.ID.openai, ModelV2.ID.make(model.id))
         const sessionID = SessionID.make("session-test-native")
@@ -1395,6 +1396,9 @@ describe("session.llm.stream", () => {
           system: ["You are a helpful assistant."],
           messages: [{ role: "user", content: "Hello" }],
           tools: {},
+          providerStarted: Effect.sync(() => {
+            providerStarts++
+          }),
         })
 
         const capture = yield* Effect.promise(() => request)
@@ -1406,6 +1410,7 @@ describe("session.llm.stream", () => {
         expect(capture.body.include).toEqual(["reasoning.encrypted_content"])
         expect(JSON.stringify(capture.body.input)).toContain("You are a helpful assistant.")
         expect(capture.body.input).toContainEqual({ role: "user", content: [{ type: "input_text", text: "Hello" }] })
+        expect(providerStarts).toBe(1)
       }),
     { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
   )

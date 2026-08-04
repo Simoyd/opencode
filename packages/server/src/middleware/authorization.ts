@@ -2,11 +2,9 @@ import { ServerAuth } from "../auth"
 import { UnauthorizedError } from "@opencode-ai/protocol/errors"
 import { Authorization } from "@opencode-ai/protocol/middleware/authorization"
 export { Authorization } from "@opencode-ai/protocol/middleware/authorization"
-import { hasPtyConnectTicketURL } from "@opencode-ai/protocol/groups/pty"
 import { Effect, Encoding, Layer, Redacted } from "effect"
 import { HttpEffect, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 
-const AUTH_TOKEN_QUERY = "auth_token"
 const WWW_AUTHENTICATE = 'Basic realm="Secure Area"'
 
 function emptyCredential() {
@@ -27,9 +25,6 @@ function decodeCredential(input: string) {
 }
 
 function credentialFromRequest(request: HttpServerRequest.HttpServerRequest) {
-  const url = new URL(request.url, "http://localhost")
-  const token = url.searchParams.get(AUTH_TOKEN_QUERY)
-  if (token) return decodeCredential(token)
   const match = /^Basic\s+(.+)$/i.exec(request.headers.authorization ?? "")
   if (match) return decodeCredential(match[1])
   return Effect.succeed(emptyCredential())
@@ -43,9 +38,6 @@ export const authorizationLayer = Layer.effect(
     return Authorization.of((effect) =>
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest
-        // Browsers cannot set headers on WebSocket upgrades, so a ticketed PTY connect skips
-        // credential checks here; the connect handler consumes and validates the ticket.
-        if (hasPtyConnectTicketURL(new URL(request.url, "http://localhost"))) return yield* effect
         const credential = yield* credentialFromRequest(request)
         if (ServerAuth.authorized(credential, config)) return yield* effect
         yield* HttpEffect.appendPreResponseHandler((_request, response) =>

@@ -2,14 +2,11 @@ import { ServerAuth } from "@/server/auth"
 import { Effect, Encoding, Layer, Redacted } from "effect"
 import { HttpEffect, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiError, HttpApiMiddleware } from "effect/unstable/httpapi"
-import { hasPtyConnectTicketURL } from "@/server/shared/pty-ticket"
-import { isPublicUIPath } from "@/server/shared/public-ui"
 export {
   Authorization as ServerAuthorization,
   authorizationLayer as serverAuthorizationLayer,
 } from "@opencode-ai/server/middleware/authorization"
 
-const AUTH_TOKEN_QUERY = "auth_token"
 const UNAUTHORIZED = 401
 const WWW_AUTHENTICATE = 'Basic realm="Secure Area"'
 
@@ -71,12 +68,6 @@ function decodeCredential(input: string) {
 }
 
 function credentialFromRequest(request: HttpServerRequest.HttpServerRequest) {
-  return credentialFromURL(new URL(request.url, "http://localhost"), request)
-}
-
-function credentialFromURL(url: URL, request: HttpServerRequest.HttpServerRequest) {
-  const token = url.searchParams.get(AUTH_TOKEN_QUERY)
-  if (token) return decodeCredential(token)
   const match = /^Basic\s+(.+)$/i.exec(request.headers.authorization ?? "")
   if (match) return decodeCredential(match[1])
   return Effect.succeed(emptyCredential())
@@ -106,9 +97,7 @@ export const authorizationRouterMiddleware = HttpRouter.middleware()(
     return (effect) =>
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest
-        const url = new URL(request.url, "http://localhost")
-        if (isPublicUIPath(request.method, url.pathname)) return yield* effect
-        return yield* credentialFromURL(url, request).pipe(
+        return yield* credentialFromRequest(request).pipe(
           Effect.flatMap((credential) => validateRawCredential(effect, credential, config)),
         )
       })
@@ -139,9 +128,7 @@ export const ptyConnectAuthorizationLayer = Layer.effect(
     return PtyConnectAuthorization.of((effect) =>
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest
-        const url = new URL(request.url, "http://localhost")
-        if (hasPtyConnectTicketURL(url)) return yield* effect
-        return yield* credentialFromURL(url, request).pipe(
+        return yield* credentialFromRequest(request).pipe(
           Effect.flatMap((credential) => validateCredential(effect, credential, config)),
         )
       }),

@@ -1,12 +1,13 @@
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { EventV2 } from "@opencode-ai/core/event"
 import { EventManifest } from "@/event-manifest"
-import { InstanceDisposed } from "@/server/event"
+import { Event as ServerEvent, InstanceDisposed } from "@/server/event"
 import "@opencode-ai/core/account"
 import "@/server/event"
 import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
 import { described } from "./metadata"
+import { SelectedEventProjection } from "@/server/shared/selected-event-projection"
 
 const GlobalHealth = Schema.Struct({
   healthy: Schema.Literal(true),
@@ -32,20 +33,55 @@ const SyncEventSchemas = EventManifest.Latest.values()
   })
   .toArray()
 
-const GlobalEventSchema = Schema.Struct({
-  directory: Schema.String,
-  project: Schema.optional(Schema.String),
-  workspace: Schema.optional(Schema.String),
-  payload: Schema.Union([
-    ...EventManifest.Latest.values()
-      .map((definition) =>
-        Schema.Struct({ id: EventV2.ID, type: Schema.Literal(definition.type), properties: definition.data }),
-      )
-      .toArray(),
-    InstanceDisposed,
-    ...SyncEventSchemas,
-  ]),
-}).annotate({ identifier: "GlobalEvent" })
+const GlobalControlPayload = Schema.Union([
+  Schema.Struct({
+    id: EventV2.ID,
+    type: Schema.Literal(ServerEvent.Connected.type),
+    properties: ServerEvent.Connected.data,
+  }),
+  Schema.Struct({
+    id: EventV2.ID,
+    type: Schema.Literal(ServerEvent.Heartbeat.type),
+    properties: ServerEvent.Heartbeat.data,
+  }),
+])
+
+const GlobalDirectoryPayload = Schema.Union([
+  ...EventManifest.Latest.values()
+    .filter(
+      (definition) =>
+        SelectedEventProjection.includesEventType(definition.type) &&
+        definition.type !== ServerEvent.Connected.type &&
+        definition.type !== ServerEvent.Heartbeat.type,
+    )
+    .map((definition) =>
+      Schema.Struct({ id: EventV2.ID, type: Schema.Literal(definition.type), properties: definition.data }),
+    )
+    .toArray(),
+  ...EventManifest.Latest.values()
+    .filter(
+      (definition) =>
+        !SelectedEventProjection.includesEventType(definition.type) &&
+        definition.type !== ServerEvent.Connected.type &&
+        definition.type !== ServerEvent.Heartbeat.type,
+    )
+    .map((definition) =>
+      Schema.Struct({ id: EventV2.ID, type: Schema.Literal(definition.type), properties: definition.data }),
+    )
+    .toArray(),
+  InstanceDisposed,
+  ...SyncEventSchemas,
+])
+
+const GlobalEventSchema = Schema.Union([
+  Schema.Struct({ payload: GlobalControlPayload }),
+  Schema.Struct({
+    directory: Schema.String,
+    project: Schema.optional(Schema.String),
+    workspace: Schema.optional(Schema.String),
+    payload: GlobalDirectoryPayload,
+  }),
+]).annotate({ identifier: "GlobalEvent" })
 
 export const GlobalUpgradeInput = Schema.Struct({
   target: Schema.optional(Schema.String),
@@ -83,12 +119,39 @@ export const GlobalApi = HttpApi.make("global").add(
         }),
       ),
       HttpApiEndpoint.get("event", GlobalPaths.event, {
-        success: GlobalEventSchema,
+        query: Schema.Struct({
+          [SelectedEventProjection.SelectorQuery]: Schema.optional(Schema.Literal(SelectedEventProjection.Selector)),
+        }),
+        success: HttpApiSchema.StreamSse({ data: GlobalEventSchema }),
+        error: HttpApiError.BadRequest,
       }).annotateMerge(
         OpenApi.annotations({
           identifier: "global.event",
           summary: "Get global events",
           description: "Subscribe to global events from the OpenCode system using server-sent events.",
+          transform: (operation) => ({
+            ...operation,
+            responses: {
+              ...operation.responses,
+              200: {
+                ...operation.responses[200],
+                content: {
+                  ...operation.responses[200]?.content,
+                  "text/event-stream": {
+                    ...operation.responses[200]?.content?.["text/event-stream"],
+                    schema: { $ref: "#/components/schemas/GlobalEvent" },
+                  },
+                },
+                headers: {
+                  [SelectedEventProjection.AcknowledgementHeader]: {
+                    required: false,
+                    description: "Present only when the matching event projection selector was requested.",
+                    schema: { type: "string", enum: [SelectedEventProjection.Selector] },
+                  },
+                },
+              },
+            },
+          }),
         }),
       ),
       HttpApiEndpoint.get("configGet", GlobalPaths.config, {

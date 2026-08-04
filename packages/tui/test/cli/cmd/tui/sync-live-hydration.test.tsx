@@ -4,6 +4,8 @@ import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 import { tmpdir } from "../../../fixture/fixture"
 import { json, mount, wait } from "./sync-fixture"
 
+type RoutedGlobalEvent = Extract<GlobalEvent, { directory: string }>
+
 const sessionID = "ses_hydration_race"
 const messageID = "msg_hydration_race"
 const partID = "prt_hydration_race"
@@ -29,8 +31,8 @@ const assistant = {
   time: { created: 1, completed: 2 },
 }
 
-function global(payload: GlobalEvent["payload"]): GlobalEvent {
-  return { directory: "/tmp/other", project: "proj_test", payload }
+function global(payload: GlobalEvent["payload"]): RoutedGlobalEvent {
+  return { directory: "/tmp/other", project: "proj_test", payload: payload as RoutedGlobalEvent["payload"] }
 }
 
 test("stale session hydration does not overwrite live message parts", async () => {

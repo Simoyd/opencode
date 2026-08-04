@@ -49,6 +49,7 @@ import { Skill } from "../skill"
 import { Permission } from "@/permission"
 import { BackgroundJob } from "@/background/job"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { SessionLifecycle } from "@/session/lifecycle"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { MCP } from "@/mcp"
@@ -430,6 +431,7 @@ export const node = LayerNode.make({
     Agent.node,
     Skill.node,
     Session.node,
+    SessionLifecycle.node,
     BackgroundJob.node,
     Provider.node,
     LSP.node,

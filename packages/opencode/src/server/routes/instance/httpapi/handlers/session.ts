@@ -1,22 +1,20 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
-import { Agent } from "@/agent/agent"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { EventV2Bridge } from "@/event-v2-bridge"
 import { Command } from "@/command"
 import { Permission } from "@/permission"
 import { SessionShare } from "@/share/session"
 import { Session } from "@/session/session"
-import { SessionCompaction } from "@/session/compaction"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
-import { SessionRunState } from "@/session/run-state"
+import { SessionLifecycle } from "@/session/lifecycle"
+import { SessionStagedContext } from "@/session/staged-context"
 import { SessionStatus } from "@/session/status"
+import { CompactionCatalog } from "@/session/compaction-catalog"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
-import { NamedError } from "@opencode-ai/core/util/error"
-import { Cause, Effect, Option, Schema, Scope } from "effect"
+import { Effect, Option, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { InstanceState } from "@/effect/instance-state"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
@@ -24,6 +22,7 @@ import { HttpApiBuilder, HttpApiError, HttpApiSchema } from "effect/unstable/htt
 import { InstanceHttpApi } from "../api"
 import {
   CommandPayload,
+  CompactionCatalogQuery,
   DiffQuery,
   ForkPayload,
   InitPayload,
@@ -34,6 +33,7 @@ import {
   RevertPayload,
   ShellPayload,
   SummarizePayload,
+  StagedContextPayload,
   UpdatePayload,
 } from "../groups/session"
 import { PermissionNotFoundError } from "../errors"
@@ -51,15 +51,12 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const shareSvc = yield* SessionShare.Service
     const promptSvc = yield* SessionPrompt.Service
     const revertSvc = yield* SessionRevert.Service
-    const compactSvc = yield* SessionCompaction.Service
-    const runState = yield* SessionRunState.Service
-    const agentSvc = yield* Agent.Service
+    const runState = yield* SessionLifecycle.Service
+    const stagedContext = yield* SessionStagedContext.Service
     const permissionSvc = yield* Permission.Service
     const statusSvc = yield* SessionStatus.Service
     const todoSvc = yield* Todo.Service
     const summary = yield* SessionSummary.Service
-    const events = yield* EventV2Bridge.Service
-    const scope = yield* Scope.Scope
 
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
       const directory = ctx.query.directory ? yield* InstanceState.directory : undefined
@@ -152,8 +149,61 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       )
     })
 
+    const contextStage = Effect.fn("SessionHttpApi.contextStage")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof StagedContextPayload.Type
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      return yield* SessionError.mapLifecycle(
+        runState.commit(
+          ctx.params.sessionID,
+          stagedContext.stage({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
+            Effect.catchTags({
+              "SessionStagedContext.Duplicate": () => Effect.fail(new HttpApiError.BadRequest({})),
+              "SessionStagedContext.Invalid": () => Effect.fail(new HttpApiError.BadRequest({})),
+            }),
+          ),
+        ),
+      )
+    })
+
+    const contextListStaged = Effect.fn("SessionHttpApi.contextListStaged")(function* (ctx: {
+      params: { sessionID: SessionID }
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      return yield* stagedContext.list({ sessionID: ctx.params.sessionID })
+    })
+
+    const contextClearStaged = Effect.fn("SessionHttpApi.contextClearStaged")(function* (ctx: {
+      params: { sessionID: SessionID; contextID?: string }
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      yield* SessionError.mapLifecycle(
+        runState.commit(
+          ctx.params.sessionID,
+          stagedContext
+            .clear({ sessionID: ctx.params.sessionID, contextID: ctx.params.contextID })
+            .pipe(Effect.catchTag("SessionStagedContext.Invalid", () => Effect.fail(new HttpApiError.BadRequest({})))),
+        ),
+      )
+      return HttpApiSchema.NoContent.make()
+    })
+
+    const compactionCatalog = Effect.fn("SessionHttpApi.compactionCatalog")(function* (ctx: {
+      params: { sessionID: SessionID }
+      query: typeof CompactionCatalogQuery.Type
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      return yield* CompactionCatalog.page({ sessionID: ctx.params.sessionID, cursor: ctx.query.cursor }).pipe(
+        Effect.catchTag("CompactionCatalog.InvalidCursor", () => Effect.fail(new HttpApiError.BadRequest({}))),
+      )
+    })
+
     const create = Effect.fn("SessionHttpApi.create")(function* (ctx: { payload?: Session.CreateInput }) {
-      return yield* shareSvc.create(ctx.payload)
+      return yield* shareSvc.create(ctx.payload).pipe(
+        Effect.catchTag("NotFoundError", (error) => Effect.fail(SessionError.mapNotFound(error))),
+        SessionError.mapLifecycle,
+      )
     })
 
     const createRaw = Effect.fn("SessionHttpApi.createRaw")(function* (ctx: {
@@ -176,7 +226,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     })
 
     const remove = Effect.fn("SessionHttpApi.remove")(function* (ctx: { params: { sessionID: SessionID } }) {
-      yield* SessionError.mapStorageNotFound(session.remove(ctx.params.sessionID))
+      yield* SessionError.mapLifecycle(runState.remove(ctx.params.sessionID))
       return true
     })
 
@@ -184,34 +234,43 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof UpdatePayload.Type
     }) {
-      const current = yield* requireSession(ctx.params.sessionID)
-      if (ctx.payload.title !== undefined) {
-        yield* session.setTitle({ sessionID: ctx.params.sessionID, title: ctx.payload.title })
-      }
-      if (ctx.payload.metadata !== undefined) {
-        yield* session.setMetadata({ sessionID: ctx.params.sessionID, metadata: ctx.payload.metadata })
-      }
-      if (ctx.payload.permission !== undefined) {
-        yield* session.setPermission({
-          sessionID: ctx.params.sessionID,
-          permission: Permission.merge(current.permission ?? [], ctx.payload.permission),
-        })
-      }
-      if (ctx.payload.time?.archived !== undefined) {
-        yield* session.setArchived({ sessionID: ctx.params.sessionID, time: ctx.payload.time.archived })
-      }
-      return yield* requireSession(ctx.params.sessionID)
+      return yield* SessionError.mapLifecycle(
+        runState.commit(
+          ctx.params.sessionID,
+          Effect.gen(function* () {
+            const current = yield* requireSession(ctx.params.sessionID)
+            if (ctx.payload.title !== undefined) {
+              yield* session.setTitle({ sessionID: ctx.params.sessionID, title: ctx.payload.title })
+            }
+            if (ctx.payload.metadata !== undefined) {
+              yield* session.setMetadata({ sessionID: ctx.params.sessionID, metadata: ctx.payload.metadata })
+            }
+            if (ctx.payload.permission !== undefined) {
+              yield* session.setPermission({
+                sessionID: ctx.params.sessionID,
+                permission: Permission.merge(current.permission ?? [], ctx.payload.permission),
+              })
+            }
+            if (ctx.payload.time?.archived !== undefined) {
+              yield* session.setArchived({ sessionID: ctx.params.sessionID, time: ctx.payload.time.archived })
+            }
+            return yield* requireSession(ctx.params.sessionID)
+          }),
+        ),
+      )
     })
 
     const fork = Effect.fn("SessionHttpApi.fork")(function* (ctx: {
       params: { sessionID: SessionID }
       payload?: typeof ForkPayload.Type
     }) {
-      return yield* SessionError.mapStorageNotFound(
-        session.fork({
-          sessionID: ctx.params.sessionID,
-          messageID: ctx.payload?.messageID,
-        }),
+      return yield* SessionError.mapLifecycle(
+        SessionError.mapStorageNotFound(
+          runState.fork({
+            sessionID: ctx.params.sessionID,
+            messageID: ctx.payload?.messageID,
+          }),
+        ),
       )
     })
 
@@ -230,7 +289,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     })
 
     const abort = Effect.fn("SessionHttpApi.abort")(function* (ctx: { params: { sessionID: SessionID } }) {
-      yield* promptSvc.cancel(ctx.params.sessionID)
+      yield* SessionError.mapBusy(promptSvc.cancel(ctx.params.sessionID))
       return true
     })
 
@@ -239,15 +298,21 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof InitPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* promptSvc
-        .command({
-          sessionID: ctx.params.sessionID,
-          messageID: ctx.payload.messageID,
-          model: `${ctx.payload.providerID}/${ctx.payload.modelID}`,
-          command: Command.Default.INIT,
-          arguments: "",
-        })
-        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      yield* SessionError.mapLifecycle(
+        promptSvc
+          .command({
+            sessionID: ctx.params.sessionID,
+            messageID: ctx.payload.messageID,
+            model: `${ctx.payload.providerID}/${ctx.payload.modelID}`,
+            command: Command.Default.INIT,
+            arguments: "",
+          })
+          .pipe(
+            Effect.mapError((error) =>
+              Session.BusyError.isInstance(error) ? error : new HttpApiError.BadRequest({}),
+            ),
+          ),
+      )
       return true
     })
 
@@ -258,15 +323,31 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     // every failure to a 400 BadRequest.
     const share = Effect.fn("SessionHttpApi.share")(function* (ctx: { params: { sessionID: SessionID } }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* shareSvc.share(ctx.params.sessionID).pipe(Effect.mapError(() => new HttpApiError.InternalServerError({})))
+      yield* SessionError.mapLifecycle(
+        shareSvc.share(ctx.params.sessionID).pipe(
+          Effect.mapError((error) =>
+            Session.BusyError.isInstance(error)
+              ? error
+              : new HttpApiError.InternalServerError({}),
+          ),
+        ),
+      )
       return yield* requireSession(ctx.params.sessionID)
     })
 
     const unshare = Effect.fn("SessionHttpApi.unshare")(function* (ctx: { params: { sessionID: SessionID } }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* shareSvc
-        .unshare(ctx.params.sessionID)
-        .pipe(Effect.mapError(() => new HttpApiError.InternalServerError({})))
+      yield* SessionError.mapLifecycle(
+        shareSvc
+          .unshare(ctx.params.sessionID)
+          .pipe(
+            Effect.mapError((error) =>
+              Session.BusyError.isInstance(error)
+                ? error
+                : new HttpApiError.InternalServerError({}),
+            ),
+          ),
+      )
       return yield* requireSession(ctx.params.sessionID)
     })
 
@@ -274,21 +355,15 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof SummarizePayload.Type
     }) {
-      yield* revertSvc.cleanup(yield* requireSession(ctx.params.sessionID))
-      const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
-      const defaultAgent = yield* agentSvc.defaultAgent()
-      const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
-
-      yield* compactSvc.create({
-        sessionID: ctx.params.sessionID,
-        agent: currentAgent,
-        model: {
+      yield* requireSession(ctx.params.sessionID)
+      yield* SessionError.mapLifecycle(
+        promptSvc.summarize({
+          sessionID: ctx.params.sessionID,
           providerID: ctx.payload.providerID,
           modelID: ctx.payload.modelID,
-        },
-        auto: ctx.payload.auto ?? false,
-      })
-      yield* promptSvc.loop({ sessionID: ctx.params.sessionID })
+          auto: ctx.payload.auto,
+        }),
+      )
       return true
     })
 
@@ -297,12 +372,18 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof PromptPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      const message = yield* promptSvc
-        .prompt({
-          ...ctx.payload,
-          sessionID: ctx.params.sessionID,
-        })
-        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      const message = yield* SessionError.mapLifecycle(
+        promptSvc
+          .prompt({
+            ...ctx.payload,
+            sessionID: ctx.params.sessionID,
+          }, "manual")
+          .pipe(
+            Effect.mapError((error) =>
+              Session.BusyError.isInstance(error) ? error : new HttpApiError.BadRequest({}),
+            ),
+          ),
+      )
       return HttpServerResponse.stream(Stream.make(JSON.stringify(message)).pipe(Stream.encodeText), {
         contentType: "application/json",
       })
@@ -313,17 +394,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof PromptPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.gen(function* () {
-            yield* Effect.logError("prompt_async failed", { sessionID: ctx.params.sessionID, cause })
-            yield* events.publish(Session.Event.Error, {
-              sessionID: ctx.params.sessionID,
-              error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
-            })
-          }),
-        ),
-        Effect.forkIn(scope, { startImmediately: true }),
+      yield* SessionError.mapLifecycle(
+        promptSvc
+          .promptAdmitted({ ...ctx.payload, sessionID: ctx.params.sessionID }, "manual")
+          .pipe(
+            Effect.mapError((error) =>
+              Session.BusyError.isInstance(error) ? error : new HttpApiError.BadRequest({}),
+            ),
+          ),
       )
       return HttpApiSchema.NoContent.make()
     })
@@ -333,9 +411,15 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof CommandPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* promptSvc
-        .command({ ...ctx.payload, sessionID: ctx.params.sessionID })
-        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      return yield* SessionError.mapLifecycle(
+        promptSvc
+          .command({ ...ctx.payload, sessionID: ctx.params.sessionID })
+          .pipe(
+            Effect.mapError((error) =>
+              Session.BusyError.isInstance(error) ? error : new HttpApiError.BadRequest({}),
+            ),
+          ),
+      )
     })
 
     const shell = Effect.fn("SessionHttpApi.shell")(function* (ctx: {
@@ -343,7 +427,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof ShellPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }))
+      return yield* SessionError.mapLifecycle(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }))
     })
 
     const revert = Effect.fn("SessionHttpApi.revert")(function* (ctx: {
@@ -351,12 +435,12 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof RevertPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* SessionError.mapBusy(revertSvc.revert({ sessionID: ctx.params.sessionID, ...ctx.payload }))
+      return yield* SessionError.mapLifecycle(revertSvc.revert({ sessionID: ctx.params.sessionID, ...ctx.payload }))
     })
 
     const unrevert = Effect.fn("SessionHttpApi.unrevert")(function* (ctx: { params: { sessionID: SessionID } }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* SessionError.mapBusy(revertSvc.unrevert({ sessionID: ctx.params.sessionID }))
+      return yield* SessionError.mapLifecycle(revertSvc.unrevert({ sessionID: ctx.params.sessionID }))
     })
 
     const permissionRespond = Effect.fn("SessionHttpApi.permissionRespond")(function* (ctx: {
@@ -364,13 +448,18 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof PermissionResponsePayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* permissionSvc.reply({ requestID: ctx.params.permissionID, reply: ctx.payload.response }).pipe(
-        Effect.catchTag("Permission.NotFoundError", (error) =>
-          Effect.fail(
-            new PermissionNotFoundError({
-              requestID: String(error.requestID),
-              message: `Permission request not found: ${error.requestID}`,
-            }),
+      yield* SessionError.mapLifecycle(
+        runState.commit(
+          ctx.params.sessionID,
+          permissionSvc.reply({ requestID: ctx.params.permissionID, reply: ctx.payload.response }).pipe(
+            Effect.catchTag("Permission.NotFoundError", (error) =>
+              Effect.fail(
+                new PermissionNotFoundError({
+                  requestID: String(error.requestID),
+                  message: `Permission request not found: ${error.requestID}`,
+                }),
+              ),
+            ),
           ),
         ),
       )
@@ -381,8 +470,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID; messageID: MessageID }
     }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* SessionError.mapBusy(runState.assertNotBusy(ctx.params.sessionID))
-      yield* session.removeMessage(ctx.params)
+      yield* SessionError.mapLifecycle(runState.commit(ctx.params.sessionID, session.removeMessage(ctx.params)))
       return true
     })
 
@@ -390,7 +478,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID; messageID: MessageID; partID: PartID }
     }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* session.removePart(ctx.params)
+      yield* SessionError.mapLifecycle(runState.commit(ctx.params.sessionID, session.removePart(ctx.params)))
       return true
     })
 
@@ -407,7 +495,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       ) {
         return yield* new HttpApiError.BadRequest({})
       }
-      return yield* session.updatePart(payload)
+      return yield* SessionError.mapLifecycle(runState.commit(ctx.params.sessionID, session.updatePart(payload)))
     })
 
     return handlers
@@ -419,6 +507,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("diff", diff)
       .handle("messages", messages)
       .handle("message", message)
+      .handle("contextStage", contextStage)
+      .handle("contextListStaged", contextListStaged)
+      .handle("contextClearStaged", contextClearStaged)
+      .handle("contextClearStagedItem", contextClearStaged)
+      .handle("compactionCatalog", compactionCatalog)
       .handleRaw("create", createRaw)
       .handle("remove", remove)
       .handle("update", update)

@@ -199,7 +199,7 @@ function isMatchingDisposeEvent(value: unknown, directory: string | undefined): 
     return false
   }
 
-  if (value.directory !== directory) {
+  if (!("directory" in value) || value.directory !== directory) {
     return false
   }
 
@@ -426,7 +426,7 @@ function createLayer(input: StreamInput) {
         const events = yield* Scope.provide(scope)(
           Effect.acquireRelease(
             Effect.promise(() =>
-              input.sdk.global.event({
+              input.sdk.global.event(undefined, {
                 signal: abort.signal,
               }),
             ),

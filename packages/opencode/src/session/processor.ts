@@ -2,7 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Image } from "@/image/image"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Schema } from "effect"
+import { Cause, Deferred, Effect, Exit, Layer, Context, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { Config } from "@/config/config"
@@ -31,6 +31,7 @@ export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
   readonly message: SessionV1.Assistant
+  readonly registerToolCall: (input: { toolCallID: string; toolName: string }) => Effect.Effect<SessionV1.ToolPart>
   readonly updateToolCall: (
     toolCallID: string,
     update: (part: SessionV1.ToolPart) => SessionV1.ToolPart,
@@ -44,7 +45,10 @@ export interface Handle {
       attachments?: SessionV1.FilePart[]
     },
   ) => Effect.Effect<void>
-  readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<Result>
+  readonly process: (
+    streamInput: LLM.StreamInput,
+    beforeProviderStream?: Effect.Effect<void>,
+  ) => Effect.Effect<Result>
 }
 
 type Input = {
@@ -89,7 +93,6 @@ const layer = Layer.effect(
     const permission = yield* Permission.Service
     const plugin = yield* Plugin.Service
     const summary = yield* SessionSummary.Service
-    const scope = yield* Scope.Scope
     const status = yield* SessionStatus.Service
     const image = yield* Image.Service
     const events = yield* EventV2Bridge.Service
@@ -254,6 +257,14 @@ const layer = Layer.effect(
 
       const isFilePart = (value: unknown): value is SessionV1.FilePart => Schema.is(SessionV1.FilePart)(value)
 
+      const registerToolCall = Effect.fn("SessionProcessor.registerToolCall")(function* (input: {
+        toolCallID: string
+        toolName: string
+      }) {
+        const toolCall = yield* ensureToolCall({ id: input.toolCallID, name: input.toolName })
+        return toolCall.part
+      })
+
       const toolResultOutput = (
         value: Extract<StreamEvent, { type: "tool-result" }>,
       ): { title: string; metadata: Record<string, any>; output: string; attachments?: SessionV1.FilePart[] } => {
@@ -350,7 +361,10 @@ const layer = Layer.effect(
                 : value.providerMetadata,
             }))
 
-            const parts = yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
+            const parts = yield* MessageV2.parts({
+              sessionID: ctx.assistantMessage.sessionID,
+              messageID: ctx.assistantMessage.id,
+            }).pipe(
               Effect.provideService(Database.Service, database),
             )
             const recentParts = parts.slice(-DOOM_LOOP_THRESHOLD)
@@ -473,7 +487,7 @@ const layer = Layer.effect(
                 sessionID: ctx.sessionID,
                 messageID: ctx.assistantMessage.parentID,
               })
-              .pipe(Effect.ignore, Effect.forkIn(scope))
+              .pipe(Effect.ignore)
             if (
               !ctx.assistantMessage.summary &&
               isOverflow({ cfg: yield* config.get(), tokens: usage.tokens, model: ctx.model })
@@ -609,7 +623,6 @@ const layer = Layer.effect(
             ctx.assistantMessage.error = error
             ctx.assistantMessage.finish = "error"
             yield* events.publish(Session.Event.Error, { sessionID: ctx.sessionID, error })
-            yield* status.set(ctx.sessionID, { type: "idle" })
             return
           }
           ctx.needsCompaction = true
@@ -624,20 +637,24 @@ const layer = Layer.effect(
         yield* status.set(ctx.sessionID, { type: "idle" })
       })
 
-      const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput) {
+      const process = Effect.fn("SessionProcessor.process")(function* (
+        streamInput: LLM.StreamInput,
+        beforeProviderStream: Effect.Effect<void> = Effect.void,
+      ) {
         yield* Effect.logInfo("process", {
           "session.id": input.sessionID,
           messageID: input.assistantMessage.id,
         })
         ctx.needsCompaction = false
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
+        const providerStarted = yield* Effect.cached(beforeProviderStream)
 
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             yield* status.set(ctx.sessionID, { type: "busy" })
-            const stream = llm.stream(streamInput)
+            const stream = llm.stream({ ...streamInput, providerStarted })
 
             yield* stream.pipe(
               Stream.tap((event) => handleEvent(event)),
@@ -686,6 +703,7 @@ const layer = Layer.effect(
         get message() {
           return ctx.assistantMessage
         },
+        registerToolCall,
         updateToolCall,
         completeToolCall,
         process,

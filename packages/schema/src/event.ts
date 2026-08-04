@@ -39,18 +39,16 @@ export type Payload<D extends Definition = Definition> = {
   readonly metadata?: Record<string, unknown>
 }
 
-export function define<
-  const Type extends string,
-  const Fields extends Readonly<Record<PropertyKey, Schema.Codec<unknown, unknown>>>,
->(input: {
-  readonly type: Type
-  readonly durable?: {
-    readonly version: number
-    readonly aggregate: string
-  }
-  readonly schema: Fields
-}) {
-  const data = Schema.Struct(input.schema)
+function definition<const Type extends string, DataSchema extends Schema.Codec<unknown, unknown>>(
+  input: {
+    readonly type: Type
+    readonly durable?: {
+      readonly version: number
+      readonly aggregate: string
+    }
+  },
+  data: DataSchema,
+) {
   return Schema.Struct({
     id: ID,
     metadata: optional(Schema.Record(Schema.String, Schema.Unknown)),
@@ -66,7 +64,26 @@ export function define<
         ...(input.durable === undefined ? {} : { durable: input.durable }),
         data,
       })),
-    ) satisfies Definition<Type, typeof data>
+    ) satisfies Definition<Type, DataSchema>
+}
+
+export function define<
+  const Type extends string,
+  const Fields extends Readonly<Record<PropertyKey, Schema.Codec<unknown, unknown>>>,
+>(input: {
+  readonly type: Type
+  readonly durable?: {
+    readonly version: number
+    readonly aggregate: string
+  }
+  readonly schema: Fields
+}) {
+  const data = Schema.Struct(input.schema)
+  return definition(input, data)
+}
+
+export function defineEmpty<const Type extends string>(input: { readonly type: Type }) {
+  return definition(input, Schema.Record(Schema.String, Schema.Never))
 }
 
 export function inventory<const Definitions extends ReadonlyArray<Definition>>(...definitions: Definitions) {

@@ -88,7 +88,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
         while (true) {
           if (abort.signal.aborted || ctrl.signal.aborted) break
 
-          const events = await sdk.global.event({
+          const events = await sdk.global.event(undefined, {
             signal: ctrl.signal,
             sseMaxRetryAttempts: 0,
           })

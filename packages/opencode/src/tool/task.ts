@@ -10,15 +10,22 @@ import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
-import { Effect, Exit, Schema, Scope } from "effect"
+import { Deferred, Effect, Exit, Fiber, Schema } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { SessionLifecycle } from "@/session/lifecycle"
 
 export interface TaskPromptOps {
-  cancel(sessionID: SessionID): Effect.Effect<void>
+  cancel(sessionID: SessionID): Effect.Effect<void, Session.BusyError>
   resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
-  prompt(input: SessionPrompt.PromptInput): Effect.Effect<SessionV1.WithParts>
+  prompt(
+    input: SessionPrompt.PromptInput,
+    preparedSession: Session.Info | undefined,
+    admission?: (message: SessionV1.WithParts) => Effect.Effect<boolean>,
+  ): Effect.Effect<SessionV1.WithParts>
+  promptAdmitted(input: SessionPrompt.PromptInput): Effect.Effect<SessionV1.WithParts>
 }
 
 const id = "task"
@@ -78,6 +85,32 @@ function renderOutput(input: {
   ].join("\n")
 }
 
+function childSessionMetadataWithTaskOrigin(input: {
+  existing: Record<string, unknown> | undefined
+  parentSessionID: SessionID
+  sourceMessageID: MessageID
+  toolCallID: string
+  childSessionID: SessionID
+  childTurnMessageID: MessageID
+  agent: string
+  model: { modelID: string; providerID: string }
+  background: boolean
+}) {
+  return {
+    ...(input.existing ?? {}),
+    taskOrigin: {
+      parentSessionId: input.parentSessionID,
+      sourceMessageId: input.sourceMessageID,
+      toolCallId: input.toolCallID,
+      childSessionId: input.childSessionID,
+      childTurnMessageId: input.childTurnMessageID,
+      agent: input.agent,
+      model: input.model,
+      ...(input.background ? { background: true } : {}),
+    },
+  }
+}
+
 export const TaskTool = Tool.define(
   id,
   Effect.gen(function* () {
@@ -85,9 +118,10 @@ export const TaskTool = Tool.define(
     const background = yield* BackgroundJob.Service
     const config = yield* Config.Service
     const sessions = yield* Session.Service
-    const scope = yield* Scope.Scope
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
+    const events = yield* EventV2Bridge.Service
+    const lifecycle = yield* SessionLifecycle.Service
 
     const run = Effect.fn("TaskTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
@@ -102,6 +136,10 @@ export const TaskTool = Tool.define(
       }
 
       const parent = yield* sessions.get(ctx.sessionID)
+      if (!ctx.messageID) return yield* Effect.die(new Error("TaskTool requires an owning message ID"))
+      const sourceMessageID = ctx.messageID
+      if (!ctx.callID) return yield* Effect.die(new Error("TaskTool requires an owning tool call ID"))
+      const toolCallID = ctx.callID
       let current = parent
       let depth = 0
       while (current.parentID) {
@@ -113,6 +151,15 @@ export const TaskTool = Tool.define(
           new Error(
             `Subagent depth limit reached (${cfg.subagent_depth ?? 1}). Increase "subagent_depth" to allow nested subagents.`,
           ),
+        )
+      }
+
+      const session = params.task_id
+        ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+        : undefined
+      if (session && session.parentID !== ctx.sessionID) {
+        return yield* Effect.fail(
+          new Error(`Task session ${session.id} is not a child of the invoking session`),
         )
       }
 
@@ -133,9 +180,6 @@ export const TaskTool = Tool.define(
         return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
       }
 
-      const session = params.task_id
-        ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
-        : undefined
       const childPermission = deriveSubagentSessionPermission({
         parentSessionPermission: parent.permission ?? [],
         subagent: next,
@@ -153,9 +197,10 @@ export const TaskTool = Tool.define(
           action: "deny" as const,
         })) ?? []),
       ]
+      const freshSession = session === undefined
       const nextSession =
         session ??
-        (yield* sessions.create({
+        (yield* sessions.prepare({
           parentID: ctx.sessionID,
           title: params.description + ` (@${next.name} subagent)`,
           agent: next.name,
@@ -171,7 +216,7 @@ export const TaskTool = Tool.define(
           ],
         }))
 
-      const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
+      const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: sourceMessageID }).pipe(
         Effect.provideService(Database.Service, database),
         Effect.orDie,
       )
@@ -182,6 +227,7 @@ export const TaskTool = Tool.define(
         modelID: msg.info.modelID,
         providerID: msg.info.providerID,
       }
+      const childTurnMessageID = MessageID.ascending()
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
@@ -189,71 +235,137 @@ export const TaskTool = Tool.define(
         ...(runInBackground ? { background: true } : {}),
       }
 
-      yield* ctx.metadata({
-        title: params.description,
-        metadata,
-      })
-
       const ops = ctx.extra?.promptOps as TaskPromptOps
       if (!ops) return yield* Effect.fail(new Error("TaskTool requires promptOps in ctx.extra"))
 
       const runTask = Effect.fn("TaskTool.runTask")(function* () {
         const parts = yield* ops.resolvePromptParts(params.prompt)
-        const result = yield* ops.prompt({
-          messageID: MessageID.ascending(),
-          sessionID: nextSession.id,
-          model: {
-            modelID: model.modelID,
-            providerID: model.providerID,
-          },
-          variant: next.model ? undefined : variant,
-          agent: next.name,
-          parts,
+        const publishTaskOrigin = Effect.fnUntraced(function* (childPrompt: SessionV1.WithParts) {
+          const admittedMetadata = { ...metadata, childTurnMessageId: childTurnMessageID }
+          const admittedParentMessage = yield* MessageV2.get({
+            sessionID: ctx.sessionID,
+            messageID: sourceMessageID,
+          }).pipe(Effect.provideService(Database.Service, database), Effect.orDie)
+          const admittedSession = freshSession ? nextSession : yield* sessions.get(nextSession.id).pipe(Effect.orDie)
+          const parentTaskParts = admittedParentMessage.parts.filter(
+            (part): part is SessionV1.ToolPart =>
+              part.type === "tool" && part.tool === id && part.callID === toolCallID,
+          )
+          if (parentTaskParts.length !== 1) {
+            return yield* Effect.die(
+              new Error(`Task provenance requires one exact parent tool part for ${toolCallID}`),
+            )
+          }
+          const parentTaskPart = parentTaskParts[0]!
+          const time = Date.now()
+          const childSession = {
+            ...admittedSession,
+            metadata: childSessionMetadataWithTaskOrigin({
+              existing: admittedSession.metadata,
+              parentSessionID: ctx.sessionID,
+              sourceMessageID,
+              toolCallID,
+              childSessionID: nextSession.id,
+              childTurnMessageID,
+              agent: next.name,
+              model,
+              background: runInBackground,
+            }),
+            time: { ...admittedSession.time, updated: time },
+          }
+          const parentPart = {
+            ...parentTaskPart,
+            state: parentTaskPart.state.status === "pending"
+              ? {
+                  status: "running" as const,
+                  input: parentTaskPart.state.input,
+                  title: params.description,
+                  metadata: admittedMetadata,
+                  time: { start: time },
+                }
+              : {
+                  ...parentTaskPart.state,
+                  ...(parentTaskPart.state.status === "error" ? {} : { title: params.description }),
+                  metadata: { ...parentTaskPart.state.metadata, ...admittedMetadata },
+                },
+          } satisfies SessionV1.ToolPart
+          yield* events.publishTaskAdmission({
+            session: freshSession
+              ? { kind: "created", info: childSession }
+              : { kind: "updated", info: childSession },
+            parentPart,
+            childPrompt,
+            time,
+          })
+          Object.assign(metadata, admittedMetadata)
+          yield* ctx.metadata({ title: params.description, metadata: admittedMetadata })
+          return true
         })
+        const result = yield* ops.prompt(
+          {
+            messageID: childTurnMessageID,
+            sessionID: nextSession.id,
+            model: {
+              modelID: model.modelID,
+              providerID: model.providerID,
+            },
+            variant: next.model ? undefined : variant,
+            agent: next.name,
+            parts,
+          },
+          freshSession ? nextSession : undefined,
+          publishTaskOrigin,
+        )
         return result.parts.findLast((item) => item.type === "text")?.text ?? ""
       })
 
-      const inject = Effect.fn("TaskTool.injectBackgroundResult")(function* (
-        state: "completed" | "error",
-        text: string,
-      ) {
+      const deliver = Effect.fn("TaskTool.deliverBackgroundResult")(function* (info: BackgroundJob.Info) {
+        if (info.status !== "completed" && info.status !== "error") return
         const currentParent = yield* sessions.get(ctx.sessionID)
-        yield* ops
-          .prompt({
-            sessionID: ctx.sessionID,
-            agent: currentParent.agent ?? ctx.agent,
-            variant,
-            parts: [
-              {
-                type: "text",
-                synthetic: true,
-                text: renderOutput({
-                  sessionID: nextSession.id,
-                  state,
-                  summary:
-                    state === "completed"
-                      ? `Background task completed: ${params.description}`
-                      : `Background task failed: ${params.description}`,
-                  text,
-                }),
-              },
-            ],
-          })
-          .pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true }))
+        yield* ops.promptAdmitted({
+          sessionID: ctx.sessionID,
+          agent: currentParent.agent ?? ctx.agent,
+          variant,
+          parts: [
+            {
+              type: "text",
+              synthetic: true,
+              text: renderOutput({
+                sessionID: nextSession.id,
+                state: info.status,
+                summary:
+                  info.status === "completed"
+                    ? `Background task completed: ${params.description}`
+                    : `Background task failed: ${params.description}`,
+                text: info.status === "completed" ? info.output ?? "" : info.error ?? "",
+              }),
+            },
+          ],
+        })
       })
 
-      const notify = Effect.fn("TaskTool.notifyBackgroundResult")(function* (jobID: string) {
-        yield* background.wait({ id: jobID }).pipe(
-          Effect.flatMap((result) => {
-            if (result.info?.status === "completed") return inject("completed", result.info.output ?? "")
-            if (result.info?.status === "error") return inject("error", result.info.error ?? "")
-            return Effect.void
-          }),
-          Effect.forkIn(scope, { startImmediately: true }),
+      const registerDelivery = Effect.fn("TaskTool.registerBackgroundDelivery")(function* (info: BackgroundJob.Info) {
+        const admitted = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        const fiber = yield* lifecycle
+          .admit(
+            ctx.sessionID,
+            Deferred.succeed(admitted, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
+              Effect.andThen(deliver(info)),
+            ),
+          )
+          .pipe(Effect.forkChild)
+        yield* Effect.raceFirst(
+          Deferred.await(admitted),
+          Fiber.join(fiber).pipe(Effect.andThen(Effect.die("Background delivery ended before admission"))),
         )
+        return {
+          run: Deferred.succeed(release, undefined).pipe(Effect.andThen(Fiber.join(fiber))),
+        }
       })
 
-      if (yield* background.extend({ id: nextSession.id, run: runTask() })) {
+      if (yield* lifecycle.admit(ctx.sessionID, background.extend({ id: nextSession.id, run: runTask() }))) {
         return {
           title: params.description,
           metadata: {
@@ -270,20 +382,21 @@ export const TaskTool = Tool.define(
         }
       }
 
-      const info = yield* background.start({
-        id: nextSession.id,
-        type: id,
-        title: params.description,
-        metadata,
-        onPromote: Effect.all([
-          ctx.metadata({
+      const info = yield* lifecycle.admit(
+        ctx.sessionID,
+        background.start({
+          id: nextSession.id,
+          type: id,
+          title: params.description,
+          metadata,
+          onPromote: ctx.metadata({
             title: params.description,
             metadata: { ...metadata, background: true, jobId: nextSession.id },
           }),
-          notify(nextSession.id),
-        ]),
-        run: runTask().pipe(Effect.onInterrupt(() => ops.cancel(nextSession.id))),
-      })
+          terminalDelivery: registerDelivery,
+          run: runTask(),
+        }),
+      )
 
       function backgroundResult() {
         return {
@@ -303,15 +416,15 @@ export const TaskTool = Tool.define(
       }
 
       if (runInBackground) {
-        yield* notify(info.id)
         return backgroundResult()
       }
 
       const runCancel = yield* EffectBridge.make()
       const cancel = ops.cancel(nextSession.id)
+      let cancelFiber: Fiber.Fiber<void, Session.BusyError> | undefined
 
       function onAbort() {
-        runCancel.fork(cancel)
+        cancelFiber ??= runCancel.fork(cancel)
       }
 
       return yield* Effect.acquireUseRelease(
@@ -335,8 +448,8 @@ export const TaskTool = Tool.define(
           }),
         (_, exit) =>
           Effect.gen(function* () {
-            if (Exit.hasInterrupts(exit))
-              yield* Effect.all([cancel, background.cancel(nextSession.id)], { discard: true })
+            if (Exit.hasInterrupts(exit)) onAbort()
+            if (cancelFiber) yield* Fiber.await(cancelFiber)
           }).pipe(
             Effect.ensuring(
               Effect.sync(() => {

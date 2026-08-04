@@ -23,6 +23,7 @@ import { WorkspaceTable } from "@opencode-ai/core/control-plane/workspace.sql"
 import { Database } from "@opencode-ai/core/database/database"
 import { Project } from "../../src/project/project"
 import { Session } from "../../src/session/session"
+import { NotFoundError } from "../../src/storage/storage"
 import { WorkspacePaths } from "../../src/server/routes/instance/httpapi/groups/workspace"
 import {
   WorkspaceRoutingMiddleware,
@@ -228,6 +229,11 @@ const ProbeApi = HttpApi.make("workspace-routing-probe").add(
       HttpApiEndpoint.get("get", "/probe", { query: WorkspaceRoutingQuery, success: ProbeResult }),
       HttpApiEndpoint.patch("patch", "/probe", { query: WorkspaceRoutingQuery, success: Schema.Boolean }),
       HttpApiEndpoint.get("session", "/session", { query: WorkspaceRoutingQuery, success: ProbeResult }),
+      HttpApiEndpoint.post("sessionByID", "/session/:sessionID", {
+        params: { sessionID: Schema.String },
+        query: WorkspaceRoutingQuery,
+        success: ProbeResult,
+      }),
       HttpApiEndpoint.get("workspace", WorkspacePaths.list, {
         query: WorkspaceRoutingQuery,
         success: ProbeResult,
@@ -246,15 +252,29 @@ const probeHandlers = HttpApiBuilder.group(ProbeApi, "probe", (handlers) =>
     .handle("get", () => routeContextResponse)
     .handle("patch", () => Effect.succeed(false))
     .handle("session", () => routeContextResponse)
+    .handle("sessionByID", () => routeContextResponse)
     .handle("workspace", () => routeContextResponse),
 )
 
-const serveProbe = HttpApiBuilder.layer(ProbeApi).pipe(
-  Layer.provide(probeHandlers),
-  Layer.provide(workspaceRoutingTestLayer),
-  Layer.provide(Layer.mock(Session.Service)({})),
-  HttpRouter.serve,
-  Layer.build,
+const probeServer = (sessions: Layer.Layer<Session.Service>) =>
+  HttpApiBuilder.layer(ProbeApi).pipe(
+    Layer.provide(probeHandlers),
+    Layer.provide(workspaceRoutingTestLayer),
+    Layer.provide(sessions),
+    HttpRouter.serve,
+    Layer.build,
+  )
+
+const serveProbe = probeServer(Layer.mock(Session.Service)({}))
+const serveProbeMissingSession = probeServer(
+  Layer.mock(Session.Service)({
+    get: (sessionID) => Effect.fail(new NotFoundError({ message: `Session not found: ${sessionID}` })),
+  }),
+)
+const serveProbeDefectiveSessionLookup = probeServer(
+  Layer.mock(Session.Service)({
+    get: () => Effect.die(new Error("session lookup defect")),
+  }),
 )
 
 describe("HttpApi workspace routing middleware", () => {
@@ -547,6 +567,59 @@ describe("HttpApi workspace routing middleware", () => {
         directory: workspaceDir,
         workspaceID: workspace.id,
       })
+    }),
+  )
+
+  it.live("routes a missing session through an explicitly selected local workspace", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ git: true })
+      const project = yield* Project.use.fromDirectory(dir)
+      const workspaceDir = path.join(dir, ".missing-session-local")
+      const workspace = yield* createLocalWorkspace({
+        projectID: project.project.id,
+        type: "missing-session-local",
+        directory: workspaceDir,
+      })
+      yield* serveProbeMissingSession
+
+      const response = yield* HttpClient.post(`/session/ses_missing?workspace=${workspace.id}`)
+
+      expect(response.status).toBe(200)
+      expect(yield* response.json).toEqual({ directory: workspaceDir, workspaceID: workspace.id })
+    }),
+  )
+
+  it.live("routes a missing session through an explicitly selected remote workspace", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ git: true })
+      const project = yield* Project.use.fromDirectory(dir)
+      let forwarded: ProxiedRequest | undefined
+      const remoteUrl = yield* startRemoteWorkspaceHttpServer((request) => {
+        forwarded = request
+        return HttpServerResponse.json({ directory: "remote", workspaceID: "remote" })
+      })
+      const workspace = yield* createRemoteWorkspace({
+        dir,
+        projectID: project.project.id,
+        type: "missing-session-remote",
+        url: `${remoteUrl}/base`,
+      })
+      yield* serveProbeMissingSession
+
+      const response = yield* HttpClient.post(`/session/ses_missing?workspace=${workspace.id}`)
+
+      expect(response.status).toBe(200)
+      expect(forwarded?.url).toBe("/base/session/ses_missing")
+    }),
+  )
+
+  it.live("does not treat an unexpected session lookup defect as a missing session", () =>
+    Effect.gen(function* () {
+      yield* serveProbeDefectiveSessionLookup
+
+      const response = yield* HttpClient.post("/session/ses_broken?directory=/should-not-route")
+
+      expect(response.status).toBe(500)
     }),
   )
 })

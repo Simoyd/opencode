@@ -5,9 +5,12 @@ import { Effect, Layer, Scope, Context } from "effect"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ShareNext } from "./share-next"
+import { SessionLifecycle } from "@/session/lifecycle"
 
 export interface Interface {
-  readonly create: (input?: Session.CreateInput) => Effect.Effect<Session.Info>
+  readonly create: (
+    input?: Session.CreateInput,
+  ) => Effect.Effect<Session.Info, Session.NotFound | Session.BusyError>
   readonly share: (sessionID: SessionID) => Effect.Effect<{ url: string }, unknown>
   readonly unshare: (sessionID: SessionID) => Effect.Effect<void, unknown>
 }
@@ -20,24 +23,29 @@ const layer = Layer.effect(
     const cfg = yield* Config.Service
     const session = yield* Session.Service
     const shareNext = yield* ShareNext.Service
+    const lifecycle = yield* SessionLifecycle.Service
     const scope = yield* Scope.Scope
     const flags = yield* RuntimeFlags.Service
 
     const share = Effect.fn("SessionShare.share")(function* (sessionID: SessionID) {
-      const conf = yield* cfg.get()
-      if (conf.share === "disabled") throw new Error("Sharing is disabled in configuration")
-      const result = yield* shareNext.create(sessionID)
-      yield* session.setShare({ sessionID, share: { url: result.url } })
-      return result
+      return yield* lifecycle.commit(sessionID, Effect.gen(function* () {
+        const conf = yield* cfg.get()
+        if (conf.share === "disabled") throw new Error("Sharing is disabled in configuration")
+        const result = yield* shareNext.create(sessionID)
+        yield* session.setShare({ sessionID, share: { url: result.url } })
+        return result
+      }))
     })
 
     const unshare = Effect.fn("SessionShare.unshare")(function* (sessionID: SessionID) {
-      yield* shareNext.remove(sessionID)
-      yield* session.setShare({ sessionID, share: undefined })
+      yield* lifecycle.commit(sessionID, Effect.gen(function* () {
+        yield* shareNext.remove(sessionID)
+        yield* session.setShare({ sessionID, share: undefined })
+      }))
     })
 
     const create = Effect.fn("SessionShare.create")(function* (input?: Session.CreateInput) {
-      const result = yield* session.create(input)
+      const result = yield* lifecycle.create(input)
       if (result.parentID) return result
       const conf = yield* cfg.get()
       if (!(flags.autoShare || conf.share === "auto")) return result
@@ -52,7 +60,7 @@ const layer = Layer.effect(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Config.node, Session.node, ShareNext.node, RuntimeFlags.node],
+  deps: [Config.node, Session.node, ShareNext.node, RuntimeFlags.node, SessionLifecycle.node],
 })
 
 export * as SessionShare from "./session"

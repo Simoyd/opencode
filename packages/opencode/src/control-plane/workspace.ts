@@ -23,9 +23,9 @@ import { type Target, type WorkspaceInfo, WorkspaceInfo as WorkspaceInfoSchema }
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
 import { Session } from "@/session/session"
 import { SessionPrompt } from "@/session/prompt"
+import { SessionLifecycle } from "@/session/lifecycle"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionID } from "@/session/schema"
-import { NotFoundError } from "@/storage/storage"
 import { errorData } from "@/util/error"
 import { waitEvent } from "./util"
 import { WorkspaceRef } from "@/effect/instance-ref"
@@ -123,6 +123,7 @@ type SessionWarpError =
   | WorkspaceNotFoundError
   | SessionEventsNotFoundError
   | SessionWarpHttpError
+  | Session.BusyError
   | Vcs.PatchApplyError
   | HttpClientError.HttpClientError
 type WaitForSyncError = SyncTimeoutError | SyncAbortedError
@@ -156,11 +157,13 @@ const layer = Layer.effect(
     const auth = yield* Auth.Service
     const session = yield* Session.Service
     const prompt = yield* SessionPrompt.Service
+    const runState = yield* SessionLifecycle.Service
     const http = yield* HttpClient.HttpClient
     const events = yield* EventV2Bridge.Service
     const vcs = yield* Vcs.Service
     const flags = yield* RuntimeFlags.Service
     const fs = yield* FSUtil.Service
+    const instanceStore = yield* InstanceStore.Service
     const { db } = yield* Database.Service
     const connections = new Map<WorkspaceV2.ID, ConnectionStatus>()
     const syncFibers = yield* FiberMap.make<WorkspaceV2.ID, void, SyncLoopError>()
@@ -269,8 +272,7 @@ const layer = Layer.effect(
         const target = yield* WorkspaceAdapterRuntime.target(workspace)
 
         if (target.type === "local") {
-          const store = yield* InstanceStore.Service
-          return yield* store.provide({ directory: target.directory }, input.local())
+          return yield* instanceStore.provide({ directory: target.directory }, input.local())
         }
 
         const response = yield* http.execute(input.remote({ workspace, target })).pipe(
@@ -612,10 +614,10 @@ const layer = Layer.effect(
             workspaceID: input.workspaceID ?? undefined,
             local: () => vcs.apply({ patch: sourcePatch }),
             remote: ({ target }) =>
-              HttpClientRequest.post(route(target.url, "/vcs/apply"), {
-                headers: new Headers(target.headers),
-                body: HttpBody.jsonUnsafe({ patch: sourcePatch }),
-              }),
+                HttpClientRequest.post(route(target.url, "/vcs/apply"), {
+                  headers: new Headers(target.headers),
+                  body: HttpBody.jsonUnsafe({ patch: sourcePatch }),
+                }),
             fallback: { applied: false },
           }).pipe(Effect.provide(AppNodeBuilderV1.build(InstanceStore.node)))
         }
@@ -783,35 +785,36 @@ const layer = Layer.effect(
     })
 
     const remove = Effect.fn("Workspace.remove")(function* (id: WorkspaceV2.ID) {
-      const sessions = yield* db
-        .select({ id: SessionTable.id, parentID: SessionTable.parent_id })
+      const row = yield* db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, id)).get().pipe(Effect.orDie)
+      if (!row) return
+      const info = fromRow(row)
+      const workspaceSessions = yield* db
+        .select({ directory: SessionTable.directory })
         .from(SessionTable)
         .where(eq(SessionTable.workspace_id, id))
         .all()
         .pipe(Effect.orDie)
-      const sessionIDs = new Set(sessions.map((sessionInfo) => sessionInfo.id))
-      yield* Effect.forEach(
-        sessions.filter((sessionInfo) => !sessionInfo.parentID || !sessionIDs.has(sessionInfo.parentID)),
-        (sessionInfo) =>
-          session.remove(sessionInfo.id).pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.void)),
-        { discard: true },
+      const directories = new Set(workspaceSessions.map((item) => item.directory))
+      if (directories.size > 1) {
+        return yield* Effect.die(new Error(`Workspace ${id} spans multiple local instance directories`))
+      }
+      const removeWorkspace = Effect.gen(function* () {
+        yield* Effect.catchCause(
+          WorkspaceAdapterRuntime.remove(info),
+          () => Effect.logError("adapter not available when removing workspace", { type: row.type }),
+        )
+        yield* db.delete(WorkspaceTable).where(eq(WorkspaceTable.id, id)).run().pipe(Effect.orDie)
+        return info
+      })
+      const directory = Array.from(directories)[0]
+      if (!directory) {
+        yield* stopSync(id)
+        return yield* removeWorkspace
+      }
+      return yield* instanceStore.provide(
+        { directory },
+        runState.removeWorkspace(id, stopSync(id), removeWorkspace),
       )
-
-      const row = yield* db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, id)).get().pipe(Effect.orDie)
-      if (!row) return
-
-      yield* stopSync(id)
-
-      const info = fromRow(row)
-      yield* Effect.catchCause(
-        Effect.gen(function* () {
-          yield* WorkspaceAdapterRuntime.remove(info)
-        }),
-        () => Effect.logError("adapter not available when removing workspace", { type: row.type }),
-      )
-
-      yield* db.delete(WorkspaceTable).where(eq(WorkspaceTable.id, id)).run().pipe(Effect.orDie)
-      return info
     })
 
     const status = Effect.fn("Workspace.status")(function* () {
@@ -952,11 +955,13 @@ export const node = LayerNode.make({
     Auth.node,
     Session.node,
     SessionPrompt.node,
+    SessionLifecycle.node,
     httpClient,
     EventV2Bridge.node,
     Vcs.node,
     RuntimeFlags.node,
     FSUtil.node,
+    InstanceStore.node,
     Database.node,
   ],
 })

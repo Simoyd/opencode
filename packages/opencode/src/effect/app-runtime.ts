@@ -23,7 +23,7 @@ import { Permission } from "@/permission"
 import { Todo } from "@/session/todo"
 import { Session } from "@/session/session"
 import { SessionStatus } from "@/session/status"
-import { SessionRunState } from "@/session/run-state"
+import { SessionLifecycle } from "@/session/lifecycle"
 import { SessionProcessor } from "@/session/processor"
 import { SessionCompaction } from "@/session/compaction"
 import { SessionRevert } from "@/session/revert"
@@ -82,7 +82,7 @@ export const AppLayer = AppNodeBuilderV1.build(
     BackgroundJob.node,
     RuntimeFlags.node,
     EventV2Bridge.node,
-    SessionRunState.node,
+    SessionLifecycle.node,
     SessionProcessor.node,
     SessionCompaction.node,
     SessionRevert.node,

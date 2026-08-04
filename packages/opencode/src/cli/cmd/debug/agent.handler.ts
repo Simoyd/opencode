@@ -6,6 +6,8 @@ import { Cause, Effect } from "effect"
 import { Agent } from "../../../agent/agent"
 import { Provider } from "@/provider/provider"
 import { Session } from "@/session/session"
+import { SessionLifecycle } from "@/session/lifecycle"
+import { NotFoundError } from "@/storage/storage"
 import type { MessageV2 } from "../../../session/message-v2"
 import { MessageID, PartID } from "../../../session/schema"
 import { ToolRegistry } from "@/tool/registry"
@@ -128,7 +130,8 @@ const createToolContext = Effect.fn("Cli.debug.agent.createToolContext")(functio
   ctx: InstanceContext,
 ) {
   const sessionSvc = yield* Session.Service
-  const session = yield* sessionSvc.create({ title: `Debug tool run (${agent.name})` })
+  const lifecycle = yield* SessionLifecycle.Service
+  const session = yield* lifecycle.create({ title: `Debug tool run (${agent.name})` }).pipe(mapLifecycleErrors)
   const messageID = MessageID.ascending()
   const model = agent.model
     ? agent.model
@@ -167,7 +170,7 @@ const createToolContext = Effect.fn("Cli.debug.agent.createToolContext")(functio
     cost: 0,
     tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
   }
-  yield* sessionSvc.updateMessage(message)
+  yield* lifecycle.commit(session.id, sessionSvc.updateMessage(message)).pipe(mapLifecycleErrors)
 
   const ruleset = Permission.merge(agent.permission, session.permission ?? [])
 
@@ -191,3 +194,11 @@ const createToolContext = Effect.fn("Cli.debug.agent.createToolContext")(functio
     },
   }
 })
+
+const mapLifecycleErrors = <A, E, R>(
+  self: Effect.Effect<A, E | Session.BusyError | NotFoundError, R>,
+) =>
+  self.pipe(
+    Effect.catchIf(Session.BusyError.isInstance, (error) => fail(`Session is busy: ${error.sessionID}`)),
+    Effect.catchIf(NotFoundError.isInstance, (error) => fail(error.message)),
+  )

@@ -6,16 +6,21 @@ import { Context, Effect, Layer } from "effect"
 import { Flock } from "./util/flock"
 import { Flag } from "./flag/flag"
 import { makeGlobalNode } from "./effect/app-node"
+import { Environment } from "./environment"
 
 const app = "opencode"
-const data = path.join(xdgData!, app)
-const cache = path.join(xdgCache!, app)
-const config = path.join(xdgConfig!, app)
-const state = path.join(xdgState!, app)
+Environment.assertNoIsolatedRootConflicts()
+const isolated = Environment.isolatedPaths()
+const data = isolated?.data ?? path.join(xdgData!, app)
+const cache = isolated?.cache ?? path.join(xdgCache!, app)
+const config = isolated?.config ?? path.join(xdgConfig!, app)
+const state = isolated?.state ?? path.join(xdgState!, app)
+const locks = isolated?.locks ?? path.join(state, "locks")
 const tmp = path.join(os.tmpdir(), app)
 
 const paths = {
   get home() {
+    if (isolated) return config
     return process.env.OPENCODE_TEST_HOME ?? os.homedir()
   },
   data,
@@ -25,17 +30,19 @@ const paths = {
   cache,
   config,
   state,
+  locks,
   tmp,
 }
 
 export const Path = paths
 
-Flock.setGlobal({ state })
+Flock.setGlobal({ state, locks })
 
 await Promise.all([
   fs.mkdir(Path.data, { recursive: true }),
   fs.mkdir(Path.config, { recursive: true }),
   fs.mkdir(Path.state, { recursive: true }),
+  fs.mkdir(Path.locks, { recursive: true }),
   fs.mkdir(Path.tmp, { recursive: true }),
   fs.mkdir(Path.log, { recursive: true }),
   fs.mkdir(Path.bin, { recursive: true }),
@@ -50,6 +57,7 @@ export interface Interface {
   readonly cache: string
   readonly config: string
   readonly state: string
+  readonly locks: string
   readonly tmp: string
   readonly bin: string
   readonly log: string
@@ -63,6 +71,7 @@ export function make(input: Partial<Interface> = {}): Interface {
     cache: Path.cache,
     config: Flag.OPENCODE_CONFIG_DIR ?? Path.config,
     state: Path.state,
+    locks: Path.locks,
     tmp: Path.tmp,
     bin: Path.bin,
     log: Path.log,

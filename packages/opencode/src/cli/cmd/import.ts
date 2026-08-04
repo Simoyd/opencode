@@ -5,6 +5,7 @@ import { MessageV2 } from "../../session/message-v2"
 import { CliError, effectCmd } from "../effect-cmd"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionTable, MessageTable, PartTable } from "@opencode-ai/core/session/sql"
+import { CompactionRegionProjection } from "@opencode-ai/core/session/compaction-region"
 import { InstanceRef } from "@/effect/instance-ref"
 import { ShareNext } from "@/share/share-next"
 import { EOL } from "os"
@@ -12,6 +13,8 @@ import path from "path"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Effect, Schema } from "effect"
 import type { InstanceContext } from "@/project/instance-context"
+import { eq } from "drizzle-orm"
+import { isDeepStrictEqual } from "node:util"
 
 const decodeMessageInfo = Schema.decodeUnknownSync(SessionV1.Info)
 const decodePart = Schema.decodeUnknownSync(SessionV1.Part)
@@ -64,12 +67,12 @@ export function transformShareData(shareData: ShareData[]): {
   const sessionItem = shareData.find((d) => d.type === "session")
   if (!sessionItem) return null
 
-  const messageMap = new Map<string, Message>()
+  const messages: Message[] = []
   const partMap = new Map<string, Part[]>()
 
   for (const item of shareData) {
     if (item.type === "message") {
-      messageMap.set(item.data.id, item.data)
+      messages.push(item.data)
     } else if (item.type === "part") {
       if (!partMap.has(item.data.messageID)) {
         partMap.set(item.data.messageID, [])
@@ -78,18 +81,152 @@ export function transformShareData(shareData: ShareData[]): {
     }
   }
 
-  if (messageMap.size === 0) return null
+  if (messages.length === 0) return null
+  const messageIDs = new Set(messages.map((message) => message.id))
+  if (Array.from(partMap.keys()).some((messageID) => !messageIDs.has(messageID))) return null
 
   return {
     info: sessionItem.data,
-    messages: Array.from(messageMap.values()).map((msg) => ({
+    messages: messages.map((msg) => ({
       info: msg,
       parts: partMap.get(msg.id) ?? [],
     })),
   }
 }
 
-type ExportData = { info: SDKSession; messages: Array<{ info: Message; parts: Part[] }> }
+export type ExportData = { info: SDKSession; messages: Array<{ info: Message; parts: Part[] }> }
+
+export const persistImportedSession = Effect.fn("Cli.import.persist")(function* (
+  exportData: ExportData,
+  ctx: InstanceContext,
+) {
+  const { db } = yield* Database.Service
+  const info = Schema.decodeUnknownSync(Session.Info)({
+    ...exportData.info,
+    projectID: ctx.project.id,
+    directory: ctx.directory,
+    path: path.relative(path.resolve(ctx.worktree), ctx.directory).replaceAll("\\", "/"),
+  }) as Session.Info
+  const row = Session.toRow(info)
+  const messageIDs = new Set<string>()
+  const partIDs = new Set<string>()
+  let previousMessage: SessionV1.Info | undefined
+  const imported = exportData.messages.map((message) => {
+    const messageInfo = decodeMessageInfo(message.info) as SessionV1.Info
+    if (messageInfo.sessionID !== info.id || messageInfo.time?.created === undefined) {
+      throw new Error("Imported message owner and physical time must match its containing session")
+    }
+    if (
+      messageIDs.has(messageInfo.id) ||
+      (previousMessage && MessageV2.compareHydratedMessagePhysicalOrder(messageInfo, previousMessage) <= 0)
+    ) {
+      throw new Error("Imported messages contradict canonical physical order")
+    }
+    messageIDs.add(messageInfo.id)
+    previousMessage = messageInfo
+    const { id, sessionID: _, ...data } = messageInfo
+    return {
+      id,
+      timeCreated: messageInfo.time.created,
+      data,
+      parts: message.parts.map((part) => {
+        const partInfo = decodePart(part) as SessionV1.Part
+        if (partInfo.sessionID !== info.id || partInfo.messageID !== id || !partIDs.add(partInfo.id)) {
+          throw new Error("Imported part ownership must match its containing message and session")
+        }
+        const { id: partID, sessionID: _sessionID, messageID, ...partData } = partInfo
+        return { id: partID, messageID, data: partData }
+      }),
+    }
+  })
+
+  const persist = Effect.gen(function* () {
+    const existingSession = yield* db
+      .select({
+        projectID: SessionTable.project_id,
+        parentID: SessionTable.parent_id,
+        workspaceID: SessionTable.workspace_id,
+      })
+      .from(SessionTable)
+      .where(eq(SessionTable.id, row.id))
+      .get()
+      .pipe(Effect.orDie)
+    if (
+      existingSession &&
+      (existingSession.projectID !== row.project_id ||
+        (existingSession.parentID ?? null) !== (row.parent_id ?? null) ||
+        (existingSession.workspaceID ?? null) !== (row.workspace_id ?? null))
+    ) {
+      return yield* Effect.die(`Imported session ${row.id} contradicts persisted identity or ownership`)
+    }
+    for (const message of imported) {
+      const existingMessage = yield* db
+        .select({ sessionID: MessageTable.session_id, timeCreated: MessageTable.time_created, data: MessageTable.data })
+        .from(MessageTable)
+        .where(eq(MessageTable.id, message.id))
+        .get()
+        .pipe(Effect.orDie)
+      if (
+        existingMessage &&
+        (existingMessage.sessionID !== row.id ||
+          existingMessage.timeCreated !== message.timeCreated ||
+          !isDeepStrictEqual(existingMessage.data, message.data))
+      ) {
+        return yield* Effect.die(`Imported message ${message.id} collides with different persisted content or ownership`)
+      }
+      for (const part of message.parts) {
+        const existingPart = yield* db
+          .select({ sessionID: PartTable.session_id, messageID: PartTable.message_id, data: PartTable.data })
+          .from(PartTable)
+          .where(eq(PartTable.id, part.id))
+          .get()
+          .pipe(Effect.orDie)
+        if (
+          existingPart &&
+          (existingPart.sessionID !== row.id ||
+            existingPart.messageID !== part.messageID ||
+            !isDeepStrictEqual(existingPart.data, part.data))
+        ) {
+          return yield* Effect.die(`Imported part ${part.id} collides with different persisted content or ownership`)
+        }
+      }
+    }
+
+    yield* db
+      .insert(SessionTable)
+      .values(row)
+      .onConflictDoUpdate({
+        target: SessionTable.id,
+        set: { project_id: row.project_id, directory: row.directory, path: row.path },
+      })
+      .run()
+      .pipe(Effect.orDie)
+    for (const message of imported) {
+      yield* db
+        .insert(MessageTable)
+        .values({
+          id: message.id,
+          session_id: row.id,
+          time_created: message.timeCreated,
+          data: message.data as never,
+        })
+        .onConflictDoNothing()
+        .run()
+        .pipe(Effect.orDie)
+      for (const part of message.parts) {
+        yield* db
+          .insert(PartTable)
+          .values({ id: part.id, message_id: part.messageID, session_id: row.id, data: part.data })
+          .onConflictDoNothing()
+          .run()
+          .pipe(Effect.orDie)
+      }
+    }
+    yield* CompactionRegionProjection.reconcile(db, { sessionID: row.id })
+  })
+  yield* db.transaction(() => persist, { behavior: "immediate" }).pipe(Effect.orDie)
+  return info
+})
 
 export const ImportCommand = effectCmd({
   command: "import <file>",
@@ -110,7 +247,6 @@ export const ImportCommand = effectCmd({
 const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: InstanceContext) {
   const share = yield* ShareNext.Service
   const fs = yield* FSUtil.Service
-  const { db } = yield* Database.Service
 
   let exportData: ExportData | undefined
 
@@ -176,54 +312,7 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
     return
   }
 
-  const info = Schema.decodeUnknownSync(Session.Info)({
-    ...exportData.info,
-    projectID: ctx.project.id,
-    directory: ctx.directory,
-    path: path.relative(path.resolve(ctx.worktree), ctx.directory).replaceAll("\\", "/"),
-  }) as Session.Info
-  const row = Session.toRow(info)
-  yield* db
-    .insert(SessionTable)
-    .values(row)
-    .onConflictDoUpdate({
-      target: SessionTable.id,
-      set: { project_id: row.project_id, directory: row.directory, path: row.path },
-    })
-    .run()
-    .pipe(Effect.orDie)
-
-  for (const msg of exportData.messages) {
-    const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
-    const { id, sessionID: _, ...msgData } = msgInfo
-    yield* db
-      .insert(MessageTable)
-      .values({
-        id,
-        session_id: row.id,
-        time_created: msgInfo.time?.created ?? Date.now(),
-        data: msgData as never,
-      })
-      .onConflictDoNothing()
-      .run()
-      .pipe(Effect.orDie)
-
-    for (const part of msg.parts) {
-      const partInfo = decodePart(part) as SessionV1.Part
-      const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
-      yield* db
-        .insert(PartTable)
-        .values({
-          id: partId,
-          message_id: messageID,
-          session_id: row.id,
-          data: partData,
-        })
-        .onConflictDoNothing()
-        .run()
-        .pipe(Effect.orDie)
-    }
-  }
+  yield* persistImportedSession(exportData, ctx)
 
   process.stdout.write(`Imported session: ${exportData.info.id}`)
   process.stdout.write(EOL)

@@ -32,6 +32,7 @@ import type { WorkspaceAdapter } from "@/control-plane/types"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
+import { Environment } from "@opencode-ai/core/environment"
 
 type State = {
   hooks: Hooks[]
@@ -162,7 +163,7 @@ const layer = Layer.effect(
             return Server.url ?? new URL("http://localhost:4096")
           },
           // @ts-expect-error
-          $: typeof Bun === "undefined" ? undefined : Bun.$,
+          $: typeof Bun === "undefined" ? undefined : Bun.$.env(Environment.scrubUserToolEnv()),
         }
 
         for (const plugin of flags.disableDefaultPlugins ? [] : internalPlugins(flags)) {

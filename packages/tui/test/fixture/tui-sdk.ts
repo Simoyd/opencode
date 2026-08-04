@@ -31,7 +31,7 @@ export function createEventSource() {
     emit(event: GlobalEvent) {
       if (!fn) throw new Error("event source not ready")
       fn(event)
-      if (!("properties" in event.payload)) return
+      if (!("directory" in event) || !("properties" in event.payload)) return
       const chunk = new TextEncoder().encode(
         `data: ${JSON.stringify({
           ...event.payload,

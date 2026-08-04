@@ -26,6 +26,7 @@ import { PassThrough } from "node:stream"
 import launch from "cross-spawn"
 import { makeGlobalNode } from "./effect/app-node"
 import { filesystem, path } from "./effect/app-node-platform"
+import { Environment } from "./environment"
 
 const toError = (err: unknown): Error => (err instanceof globalThis.Error ? err : new globalThis.Error(String(err)))
 
@@ -106,8 +107,11 @@ export const make = Effect.gen(function* () {
     return path.resolve(opts.cwd)
   })
 
-  const env = (opts: ChildProcess.CommandOptions) =>
-    opts.extendEnv ? { ...globalThis.process.env, ...opts.env } : opts.env
+  const env = (opts: ChildProcess.CommandOptions) => {
+    if (opts.extendEnv) return Environment.userToolEnv(globalThis.process.env, opts.env)
+    if (Predicate.isUndefined(opts.env)) return Environment.scrubUserToolEnv(globalThis.process.env)
+    return Environment.scrubUserToolEnv(opts.env)
+  }
 
   const input = (x: ChildProcess.CommandInput | undefined): NodeChildProcess.IOType | undefined =>
     Stream.isStream(x) ? "pipe" : x
@@ -296,10 +300,14 @@ export const make = Effect.gen(function* () {
   ) => {
     if (globalThis.process.platform === "win32") {
       return Effect.callback<void, PlatformError.PlatformError>((resume) => {
-        NodeChildProcess.exec(`taskkill /pid ${proc.pid} /T /F`, { windowsHide: true }, (err) => {
-          if (err) return resume(Effect.fail(toPlatformError("kill", toError(err), command)))
-          resume(Effect.void)
-        })
+        NodeChildProcess.exec(
+          `taskkill /pid ${proc.pid} /T /F`,
+          { env: Environment.scrubUserToolEnv(), windowsHide: true },
+          (err) => {
+            if (err) return resume(Effect.fail(toPlatformError("kill", toError(err), command)))
+            resume(Effect.void)
+          },
+        )
       })
     }
 

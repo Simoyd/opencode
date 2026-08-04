@@ -9,6 +9,7 @@ import { lazy } from "@/util/lazy"
 import { Language, type Node } from "web-tree-sitter"
 
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Environment } from "@opencode-ai/core/environment"
 import { fileURLToPath } from "url"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -419,10 +420,7 @@ export const ShellTool = Tool.define(
         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
         { env: {} },
       )
-      return {
-        ...process.env,
-        ...extra.env,
-      }
+      return Environment.userToolEnv(process.env, extra.env)
     })
 
     const run = Effect.fn("ShellTool.run")(function* (

@@ -174,3 +174,24 @@ export const SessionContextEpochTable = sqliteTable("session_context_epoch", {
   snapshot: text({ mode: "json" }).notNull().$type<SystemContext.Snapshot>(),
   baseline_seq: integer().notNull(),
 })
+
+export const CompactionRegionTable = sqliteTable(
+  "compaction_region",
+  {
+    session_id: text()
+      .$type<SessionSchema.ID>()
+      .notNull()
+      .references(() => SessionTable.id, { onDelete: "cascade" }),
+    marker_id: text().$type<MessageID>().notNull(),
+    start_message_id: text().$type<MessageID>().notNull(),
+    summary_message_id: text().$type<MessageID>().notNull(),
+    summary_preview: text().notNull(),
+    physical_message_count: integer().notNull(),
+    semantic_message_count: integer().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.session_id, table.marker_id] }),
+    index("compaction_region_session_marker_idx").on(table.session_id, table.marker_id),
+    index("compaction_region_session_start_idx").on(table.session_id, table.start_message_id),
+  ],
+)

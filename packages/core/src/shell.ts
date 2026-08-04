@@ -8,6 +8,7 @@ import { setTimeout as sleep } from "node:timers/promises"
 import { Flag } from "./flag/flag"
 import { FSUtil } from "./fs-util"
 import { which } from "./util/which"
+import { Environment } from "./environment"
 
 const SIGKILL_TIMEOUT_MS = 200
 const META: Record<string, { deny?: boolean; login?: boolean; posix?: boolean; ps?: boolean }> = {
@@ -35,6 +36,7 @@ export async function killTree(proc: ChildProcess, opts?: { exited?: () => boole
   if (process.platform === "win32") {
     await new Promise<void>((resolve) => {
       const killer = spawn("taskkill", ["/pid", String(pid), "/f", "/t"], {
+        env: Environment.scrubUserToolEnv(),
         stdio: "ignore",
         windowsHide: true,
       })

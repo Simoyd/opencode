@@ -66,8 +66,8 @@ describe("session action routes", () => {
         expect(reset.status).toBe(200)
         expect(((yield* reset.json) as SessionNs.Info).metadata).toEqual({})
 
-        yield* SessionNs.Service.use((svc) => svc.remove(fork.id).pipe(Effect.ignore))
-        yield* SessionNs.Service.use((svc) => svc.remove(session.id).pipe(Effect.ignore))
+        yield* SessionNs.Service.use((svc) => svc.removeLeaf(fork.id).pipe(Effect.ignore))
+        yield* SessionNs.Service.use((svc) => svc.removeLeaf(session.id).pipe(Effect.ignore))
       }),
     { git: true },
   )
@@ -78,7 +78,7 @@ describe("session action routes", () => {
       Effect.gen(function* () {
         const test = yield* TestInstance
         const session = yield* Effect.acquireRelease(SessionNs.use.create({}), (created) =>
-          SessionNs.use.remove(created.id).pipe(Effect.ignore),
+          SessionNs.use.removeLeaf(created.id).pipe(Effect.ignore),
         )
 
         const res = yield* requestInDirectory(`/session/${session.id}/abort`, test.directory, { method: "POST" })
@@ -95,7 +95,7 @@ describe("session action routes", () => {
       Effect.gen(function* () {
         const test = yield* TestInstance
         const session = yield* Effect.acquireRelease(SessionNs.use.create({}), (created) =>
-          SessionNs.use.remove(created.id).pipe(Effect.ignore),
+          SessionNs.use.removeLeaf(created.id).pipe(Effect.ignore),
         )
 
         const res = yield* requestInDirectory(`/experimental/session/${session.id}/background`, test.directory, {

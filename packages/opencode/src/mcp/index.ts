@@ -34,6 +34,7 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { McpCatalog } from "./catalog"
 import { McpEvent } from "@opencode-ai/schema/mcp-event"
 import { McpBrowser } from "./browser"
+import { Environment } from "@opencode-ai/core/environment"
 
 const DEFAULT_TIMEOUT = 30_000
 const CLIENT_OPTIONS = {
@@ -349,11 +350,7 @@ const layer = Layer.effect(
         command: cmd,
         args,
         cwd,
-        env: {
-          ...process.env,
-          ...(cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}),
-          ...mcp.environment,
-        },
+        env: Environment.userToolEnv(process.env, cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}, mcp.environment),
       })
 
       const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT

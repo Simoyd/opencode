@@ -4,7 +4,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
 import { tool } from "ai"
-import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Stream } from "effect"
 import path from "path"
 import z from "zod"
 import type { Agent } from "../../src/agent/agent"
@@ -185,6 +185,69 @@ const env = LayerNode.compile(
 )
 
 const it = testEffect(env)
+const nativeEnv = LayerNode.compile(
+  LayerNode.group([root, LayerNode.make({ service: TestLLMServer, layer: TestLLMServer.layer, deps: [] })]),
+  [
+    [SessionSummary.node, summary],
+    [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true, experimentalNativeLlm: true })],
+  ],
+)
+const itNative = testEffect(nativeEnv)
+
+const startsProviderBeforeBusyObserversFinish = (dir: string) =>
+  Effect.gen(function* () {
+    const llm = yield* TestLLMServer
+    const { processors, session, provider } = yield* boot()
+    const events = yield* EventV2Bridge.Service
+    const status = yield* SessionStatus.Service
+    const admitted = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    const finished = yield* Deferred.make<void>()
+    yield* events.listen((event) => {
+      if (event.type !== SessionStatus.Event.Status.type) return Effect.void
+      const data = event.data as typeof SessionStatus.Event.Status.data.Type
+      if (data.status.type !== "busy") return Effect.void
+      return Deferred.succeed(admitted, undefined).pipe(
+        Effect.andThen(Deferred.await(release)),
+        Effect.ensuring(Deferred.succeed(finished, undefined)),
+        Effect.asVoid,
+      )
+    })
+    yield* llm.hang
+
+    const chat = yield* session.create({})
+    const parent = yield* user(chat.id, "blocking status observer")
+    const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+    const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+    const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+    const run = yield* handle
+      .process({
+        user: {
+          id: parent.id,
+          sessionID: chat.id,
+          role: "user",
+          time: parent.time,
+          agent: parent.agent,
+          model: { providerID: ref.providerID, modelID: ref.modelID },
+        } satisfies SessionV1.User,
+        sessionID: chat.id,
+        model: mdl,
+        agent: agent(),
+        system: [],
+        messages: [{ role: "user", content: "blocking status observer" }],
+        tools: {},
+      })
+      .pipe(Effect.forkChild)
+
+    yield* Deferred.await(admitted)
+    expect((yield* status.get(chat.id)).type).toBe("busy")
+    yield* llm.wait(1)
+    expect(yield* Deferred.isDone(finished)).toBeFalse()
+    yield* Deferred.succeed(release, undefined)
+    yield* Deferred.await(finished)
+    yield* Fiber.interrupt(run)
+    expect((yield* status.get(chat.id)).type).toBe("idle")
+  })
 
 const providerErrorLLM = Layer.succeed(
   LLM.Service,
@@ -274,7 +337,7 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
         } satisfies LLM.StreamInput
 
         const value = yield* handle.process(input)
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id })
         const calls = yield* llm.calls
 
         expect(value).toBe("continue")
@@ -348,7 +411,7 @@ it.live("session.processor effect tests preserve text start time", () =>
           .pipe(Effect.forkChild)
 
         yield* waitFor(
-          MessageV2.parts(msg.id).pipe(
+          MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id }).pipe(
             Effect.map((parts) => parts.find((part): part is SessionV1.TextPart => part.type === "text")),
             Effect.provideService(Database.Service, database),
           ),
@@ -358,7 +421,7 @@ it.live("session.processor effect tests preserve text start time", () =>
         gate.resolve()
 
         const exit = yield* Fiber.await(run)
-        const text = (yield* MessageV2.parts(msg.id)).find((part): part is SessionV1.TextPart => part.type === "text")
+        const text = (yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id })).find((part): part is SessionV1.TextPart => part.type === "text")
 
         expect(Exit.isSuccess(exit)).toBe(true)
         expect(text?.text).toBe("hello")
@@ -408,7 +471,7 @@ it.live("session.processor effect tests stop after token overflow requests compa
           tools: {},
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id })
 
         expect(value).toBe("compact")
         expect(parts.some((part) => part.type === "text" && part.text === "after")).toBe(true)
@@ -454,7 +517,7 @@ it.live("session.processor effect tests capture reasoning from http mock", () =>
           tools: {},
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id })
         const reasoning = parts.find((part): part is SessionV1.ReasoningPart => part.type === "reasoning")
         const text = parts.find((part): part is SessionV1.TextPart => part.type === "text")
 
@@ -502,7 +565,7 @@ it.live("session.processor effect tests reset reasoning state across retries", (
           tools: {},
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id })
         const reasoning = parts.filter((part): part is SessionV1.ReasoningPart => part.type === "reasoning")
 
         expect(value).toBe("continue")
@@ -593,7 +656,7 @@ it.live("session.processor effect tests retry recognized structured json errors"
           tools: {},
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id })
 
         expect(value).toBe("continue")
         expect(yield* llm.calls).toBe(2)
@@ -656,6 +719,18 @@ it.live("session.processor effect tests publish retry status updates", () =>
       }),
     { config: (url) => providerCfg(url) },
   ),
+)
+
+it.live("session.processor starts AI SDK transport before a busy status observer completes", () =>
+  provideTmpdirServer(({ dir }) => startsProviderBeforeBusyObserversFinish(dir), {
+    config: (url) => providerCfg(url),
+  }),
+)
+
+itNative.live("session.processor starts native transport before a busy status observer completes", () =>
+  provideTmpdirServer(({ dir }) => startsProviderBeforeBusyObserversFinish(dir), {
+    config: (url) => providerCfg(url),
+  }),
 )
 
 it.live("session.processor effect tests compact on structured context overflow", () =>
@@ -746,7 +821,7 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
           },
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id })
         const call = parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
 
         expect(value).toBe("continue")
@@ -806,7 +881,7 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
 
         yield* llm.wait(1)
         yield* waitFor(
-          MessageV2.parts(msg.id).pipe(
+          MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id }).pipe(
             Effect.map((parts) => parts.find((part): part is SessionV1.ToolPart => part.type === "tool")),
             Effect.provideService(Database.Service, database),
           ),
@@ -815,7 +890,7 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
         yield* Fiber.interrupt(run)
 
         const exit = yield* Fiber.await(run)
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id })
         const call = parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
 
         expect(Exit.isFailure(exit)).toBe(true)
@@ -1001,7 +1076,7 @@ itProviderError.live("session.processor effect tests fail provider-executed erro
         })
         yield* off
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id })
         const call = parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
         expect(call?.state.status).toBe("error")
         if (call?.state.status === "error") expect(call.state.error).toBe("provider boom")
@@ -1051,7 +1126,7 @@ itFragmentFailure.live("session.processor effect tests retain partial legacy par
         ).toBe("stop")
         yield* off
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id })
         expect(parts).toEqual(
           expect.arrayContaining([
             expect.objectContaining({ type: "text", text: "partial" }),
