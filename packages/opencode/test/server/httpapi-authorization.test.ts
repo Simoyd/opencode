@@ -67,8 +67,6 @@ const itV2Secret = testEffect(v2ApiLayer.pipe(Layer.provide(secretLayer)))
 
 const basic = (username: string, password: string) => ServerAuth.header({ username, password }) ?? ""
 
-const token = (username: string, password: string) => Buffer.from(`${username}:${password}`).toString("base64")
-
 const getProbe = (headers?: Record<string, string>) =>
   HttpClientRequest.get("/probe").pipe(
     headers ? HttpClientRequest.setHeaders(headers) : (request) => request,
@@ -116,21 +114,21 @@ describe("HttpApi authorization middleware", () => {
     }),
   )
 
-  itSecret.live("accepts auth token query credentials", () =>
+  itSecret.live("rejects auth token query credentials", () =>
     Effect.gen(function* () {
-      const response = yield* HttpClient.get(`/probe?auth_token=${encodeURIComponent(token("opencode", "secret"))}`)
+      const response = yield* HttpClient.get(`/probe?auth_token=${encodeURIComponent(btoa("opencode:secret"))}`)
 
-      expect(response.status).toBe(200)
+      expect(response.status).toBe(401)
     }),
   )
 
-  itSecret.live("prefers auth token query credentials over basic auth", () =>
+  itSecret.live("does not let auth token query credentials override bad basic auth", () =>
     Effect.gen(function* () {
       const response = yield* HttpClientRequest.get(
-        `/probe?auth_token=${encodeURIComponent(token("opencode", "secret"))}`,
+        `/probe?auth_token=${encodeURIComponent(btoa("opencode:secret"))}`,
       ).pipe(HttpClientRequest.setHeader("authorization", basic("opencode", "wrong")), HttpClient.execute)
 
-      expect(response.status).toBe(200)
+      expect(response.status).toBe(401)
     }),
   )
 
@@ -145,11 +143,11 @@ describe("HttpApi authorization middleware", () => {
     }),
   )
 
-  itSecret.live("preserves handler errors when auth token query succeeds", () =>
+  itSecret.live("does not expose downstream handler errors through auth token query credentials", () =>
     Effect.gen(function* () {
-      const response = yield* HttpClient.get(`/missing?auth_token=${encodeURIComponent(token("opencode", "secret"))}`)
+      const response = yield* HttpClient.get(`/missing?auth_token=${encodeURIComponent(btoa("opencode:secret"))}`)
 
-      expect(response.status).toBe(404)
+      expect(response.status).toBe(401)
     }),
   )
 

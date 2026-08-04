@@ -378,7 +378,7 @@ describe("HttpApi UI fallback", () => {
     }),
   )
 
-  it.live("accepts auth token for the web UI", () =>
+  it.live("does not let auth token query credentials bypass web UI auth", () =>
     Effect.gen(function* () {
       const response = yield* uiApp({
         password: "secret",
@@ -387,8 +387,7 @@ describe("HttpApi UI fallback", () => {
         client: httpClient(new Response("<html>opencode</html>", { headers: { "content-type": "text/html" } })),
       }).request(`/?auth_token=${btoa("opencode:secret")}`)
 
-      expect(response.status).toBe(200)
-      expect(yield* responseText(response)).toBe("<html>opencode</html>")
+      expect(response.status).toBe(401)
     }),
   )
 
@@ -420,12 +419,7 @@ describe("HttpApi UI fallback", () => {
     }),
   )
 
-  // Regression for #25698 (Ope): the browser fetches the PWA manifest and
-  // its icons via flows that don't carry app-managed credentials (the
-  // `<link rel="manifest">` request is not under page-auth control), so the
-  // server returning 401 breaks PWA install. These specific public assets
-  // should bypass auth.
-  it.live("serves the PWA manifest without auth even when a server password is set", () =>
+  it.live("does not let PWA assets bypass configured auth", () =>
     Effect.gen(function* () {
       for (const path of ["/site.webmanifest", "/web-app-manifest-192x192.png", "/web-app-manifest-512x512.png"]) {
         const response = yield* uiApp({
@@ -434,7 +428,7 @@ describe("HttpApi UI fallback", () => {
           disableEmbeddedWebUi: true,
           client: httpClient(new Response("ok")),
         }).request(path)
-        expect(response.status).not.toBe(401)
+        expect(response.status).toBe(401)
       }
     }),
   )
