@@ -85,12 +85,10 @@ const client = Layer.succeed(
       const events = streamFailure
         ? Stream.fail(streamFailure)
         : Stream.fromIterable(responses === undefined ? response : (responses.shift() ?? []))
-      if (!streamGate) return events
+      const started = streamStarted ? Deferred.succeed(streamStarted, undefined) : Effect.void
+      if (!streamGate) return Stream.unwrap(started.pipe(Effect.as(events)))
       return Stream.unwrap(
-        (streamStarted ? Deferred.succeed(streamStarted, undefined) : Effect.void).pipe(
-          Effect.andThen(Deferred.await(streamGate)),
-          Effect.as(events),
-        ),
+        started.pipe(Effect.andThen(Deferred.await(streamGate)), Effect.as(events)),
       )
     }) as unknown as LLMClientShape["stream"],
     generate: () => Effect.die("unused"),
@@ -618,10 +616,12 @@ describe("SessionRunnerLLM", () => {
       requests.length = 0
       responses = undefined
       streamGate = undefined
-      streamStarted = undefined
+      streamStarted = yield* Deferred.make<void>()
       response = []
 
       const message = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Run automatically" }) })
+      yield* Deferred.await(streamStarted)
+      streamStarted = undefined
 
       expect(requests).toHaveLength(1)
       expect(yield* session.messages({ sessionID })).toMatchObject([
@@ -680,7 +680,10 @@ describe("SessionRunnerLLM", () => {
       ).toBeUndefined()
 
       systemUnavailable = false
+      streamStarted = yield* Deferred.make<void>()
       yield* session.prompt({ id: messageID, sessionID, prompt: Prompt.make({ text: "First" }) })
+      yield* Deferred.await(streamStarted)
+      streamStarted = undefined
 
       expect(requests).toHaveLength(1)
       expect(requests[0]?.messages.map((message) => message.role)).toEqual(["user"])
@@ -2176,19 +2179,22 @@ describe("SessionRunnerLLM", () => {
       responses = undefined
       response = []
       streamFailure = providerUnavailable()
-      streamGate = yield* Deferred.make<void>()
+      const firstGate = yield* Deferred.make<void>()
+      streamGate = firstGate
       streamStarted = yield* Deferred.make<void>()
 
       const first = yield* session.resume(sessionID).pipe(Effect.forkChild)
       yield* Deferred.await(streamStarted)
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Recover with this" }) })
-      yield* Deferred.succeed(streamGate, undefined)
-      expect(yield* Fiber.join(first).pipe(Effect.flip)).toBe(streamFailure)
-
+      const successorStarted = yield* Deferred.make<void>()
+      streamStarted = successorStarted
+      const failure = streamFailure
       streamFailure = undefined
       streamGate = undefined
+      yield* Deferred.succeed(firstGate, undefined)
+      expect(yield* Fiber.join(first).pipe(Effect.flip)).toBe(failure)
+      yield* Deferred.await(successorStarted)
       streamStarted = undefined
-      yield* Effect.yieldNow
 
       expect(requests).toHaveLength(2)
       expect(userTexts(requests[1]!)).toEqual(["Start working", "Recover with this"])
@@ -2438,8 +2444,10 @@ describe("SessionRunnerLLM", () => {
 
       const first = yield* session.resume(sessionID).pipe(Effect.forkChild)
       yield* Deferred.await(streamStarted)
+      const secondStarted = yield* Deferred.make<void>()
+      streamStarted = secondStarted
       const second = yield* session.resume(otherSessionID).pipe(Effect.forkChild)
-      yield* Effect.yieldNow
+      yield* Deferred.await(secondStarted)
 
       expect(requests).toHaveLength(2)
       expect(requests.map((request) => request.providerOptions?.openai?.promptCacheKey)).toEqual([

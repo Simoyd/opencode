@@ -19,6 +19,7 @@ import { registerAdapter } from "../../src/control-plane/adapters"
 import type { WorkspaceAdapter } from "../../src/control-plane/types"
 import { Workspace } from "../../src/control-plane/workspace"
 import { InstanceRef, WorkspaceRef } from "../../src/effect/instance-ref"
+import { InstanceStore } from "../../src/project/instance-store"
 import { Project } from "../../src/project/project"
 import { Session } from "../../src/session/session"
 import {
@@ -31,25 +32,20 @@ import {
   workspaceRoutingLayer,
 } from "../../src/server/routes/instance/httpapi/middleware/workspace-routing"
 import { resetDatabase } from "../fixture/db"
-import { disposeAllInstances, tmpdirScoped } from "../fixture/fixture"
+import { tmpdirScoped } from "../fixture/fixture"
 import { workspaceLayerWithRuntimeFlags } from "../fixture/workspace"
 import { testEffect } from "../lib/effect"
 
+const workspaceLayer = workspaceLayerWithRuntimeFlags({ experimentalWorkspaces: true })
 const testStateLayer = Layer.effectDiscard(
   Effect.gen(function* () {
+    const store = yield* InstanceStore.Service
     yield* Effect.promise(() => resetDatabase())
-    yield* Effect.addFinalizer(() =>
-      Effect.promise(async () => {
-        await disposeAllInstances()
-        await resetDatabase()
-      }),
-    )
+    yield* Effect.addFinalizer(() => store.disposeAll().pipe(Effect.andThen(Effect.promise(() => resetDatabase()))))
   }),
-)
+).pipe(Layer.provideMerge(workspaceLayer))
 
-const workspaceLayer = workspaceLayerWithRuntimeFlags({ experimentalWorkspaces: true })
-
-const it = testEffect(Layer.mergeAll(testStateLayer, NodeHttpServer.layerTest, NodeServices.layer, workspaceLayer))
+const it = testEffect(Layer.mergeAll(testStateLayer, NodeHttpServer.layerTest, NodeServices.layer))
 
 const instanceContextTestLayer = Layer.mergeAll(
   instanceContextLayer,
