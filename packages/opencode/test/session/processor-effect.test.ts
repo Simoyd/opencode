@@ -4,7 +4,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
 import { tool } from "ai"
-import { Cause, Deferred, Effect, Exit, Fiber, Layer, Stream } from "effect"
+import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Scope, Stream } from "effect"
 import path from "path"
 import z from "zod"
 import type { Agent } from "../../src/agent/agent"
@@ -18,7 +18,7 @@ import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
+import { provideTmpdirInstance, provideTmpdirServer, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { raw, reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -194,6 +194,82 @@ const nativeEnv = LayerNode.compile(
 )
 const itNative = testEffect(nativeEnv)
 
+interface ProcessorSessionHarnessInterface {
+  readonly parts: Map<string, SessionV1.ToolPart>
+  readonly creationEntered: Deferred.Deferred<void>
+  readonly releaseCreation: Deferred.Deferred<void>
+  creationAttempts: number
+  creationMode: "normal" | "fail-before-commit" | "block-after-commit"
+}
+
+class ProcessorSessionHarness extends Context.Service<ProcessorSessionHarness, ProcessorSessionHarnessInterface>()(
+  "@opencode/test/ProcessorSessionHarness",
+) {}
+
+const isToolPart = (part: SessionV1.Part): part is SessionV1.ToolPart => part.type === "tool"
+
+const processorSessionHarnessLayer = Layer.effect(
+  ProcessorSessionHarness,
+  Effect.gen(function* () {
+    return ProcessorSessionHarness.of({
+      parts: new Map(),
+      creationEntered: yield* Deferred.make<void>(),
+      releaseCreation: yield* Deferred.make<void>(),
+      creationAttempts: 0,
+      creationMode: "normal",
+    })
+  }),
+)
+
+const processorSessionLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const harness = yield* ProcessorSessionHarness
+    return Layer.mock(Session.Service, {
+      updateMessage: <T extends SessionV1.Info>(message: T) => Effect.succeed(message),
+      updatePart: <T extends SessionV1.Part>(part: T) =>
+        Effect.gen(function* () {
+          if (!isToolPart(part)) return part
+          const creation = part.state.status === "pending" && !harness.parts.has(part.id)
+          if (creation) {
+            harness.creationAttempts++
+            if (harness.creationMode === "fail-before-commit") {
+              harness.creationMode = "normal"
+              yield* Deferred.succeed(harness.creationEntered, undefined)
+              yield* Deferred.await(harness.releaseCreation)
+              return yield* Effect.die(new Error("simulated creation failure"))
+            }
+            harness.parts.set(part.id, structuredClone(part))
+            if (harness.creationMode === "block-after-commit") {
+              harness.creationMode = "normal"
+              yield* Deferred.succeed(harness.creationEntered, undefined)
+              yield* Deferred.await(harness.releaseCreation)
+            }
+            return part
+          }
+          harness.parts.set(part.id, structuredClone(part))
+          return part
+        }),
+      getPart: (input: { partID: PartID }) => Effect.succeed(harness.parts.get(input.partID)),
+    })
+  }),
+)
+
+const processorSessionHarnessNode = LayerNode.make({
+  service: ProcessorSessionHarness,
+  layer: processorSessionHarnessLayer,
+  deps: [],
+})
+const processorSessionNode = LayerNode.make({
+  service: Session.Service,
+  layer: processorSessionLayer,
+  deps: [processorSessionHarnessNode],
+})
+const processorHarnessEnv = LayerNode.compile(
+  LayerNode.group([SessionProcessor.node, Provider.node, processorSessionHarnessNode]),
+  [...replacements, [Session.node, processorSessionNode]],
+)
+const itProcessorHarness = testEffect(processorHarnessEnv)
+
 const startsProviderBeforeBusyObserversFinish = (dir: string) =>
   Effect.gen(function* () {
     const llm = yield* TestLLMServer
@@ -272,6 +348,35 @@ const providerErrorLLM = Layer.succeed(
 const providerErrorEnv = LayerNode.compile(root, [...replacements, [LLM.node, providerErrorLLM]])
 const itProviderError = testEffect(providerErrorEnv)
 
+const providerFactsLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: () =>
+      Stream.make(
+        LLMEvent.toolInputDelta({ id: "facts-call", name: "unknown", text: '{"query":' }),
+        LLMEvent.toolInputEnd({ id: "facts-call", name: "unknown" }),
+        LLMEvent.toolCall({
+          id: "facts-call",
+          name: "lookup",
+          input: { query: "weather" },
+          providerExecuted: true,
+        }),
+        LLMEvent.toolResult({
+          id: "facts-call",
+          name: "lookup",
+          result: {
+            type: "json",
+            value: { title: "Weather", metadata: { terminal: true }, output: "sunny" },
+          },
+          providerExecuted: true,
+        }),
+        LLMEvent.finish({ reason: "stop" }),
+      ),
+  }),
+)
+const providerFactsEnv = LayerNode.compile(root, [...replacements, [LLM.node, providerFactsLLM]])
+const itProviderFacts = testEffect(providerFactsEnv)
+
 const fragmentFailureLLM = Layer.succeed(
   LLM.Service,
   LLM.Service.of({
@@ -294,6 +399,37 @@ const boot = Effect.fn("test.boot")(function* () {
   const session = yield* Session.Service
   const provider = yield* Provider.Service
   return { processors, session, provider }
+})
+
+const processorHarness = Effect.fn("test.processorHarness")(function* (dir: string) {
+  const processors = yield* SessionProcessor.Service
+  const provider = yield* Provider.Service
+  const sessionID = SessionID.descending()
+  const message: SessionV1.Assistant = {
+    id: MessageID.ascending(),
+    role: "assistant",
+    sessionID,
+    mode: "build",
+    agent: "build",
+    path: { cwd: path.resolve(dir), root: path.resolve(dir) },
+    cost: 0,
+    tokens: {
+      total: 0,
+      input: 0,
+      output: 0,
+      reasoning: 0,
+      cache: { read: 0, write: 0 },
+    },
+    modelID: ref.modelID,
+    providerID: ref.providerID,
+    parentID: MessageID.ascending(),
+    time: { created: Date.now() },
+    finish: "end_turn",
+  }
+  const model = yield* provider.getModel(ref.providerID, ref.modelID)
+  const handle = yield* processors.create({ assistantMessage: message, sessionID, model })
+  const harness = yield* ProcessorSessionHarness
+  return { handle, harness }
 })
 
 // ---------------------------------------------------------------------------
@@ -421,7 +557,9 @@ it.live("session.processor effect tests preserve text start time", () =>
         gate.resolve()
 
         const exit = yield* Fiber.await(run)
-        const text = (yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id })).find((part): part is SessionV1.TextPart => part.type === "text")
+        const text = (yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id })).find(
+          (part): part is SessionV1.TextPart => part.type === "text",
+        )
 
         expect(Exit.isSuccess(exit)).toBe(true)
         expect(text?.text).toBe("hello")
@@ -841,6 +979,285 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
   ),
 )
 
+it.live("session.processor coalesces concurrent registration for the same tool call", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const database = yield* Database.Service
+        const { processors, session, provider } = yield* boot()
+        const events = yield* EventV2Bridge.Service
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "same tool call")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const scope = yield* Scope.Scope
+        const secondExit = yield* Deferred.make<Exit.Exit<SessionV1.ToolPart>>()
+        let creations = 0
+        const off = yield* events.listen((event) => {
+          if (event.type !== SessionV1.Event.PartUpdated.type) return Effect.void
+          const data = event.data as typeof SessionV1.Event.PartUpdated.data.Type
+          if (
+            data.part.type !== "tool" ||
+            data.part.messageID !== msg.id ||
+            data.part.callID !== "shared-call" ||
+            data.part.state.status !== "pending"
+          ) {
+            return Effect.void
+          }
+          creations++
+          if (creations !== 1) return Effect.void
+          return handle.registerToolCall({ toolCallID: "shared-call", toolName: "lookup" }).pipe(
+            Effect.exit,
+            Effect.flatMap((exit) => Deferred.succeed(secondExit, exit)),
+            Effect.forkIn(scope, { startImmediately: true }),
+            Effect.asVoid,
+          )
+        })
+
+        const first = yield* handle.registerToolCall({ toolCallID: "shared-call", toolName: "lookup" })
+        const second = yield* Deferred.await(secondExit)
+        const calls = (yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id }).pipe(
+          Effect.provideService(Database.Service, database),
+        )).filter((part): part is SessionV1.ToolPart => part.type === "tool" && part.callID === "shared-call")
+        expect(calls).toHaveLength(1)
+        expect(Exit.isSuccess(second)).toBe(true)
+        if (Exit.isSuccess(second)) expect(second.value.id).toBe(first.id)
+        expect(creations).toBe(1)
+        yield* off
+      }),
+    { config: cfg },
+  ),
+)
+
+it.live("session.processor keeps concurrent registration for different tool calls independent", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const database = yield* Database.Service
+        const { processors, session, provider } = yield* boot()
+        const events = yield* EventV2Bridge.Service
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "different tool calls")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const scope = yield* Scope.Scope
+        const secondExit = yield* Deferred.make<Exit.Exit<SessionV1.ToolPart>>()
+        const creations: string[] = []
+        const off = yield* events.listen((event) => {
+          if (event.type !== SessionV1.Event.PartUpdated.type) return Effect.void
+          const data = event.data as typeof SessionV1.Event.PartUpdated.data.Type
+          if (
+            data.part.type !== "tool" ||
+            data.part.messageID !== msg.id ||
+            !["call-a", "call-b"].includes(data.part.callID) ||
+            data.part.state.status !== "pending"
+          ) {
+            return Effect.void
+          }
+          creations.push(data.part.callID)
+          if (data.part.callID !== "call-a") return Effect.void
+          return handle.registerToolCall({ toolCallID: "call-b", toolName: "lookup" }).pipe(
+            Effect.exit,
+            Effect.flatMap((exit) => Deferred.succeed(secondExit, exit)),
+            Effect.forkIn(scope, { startImmediately: true }),
+            Effect.asVoid,
+          )
+        })
+
+        const first = yield* handle.registerToolCall({ toolCallID: "call-a", toolName: "lookup" })
+        const second = yield* Deferred.await(secondExit)
+        const calls = (yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id }).pipe(
+          Effect.provideService(Database.Service, database),
+        )).filter(
+          (part): part is SessionV1.ToolPart => part.type === "tool" && ["call-a", "call-b"].includes(part.callID),
+        )
+        expect(calls).toHaveLength(2)
+        expect(Exit.isSuccess(second)).toBe(true)
+        if (Exit.isSuccess(second)) expect(second.value.id).not.toBe(first.id)
+        expect(creations).toEqual(["call-a", "call-b"])
+        yield* off
+      }),
+    { config: cfg },
+  ),
+)
+
+itProcessorHarness.instance(
+  "session.processor shares creation failure and permits a later registration attempt",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { handle, harness } = yield* processorHarness(test.directory)
+      const scope = yield* Scope.Scope
+      const secondExit = yield* Deferred.make<Exit.Exit<SessionV1.ToolPart>>()
+      harness.creationMode = "fail-before-commit"
+
+      const first = yield* handle
+        .registerToolCall({ toolCallID: "retry-call", toolName: "lookup" })
+        .pipe(Effect.exit, Effect.forkIn(scope, { startImmediately: true }))
+      yield* Deferred.await(harness.creationEntered)
+      yield* handle.registerToolCall({ toolCallID: "retry-call", toolName: "lookup" }).pipe(
+        Effect.exit,
+        Effect.flatMap((exit) => Deferred.succeed(secondExit, exit)),
+        Effect.forkIn(scope, { startImmediately: true }),
+      )
+      yield* Deferred.succeed(harness.releaseCreation, undefined)
+
+      const firstResult = yield* Fiber.join(first)
+      const secondResult = yield* Deferred.await(secondExit)
+      expect(Exit.isFailure(firstResult)).toBe(true)
+      expect(Exit.isFailure(secondResult)).toBe(true)
+      expect(harness.creationAttempts).toBe(1)
+      expect(harness.parts.size).toBe(0)
+
+      const retry = yield* handle.registerToolCall({ toolCallID: "retry-call", toolName: "lookup" })
+      expect(retry.callID).toBe("retry-call")
+      expect(harness.creationAttempts).toBe(2)
+      expect(harness.parts.size).toBe(1)
+    }),
+  { config: cfg },
+)
+
+itProcessorHarness.instance(
+  "session.processor retains post-commit ownership when the creator is interrupted",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { handle, harness } = yield* processorHarness(test.directory)
+      const scope = yield* Scope.Scope
+      const joined = yield* Deferred.make<Exit.Exit<SessionV1.ToolPart>>()
+      harness.creationMode = "block-after-commit"
+
+      const creator = yield* handle
+        .registerToolCall({ toolCallID: "committed-call", toolName: "lookup" })
+        .pipe(Effect.forkIn(scope, { startImmediately: true }))
+      yield* Deferred.await(harness.creationEntered)
+      yield* handle.registerToolCall({ toolCallID: "committed-call", toolName: "lookup" }).pipe(
+        Effect.exit,
+        Effect.flatMap((exit) => Deferred.succeed(joined, exit)),
+        Effect.forkIn(scope, { startImmediately: true }),
+      )
+      const interrupted = yield* Fiber.interrupt(creator).pipe(Effect.forkIn(scope, { startImmediately: true }))
+      yield* Deferred.succeed(harness.releaseCreation, undefined)
+
+      yield* Fiber.join(interrupted)
+      const joinedResult = yield* Deferred.await(joined)
+      expect(Exit.isSuccess(joinedResult)).toBe(true)
+      expect(harness.creationAttempts).toBe(1)
+      expect(harness.parts.size).toBe(1)
+      const later = yield* handle.registerToolCall({ toolCallID: "committed-call", toolName: "lookup" })
+      if (Exit.isSuccess(joinedResult)) expect(later.id).toBe(joinedResult.value.id)
+    }),
+  { config: cfg },
+)
+
+itProcessorHarness.instance(
+  "session.processor lets a waiting registrant cancel without poisoning the tool call",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { handle, harness } = yield* processorHarness(test.directory)
+      const scope = yield* Scope.Scope
+      const waiterStarted = yield* Deferred.make<void>()
+      harness.creationMode = "block-after-commit"
+
+      const creator = yield* handle
+        .registerToolCall({ toolCallID: "cancelled-waiter", toolName: "lookup" })
+        .pipe(Effect.forkIn(scope, { startImmediately: true }))
+      yield* Deferred.await(harness.creationEntered)
+      const waiter = yield* Deferred.succeed(waiterStarted, undefined).pipe(
+        Effect.andThen(handle.registerToolCall({ toolCallID: "cancelled-waiter", toolName: "lookup" })),
+        Effect.forkIn(scope, { startImmediately: true }),
+      )
+      yield* Deferred.await(waiterStarted)
+      const cancelled = yield* Fiber.interrupt(waiter).pipe(Effect.forkIn(scope, { startImmediately: true }))
+      yield* Deferred.succeed(harness.releaseCreation, undefined)
+      yield* Fiber.join(cancelled)
+      const waiterExit = yield* Fiber.await(waiter)
+      expect(Exit.isFailure(waiterExit)).toBe(true)
+      if (Exit.isFailure(waiterExit)) expect(Cause.hasInterruptsOnly(waiterExit.cause)).toBe(true)
+
+      const created = yield* Fiber.join(creator)
+      const later = yield* handle.registerToolCall({ toolCallID: "cancelled-waiter", toolName: "lookup" })
+      expect(later.id).toBe(created.id)
+      expect(harness.creationAttempts).toBe(1)
+      expect(harness.parts.size).toBe(1)
+    }),
+  { config: cfg },
+)
+
+itProcessorHarness.instance(
+  "session.processor releases the per-call gate after callback defects and rejects conflicting names",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { handle, harness } = yield* processorHarness(test.directory)
+      const created = yield* handle.registerToolCall({ toolCallID: "facts-call", toolName: "lookup" })
+
+      const defect = yield* handle
+        .updateToolCall("facts-call", () => {
+          throw new Error("simulated callback defect")
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(defect)).toBe(true)
+
+      const running = yield* handle.updateToolCall("facts-call", (part) => ({
+        ...part,
+        state: {
+          status: "running",
+          input: { query: "weather" },
+          title: "Working",
+          metadata: { progress: 1 },
+          time: { start: Date.now() },
+        },
+      }))
+      expect(running?.id).toBe(created.id)
+
+      const conflict = yield* handle
+        .registerToolCall({ toolCallID: "facts-call", toolName: "other-tool" })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(conflict)).toBe(true)
+      expect(harness.creationAttempts).toBe(1)
+      expect(harness.parts.size).toBe(1)
+
+      yield* handle.completeToolCall("facts-call", {
+        title: "Done",
+        metadata: { terminal: true },
+        output: "sunny",
+      })
+      const terminal = harness.parts.get(created.id)
+      expect(terminal?.state.status).toBe("completed")
+      if (terminal?.state.status === "completed") {
+        expect(terminal.state.input).toEqual({ query: "weather" })
+        expect(terminal.state.metadata).toEqual({ progress: 1, terminal: true })
+        expect(terminal.state.title).toBe("Done")
+      }
+      expect(yield* handle.updateToolCall("facts-call", (part) => part)).toBeUndefined()
+    }),
+  { config: cfg },
+)
+
+itProcessorHarness.instance(
+  "session.processor fails closed when the durable tool part disappears",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { handle, harness } = yield* processorHarness(test.directory)
+      const created = yield* handle.registerToolCall({ toolCallID: "missing-call", toolName: "lookup" })
+      harness.parts.delete(created.id)
+
+      expect(yield* handle.updateToolCall("missing-call", (part) => part)).toBeUndefined()
+      const registration = yield* handle
+        .registerToolCall({ toolCallID: "missing-call", toolName: "lookup" })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(registration)).toBe(true)
+      expect(harness.creationAttempts).toBe(1)
+      expect(harness.parts.size).toBe(0)
+    }),
+  { config: cfg },
+)
+
 it.live("session.processor effect tests mark pending tools as aborted on cleanup", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
@@ -1079,10 +1496,58 @@ itProviderError.live("session.processor effect tests fail provider-executed erro
         const parts = yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id })
         const call = parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
         expect(call?.state.status).toBe("error")
+        expect(call?.metadata?.providerExecuted).toBe(true)
         if (call?.state.status === "error") expect(call.state.error).toBe("provider boom")
         expect(seen).toContain(MessageV2.Event.PartUpdated.type)
         expect(seen).toContain(MessageV2.Event.Updated.type)
         expect(seen.filter((type) => type.startsWith("session.next."))).toEqual([])
+      }),
+    { config: cfg },
+  ),
+)
+
+itProviderFacts.live("session.processor reconciles provisional names and provider-executed terminal facts", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "provider facts")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+        expect(
+          yield* handle.process({
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies SessionV1.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "provider facts" }],
+            tools: {},
+          }),
+        ).toBe("continue")
+
+        const calls = (yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id })).filter(
+          (part): part is SessionV1.ToolPart => part.type === "tool" && part.callID === "facts-call",
+        )
+        expect(calls).toHaveLength(1)
+        expect(calls[0]?.tool).toBe("lookup")
+        expect(calls[0]?.metadata?.providerExecuted).toBe(true)
+        expect(calls[0]?.state.status).toBe("completed")
+        if (calls[0]?.state.status === "completed") {
+          expect(calls[0].state.input).toEqual({ query: "weather" })
+          expect(calls[0].state.output).toBe("sunny")
+          expect(calls[0].state.metadata).toEqual({ terminal: true })
+        }
       }),
     { config: cfg },
   ),
