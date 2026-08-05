@@ -26,6 +26,10 @@ export interface TaskPromptOps {
     admission?: (message: SessionV1.WithParts) => Effect.Effect<boolean>,
   ): Effect.Effect<SessionV1.WithParts>
   promptAdmitted(input: SessionPrompt.PromptInput): Effect.Effect<SessionV1.WithParts>
+  admitToolCall(
+    input: { sessionID: SessionID; messageID: MessageID; toolCallID: string },
+    admit: (part: SessionV1.ToolPart) => Effect.Effect<SessionV1.ToolPart>,
+  ): Effect.Effect<SessionV1.ToolPart | undefined>
 }
 
 const id = "task"
@@ -242,21 +246,7 @@ export const TaskTool = Tool.define(
         const parts = yield* ops.resolvePromptParts(params.prompt)
         const publishTaskOrigin = Effect.fnUntraced(function* (childPrompt: SessionV1.WithParts) {
           const admittedMetadata = { ...metadata, childTurnMessageId: childTurnMessageID }
-          const admittedParentMessage = yield* MessageV2.get({
-            sessionID: ctx.sessionID,
-            messageID: sourceMessageID,
-          }).pipe(Effect.provideService(Database.Service, database), Effect.orDie)
           const admittedSession = freshSession ? nextSession : yield* sessions.get(nextSession.id).pipe(Effect.orDie)
-          const parentTaskParts = admittedParentMessage.parts.filter(
-            (part): part is SessionV1.ToolPart =>
-              part.type === "tool" && part.tool === id && part.callID === toolCallID,
-          )
-          if (parentTaskParts.length !== 1) {
-            return yield* Effect.die(
-              new Error(`Task provenance requires one exact parent tool part for ${toolCallID}`),
-            )
-          }
-          const parentTaskPart = parentTaskParts[0]!
           const time = Date.now()
           const childSession = {
             ...admittedSession,
@@ -273,32 +263,44 @@ export const TaskTool = Tool.define(
             }),
             time: { ...admittedSession.time, updated: time },
           }
-          const parentPart = {
-            ...parentTaskPart,
-            state: parentTaskPart.state.status === "pending"
-              ? {
-                  status: "running" as const,
-                  input: parentTaskPart.state.input,
-                  title: params.description,
-                  metadata: admittedMetadata,
-                  time: { start: time },
-                }
-              : {
-                  ...parentTaskPart.state,
-                  ...(parentTaskPart.state.status === "error" ? {} : { title: params.description }),
-                  metadata: { ...parentTaskPart.state.metadata, ...admittedMetadata },
-                },
-          } satisfies SessionV1.ToolPart
-          yield* events.publishTaskAdmission({
-            session: freshSession
-              ? { kind: "created", info: childSession }
-              : { kind: "updated", info: childSession },
-            parentPart,
-            childPrompt,
-            time,
-          })
+          const admitted = yield* ops.admitToolCall(
+            { sessionID: ctx.sessionID, messageID: sourceMessageID, toolCallID },
+            (parentTaskPart) =>
+              Effect.gen(function* () {
+                const parentPart = {
+                  ...parentTaskPart,
+                  state:
+                    parentTaskPart.state.status === "pending"
+                      ? {
+                          status: "running" as const,
+                          input: params,
+                          title: params.description,
+                          metadata: admittedMetadata,
+                          time: { start: time },
+                        }
+                      : {
+                          ...parentTaskPart.state,
+                          ...(parentTaskPart.state.status === "error" ? {} : { title: params.description }),
+                          metadata: { ...parentTaskPart.state.metadata, ...admittedMetadata },
+                        },
+                } satisfies SessionV1.ToolPart
+                yield* events.publishTaskAdmission({
+                  session: freshSession
+                    ? { kind: "created", info: childSession }
+                    : { kind: "updated", info: childSession },
+                  parentPart,
+                  childPrompt,
+                  time,
+                })
+                return parentPart
+              }),
+          )
+          if (!admitted) {
+            return yield* Effect.die(
+              new Error(`Task provenance requires one exact parent tool part for ${toolCallID}`),
+            )
+          }
           Object.assign(metadata, admittedMetadata)
-          yield* ctx.metadata({ title: params.description, metadata: admittedMetadata })
           return true
         })
         const result = yield* ops.prompt(

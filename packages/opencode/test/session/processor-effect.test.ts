@@ -1239,6 +1239,57 @@ itProcessorHarness.instance(
 )
 
 itProcessorHarness.instance(
+  "session.processor keeps Task admission under the per-call gate and adopts its persisted part",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { handle, harness } = yield* processorHarness(test.directory)
+      const created = yield* handle.registerToolCall({ toolCallID: "admission-call", toolName: "task" })
+
+      const defect = yield* handle
+        .admitToolCall("admission-call", () => Effect.die(new Error("simulated admission failure")))
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(defect)).toBe(true)
+
+      const replacement = yield* handle.admitToolCall("admission-call", (part) =>
+        Effect.sync(() => {
+          const admitted = {
+            ...part,
+            id: PartID.ascending(),
+            state: {
+              status: "running" as const,
+              input: { prompt: "inspect" },
+              title: "Inspect",
+              metadata: { childTurnMessageId: "msg_child" },
+              time: { start: Date.now() },
+            },
+          }
+          harness.parts.delete(part.id)
+          harness.parts.set(admitted.id, structuredClone(admitted))
+          return admitted
+        }),
+      )
+      expect(replacement?.id).not.toBe(created.id)
+
+      const updated = yield* handle.updateToolCall("admission-call", (part) => ({
+        ...part,
+        state:
+          part.state.status === "running"
+            ? { ...part.state, metadata: { ...part.state.metadata, progress: 1 } }
+            : part.state,
+      }))
+      expect(updated?.id).toBe(replacement?.id)
+      expect(harness.parts.has(created.id)).toBe(false)
+      expect(updated?.state).toMatchObject({
+        status: "running",
+        title: "Inspect",
+        metadata: { childTurnMessageId: "msg_child", progress: 1 },
+      })
+    }),
+  { config: cfg },
+)
+
+itProcessorHarness.instance(
   "session.processor fails closed when the durable tool part disappears",
   () =>
     Effect.gen(function* () {

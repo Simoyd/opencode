@@ -157,7 +157,9 @@ const layer = Layer.effect(
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
     const { db } = database
-    const ops = Effect.fn("SessionPrompt.ops")(function* () {
+    const ops = Effect.fn("SessionPrompt.ops")(function* (
+      handle: Pick<SessionProcessor.Handle, "message" | "admitToolCall">,
+    ) {
       return {
         cancel: (sessionID: SessionID) => cancel(sessionID),
         resolvePromptParts: (template: string) => resolvePromptParts(template),
@@ -167,6 +169,12 @@ const layer = Layer.effect(
           admission?: (message: SessionV1.WithParts) => Effect.Effect<boolean>,
         ) => prompt(input, "programmatic", admission, preparedSession).pipe(Effect.catch(Effect.die)),
         promptAdmitted: (input: PromptInput) => promptAdmitted(input).pipe(Effect.catch(Effect.die)),
+        admitToolCall: (input, admit) => {
+          if (input.sessionID !== handle.message.sessionID || input.messageID !== handle.message.id) {
+            return Effect.succeed(undefined)
+          }
+          return handle.admitToolCall(input.toolCallID, admit)
+        },
       } satisfies TaskPromptOps
     })
 
@@ -283,7 +291,6 @@ const layer = Layer.effect(
     }) {
       const { task, model, lastUser, sessionID, session, msgs } = input
       const ctx = yield* InstanceState.context
-      const promptOps = yield* ops()
       const { task: taskTool } = yield* registry.named()
       const taskModel = task.model ? yield* getModel(task.model.providerID, task.model.modelID, sessionID) : model
       const assistantMessage: SessionV1.Assistant = yield* sessions.updateMessage({
@@ -317,6 +324,13 @@ const layer = Layer.effect(
             command: task.command,
           },
           time: { start: Date.now() },
+        },
+      })
+      const promptOps = yield* ops({
+        message: assistantMessage,
+        admitToolCall: (toolCallID, admit) => {
+          if (toolCallID !== part.callID) return Effect.succeed(undefined)
+          return admit(part).pipe(Effect.tap((admitted) => Effect.sync(() => (part = admitted))))
         },
       })
       const taskArgs = {
@@ -1278,7 +1292,7 @@ const layer = Layer.effect(
           const outcome: "break" | "continue" = yield* Effect.gen(function* () {
             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
             const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
-            const promptOps = yield* ops()
+            const promptOps = yield* ops(handle)
 
             const tools = yield* SessionTools.resolve({
               agent,

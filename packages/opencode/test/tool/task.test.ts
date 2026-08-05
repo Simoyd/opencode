@@ -68,7 +68,10 @@ function defer<T>() {
   return { promise, resolve }
 }
 
-const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned", taskState: "completed" | "pending" = "completed") {
+const seed = Effect.fn("TaskToolTest.seed")(function* (
+  title = "Pinned",
+  taskState: "completed" | "pending" = "completed",
+) {
   const session = yield* Session.Service
   const chat = yield* session.create({ title })
   const user = yield* session.updateMessage({
@@ -102,33 +105,51 @@ const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned", taskSta
     type: "tool",
     callID: taskCallID,
     tool: "task",
-    state: taskState === "pending"
-      ? { status: "pending", input: {}, raw: "{}" }
-      : {
-          status: "completed",
-          input: {},
-          output: "",
-          title,
-          metadata: {},
-          time: { start: Date.now(), end: Date.now() },
-        },
+    state:
+      taskState === "pending"
+        ? { status: "pending", input: {}, raw: "{}" }
+        : {
+            status: "completed",
+            input: {},
+            output: "",
+            title,
+            metadata: {},
+            time: { start: Date.now(), end: Date.now() },
+          },
   })
   return { chat, assistant }
 })
 
-function stubOps(opts?: { onPrompt?: (input: SessionPrompt.PromptInput) => void; text?: string }): TaskPromptOps {
+const stubOps = Effect.fn("TaskToolTest.stubOps")(function* (opts?: {
+  onPrompt?: (input: SessionPrompt.PromptInput) => void
+  text?: string
+}) {
+  const database = yield* Database.Service
   const run = (input: SessionPrompt.PromptInput) =>
     Effect.sync(() => {
       opts?.onPrompt?.(input)
       return reply(input, opts?.text ?? "done")
     })
+  const admitToolCall: TaskPromptOps["admitToolCall"] = (input, admit) =>
+    MessageV2.get({ sessionID: input.sessionID, messageID: input.messageID }).pipe(
+      Effect.provideService(Database.Service, database),
+      Effect.orDie,
+      Effect.flatMap((message) => {
+        const parts = message.parts.filter(
+          (item): item is SessionV1.ToolPart => item.type === "tool" && item.callID === input.toolCallID,
+        )
+        if (parts.length !== 1) return Effect.succeed(undefined)
+        return admit(parts[0])
+      }),
+    )
   return {
     cancel: () => Effect.void,
     resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
     prompt: (input, _preparedSession, admission) => admitThen(input, admission, run(input)),
     promptAdmitted: run,
-  }
-}
+    admitToolCall,
+  } satisfies TaskPromptOps
+})
 
 function admitThen(
   input: SessionPrompt.PromptInput,
@@ -154,14 +175,16 @@ function admittedPrompt(input: SessionPrompt.PromptInput): SessionV1.WithParts {
     },
     parts: input.parts.flatMap((part) =>
       part.type === "text"
-        ? [{
-            id: PartID.ascending(),
-            messageID: id,
-            sessionID: input.sessionID,
-            type: "text" as const,
-            text: part.text,
-            ...(part.synthetic === undefined ? {} : { synthetic: part.synthetic }),
-          }]
+        ? [
+            {
+              id: PartID.ascending(),
+              messageID: id,
+              sessionID: input.sessionID,
+              type: "text" as const,
+              text: part.text,
+              ...(part.synthetic === undefined ? {} : { synthetic: part.synthetic }),
+            },
+          ]
         : [],
     ),
   }
@@ -283,7 +306,7 @@ describe("tool.task", () => {
       const tool = yield* TaskTool
       const def = yield* tool.init()
       let seen: SessionPrompt.PromptInput | undefined
-      const promptOps = stubOps({ text: "resumed", onPrompt: (input) => (seen = input) })
+      const promptOps = yield* stubOps({ text: "resumed", onPrompt: (input) => (seen = input) })
 
       const result = yield* def.execute(
         {
@@ -321,7 +344,7 @@ describe("tool.task", () => {
       const tool = yield* TaskTool
       const def = yield* tool.init()
       const calls: unknown[] = []
-      const promptOps = stubOps()
+      const promptOps = yield* stubOps()
 
       const exec = (extra?: Record<string, any>) =>
         def.execute(
@@ -371,7 +394,7 @@ describe("tool.task", () => {
       const cancelled = defer<SessionID>()
       const abort = new AbortController()
       const promptOps: TaskPromptOps = {
-        ...stubOps(),
+        ...(yield* stubOps()),
         cancel: (sessionID) =>
           Effect.sync(() => {
             cancelled.resolve(sessionID)
@@ -425,7 +448,7 @@ describe("tool.task", () => {
       const tool = yield* TaskTool
       const def = yield* tool.init()
       let seen: SessionPrompt.PromptInput | undefined
-      const promptOps = stubOps({ text: "created", onPrompt: (input) => (seen = input) })
+      const promptOps = yield* stubOps({ text: "created", onPrompt: (input) => (seen = input) })
 
       const result = yield* def.execute(
         {
@@ -479,6 +502,12 @@ describe("tool.task", () => {
       ])
       expect(parentTask?.state.status).toBe("running")
       if (parentTask?.state.status !== "running") return yield* Effect.die("Parent Task part did not become running")
+      expect(parentTask.state.input).toEqual({
+        description: "inspect bug",
+        prompt: "look into the cache key path",
+        subagent_type: "general",
+        task_id: "ses_missing",
+      })
       expect(parentTask.state.metadata).toMatchObject({
         parentSessionId: chat.id,
         sessionId: child.id,
@@ -503,7 +532,7 @@ describe("tool.task", () => {
             callID: "",
             agent: "build",
             abort: new AbortController().signal,
-            extra: { promptOps: stubOps() },
+            extra: { promptOps: yield* stubOps() },
             messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
@@ -532,7 +561,7 @@ describe("tool.task", () => {
             callID: "call-mismatched",
             agent: "build",
             abort: new AbortController().signal,
-            extra: { promptOps: stubOps() },
+            extra: { promptOps: yield* stubOps() },
             messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
@@ -568,7 +597,7 @@ describe("tool.task", () => {
             callID: taskCallID,
             agent: "build",
             abort: new AbortController().signal,
-            extra: { promptOps: stubOps() },
+            extra: { promptOps: yield* stubOps() },
             messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
@@ -601,7 +630,7 @@ describe("tool.task", () => {
             callID: taskCallID,
             agent: "build",
             abort: new AbortController().signal,
-            extra: { promptOps: stubOps() },
+            extra: { promptOps: yield* stubOps() },
             messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
@@ -659,12 +688,12 @@ describe("tool.task", () => {
             subagent_type: "general",
           },
           {
-          sessionID: child.id,
-          messageID: nestedAssistant.id,
-          callID: taskCallID,
+            sessionID: child.id,
+            messageID: nestedAssistant.id,
+            callID: taskCallID,
             agent: "general",
             abort: new AbortController().signal,
-            extra: { promptOps: stubOps() },
+            extra: { promptOps: yield* stubOps() },
             messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.sync(() => (asked = true)),
@@ -722,7 +751,7 @@ describe("tool.task", () => {
             callID: taskCallID,
             agent: "general",
             abort: new AbortController().signal,
-            extra: { promptOps: stubOps() },
+            extra: { promptOps: yield* stubOps() },
             messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
@@ -743,7 +772,7 @@ describe("tool.task", () => {
         const tool = yield* TaskTool
         const def = yield* tool.init()
         let seen: SessionPrompt.PromptInput | undefined
-        const promptOps = stubOps({ onPrompt: (input) => (seen = input) })
+        const promptOps = yield* stubOps({ onPrompt: (input) => (seen = input) })
 
         const result = yield* def.execute(
           {
@@ -823,7 +852,7 @@ describe("tool.task", () => {
             callID: taskCallID,
             agent: "build",
             abort: new AbortController().signal,
-            extra: { promptOps: stubOps() },
+            extra: { promptOps: yield* stubOps() },
             messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
@@ -846,21 +875,22 @@ describe("tool.task", () => {
       const injected = yield* Deferred.make<SessionPrompt.PromptInput>()
       let runs = 0
       const runPrompt = (input: SessionPrompt.PromptInput) => {
-          if (input.sessionID === chat.id) {
-            return Deferred.succeed(injected, input).pipe(Effect.as(reply(input, "injected")))
-          }
-          return Effect.gen(function* () {
-            runs += 1
-            yield* Deferred.succeed(ready, undefined)
-            yield* Deferred.await(done)
-            return reply(input, "background done")
-          })
+        if (input.sessionID === chat.id) {
+          return Deferred.succeed(injected, input).pipe(Effect.as(reply(input, "injected")))
         }
+        return Effect.gen(function* () {
+          runs += 1
+          yield* Deferred.succeed(ready, undefined)
+          yield* Deferred.await(done)
+          return reply(input, "background done")
+        })
+      }
       const promptOps: TaskPromptOps = {
         cancel: () => Effect.void,
         resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
         prompt: (input, _preparedSession, admission) => admitThen(input, admission, runPrompt(input)),
         promptAdmitted: runPrompt,
+        admitToolCall: (yield* stubOps()).admitToolCall,
       }
 
       const fiber = yield* def
@@ -926,7 +956,7 @@ describe("tool.task", () => {
           abort: new AbortController().signal,
           extra: {
             promptOps: {
-              ...stubOps(),
+              ...(yield* stubOps()),
               prompt: (input, _preparedSession, admission) => admitThen(input, admission, Effect.never),
             } satisfies TaskPromptOps,
           },
@@ -955,17 +985,22 @@ describe("tool.task", () => {
       const injected = defer<SessionPrompt.PromptInput>()
       let prompts = 0
       const promptOps: TaskPromptOps = {
-        ...stubOps(),
-        prompt: (input, _preparedSession, admission) => admitThen(input, admission, Effect.suspend(() => {
-          if (input.sessionID === chat.id) {
-            injected.resolve(input)
-            return Effect.succeed(reply(input, "done"))
-          }
-          prompts++
-          if (prompts === 1) return Effect.promise(() => first.promise).pipe(Effect.as(reply(input, "first done")))
-          updated.resolve(input)
-          return Effect.promise(() => second.promise).pipe(Effect.as(reply(input, "second done")))
-        })),
+        ...(yield* stubOps()),
+        prompt: (input, _preparedSession, admission) =>
+          admitThen(
+            input,
+            admission,
+            Effect.suspend(() => {
+              if (input.sessionID === chat.id) {
+                injected.resolve(input)
+                return Effect.succeed(reply(input, "done"))
+              }
+              prompts++
+              if (prompts === 1) return Effect.promise(() => first.promise).pipe(Effect.as(reply(input, "first done")))
+              updated.resolve(input)
+              return Effect.promise(() => second.promise).pipe(Effect.as(reply(input, "second done")))
+            }),
+          ),
         promptAdmitted: (input) => {
           injected.resolve(input)
           return Effect.succeed(reply(input, "done"))
@@ -1042,7 +1077,7 @@ describe("tool.task", () => {
           callID: taskCallID,
           agent: "build",
           abort: new AbortController().signal,
-          extra: { promptOps: stubOps({ text: "background done" }) },
+          extra: { promptOps: yield* stubOps({ text: "background done" }) },
           messages: [],
           metadata: () => Effect.void,
           ask: () => Effect.void,
@@ -1080,7 +1115,7 @@ describe("tool.task", () => {
           abort: new AbortController().signal,
           extra: {
             promptOps: {
-              ...stubOps({ text: "background done" }),
+              ...(yield* stubOps({ text: "background done" })),
               prompt: (input, _preparedSession, admission) =>
                 admitThen(input, admission, Effect.succeed(reply(input, "background done"))),
               promptAdmitted: (input) =>
@@ -1127,7 +1162,7 @@ describe("tool.task", () => {
           abort: new AbortController().signal,
           extra: {
             promptOps: {
-              ...stubOps(),
+              ...(yield* stubOps()),
               prompt: (input, _preparedSession, admission) => admitThen(input, admission, Effect.never),
             } satisfies TaskPromptOps,
           },
@@ -1167,7 +1202,7 @@ describe("tool.task", () => {
           abort: new AbortController().signal,
           extra: {
             promptOps: {
-              ...stubOps(),
+              ...(yield* stubOps()),
               prompt: (input, _preparedSession, admission) => admitThen(input, admission, Effect.never),
             } satisfies TaskPromptOps,
           },
@@ -1207,7 +1242,7 @@ describe("tool.task", () => {
           abort: new AbortController().signal,
           extra: {
             promptOps: {
-              ...stubOps(),
+              ...(yield* stubOps()),
               prompt: (input, _preparedSession, admission) => admitThen(input, admission, Effect.never),
             } satisfies TaskPromptOps,
           },

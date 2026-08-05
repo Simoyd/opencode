@@ -36,6 +36,10 @@ export interface Handle {
     toolCallID: string,
     update: (part: SessionV1.ToolPart) => SessionV1.ToolPart,
   ) => Effect.Effect<SessionV1.ToolPart | undefined>
+  readonly admitToolCall: (
+    toolCallID: string,
+    admit: (part: SessionV1.ToolPart) => Effect.Effect<SessionV1.ToolPart>,
+  ) => Effect.Effect<SessionV1.ToolPart | undefined>
   readonly completeToolCall: (
     toolCallID: string,
     output: {
@@ -154,14 +158,17 @@ const layer = Layer.effect(
         return { slot, part }
       })
 
-      const persistToolCall = Effect.fnUntraced(function* (slot: ToolCallSlot, part: SessionV1.ToolPart) {
-        const persisted = yield* session.updatePart(part)
+      const ownToolCallPart = (slot: ToolCallSlot, part: SessionV1.ToolPart) => {
         slot.part = {
-          partID: persisted.id,
-          messageID: persisted.messageID,
-          sessionID: persisted.sessionID,
+          partID: part.id,
+          messageID: part.messageID,
+          sessionID: part.sessionID,
         }
-        return persisted
+        return part
+      }
+
+      const persistToolCall = Effect.fnUntraced(function* (slot: ToolCallSlot, part: SessionV1.ToolPart) {
+        return ownToolCallPart(slot, yield* session.updatePart(part))
       })
 
       const useToolCall = <A>(
@@ -194,6 +201,17 @@ const layer = Layer.effect(
         const slot = ctx.toolcalls[toolCallID]
         if (!slot) return undefined
         return yield* useToolCall(toolCallID, slot, false, (match) => persistToolCall(slot, update(match.part)))
+      })
+
+      const admitToolCall = Effect.fn("SessionProcessor.admitToolCall")(function* (
+        toolCallID: string,
+        admit: (part: SessionV1.ToolPart) => Effect.Effect<SessionV1.ToolPart>,
+      ) {
+        const slot = ctx.toolcalls[toolCallID]
+        if (!slot) return undefined
+        return yield* useToolCall(toolCallID, slot, false, (match) =>
+          admit(match.part).pipe(Effect.map((part) => ownToolCallPart(slot, part))),
+        )
       })
 
       const completeToolCall = Effect.fn("SessionProcessor.completeToolCall")(function* (
@@ -855,6 +873,7 @@ const layer = Layer.effect(
         },
         registerToolCall,
         updateToolCall,
+        admitToolCall,
         completeToolCall,
         process,
       } satisfies Handle

@@ -203,6 +203,7 @@ function fake(
       return msg
     },
     updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
+    admitToolCall: Effect.fn("TestSessionProcessor.admitToolCall")(() => Effect.succeed(undefined)),
     registerToolCall: Effect.fn("TestSessionProcessor.registerToolCall")(() =>
       Effect.die(new Error("unexpected registerToolCall in compaction fake")),
     ),
