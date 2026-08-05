@@ -141,6 +141,10 @@ function matchLegacyOpenApi(input: Record<string, unknown>) {
       for (const response of Object.values(operation.responses ?? {})) {
         for (const content of Object.values(response.content ?? {})) {
           if (content.schema) content.schema = stripOptionalNull(structuredClone(content.schema))
+          if (path === "/provider/runtime" && method === "get" && content.schema?.properties?.default) {
+            // This required field is genuinely nullable when no effective connected default exists.
+            content.schema.properties.default = nullable(content.schema.properties.default)
+          }
         }
       }
       if (!isV2Api) {

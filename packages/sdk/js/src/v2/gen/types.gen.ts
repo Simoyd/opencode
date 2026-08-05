@@ -2569,6 +2569,11 @@ export type PermissionNotFoundError = {
   message: string
 }
 
+export type RuntimeProviderDefault = {
+  providerID: string
+  modelID: string
+}
+
 export type ProviderAuthMethod = {
   type: "oauth" | "api"
   label: string
@@ -9500,7 +9505,7 @@ export type ProviderRuntimeListResponses = {
             reasoning: boolean
           }
           limit: {
-            context: number
+            context?: number
           }
           variants?: {
             [key: string]: null
@@ -9508,9 +9513,7 @@ export type ProviderRuntimeListResponses = {
         }
       }
     }>
-    default: {
-      [key: string]: string
-    }
+    default: RuntimeProviderDefault | null
     connected: Array<string>
   }
 }

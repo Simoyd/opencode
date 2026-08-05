@@ -262,12 +262,140 @@ const scenarios: Scenario[] = [
     }))
     .status(204, undefined, "status"),
   http.protected.get("/provider", "provider.list").json(),
-  http.protected.get("/provider/runtime", "provider.runtime").json(200, (body) => {
-    object(body)
-    array(body.all)
-    object(body.default)
-    array(body.connected)
-  }),
+  http.protected
+    .get("/provider/runtime", "provider.runtime")
+    .inProject({
+      git: false,
+      config: {
+        model: "runtime-catalog/no-context",
+        provider: {
+          "runtime-catalog": {
+            name: "Runtime Catalog",
+            npm: "@ai-sdk/openai-compatible",
+            env: [],
+            options: {
+              apiKey: "fixture-private-key",
+              baseURL: "https://fixture.invalid/v1",
+              headers: { "x-fixture-private": "fixture-private-header" },
+            },
+            models: {
+              "no-context": {
+                name: "No Context",
+                reasoning: true,
+                tool_call: true,
+                variants: { careful: {} },
+              },
+              "known-context": {
+                name: "Known Context",
+                tool_call: true,
+                limit: { context: 64_000, output: 4_096 },
+                cost: { input: 1, output: 2 },
+              },
+              deprecated: {
+                name: "Deprecated",
+                status: "deprecated",
+                tool_call: true,
+              },
+            },
+          },
+        },
+      },
+    })
+    .json(200, (body) => {
+      object(body)
+      array(body.all)
+      object(body.default)
+      array(body.connected)
+
+      const emittedProviderIDs = body.all.map((item) => {
+        object(item)
+        check(typeof item.id === "string", "runtime provider IDs should be strings")
+        return item.id
+      })
+      check(
+        stable([...body.connected].sort()) === stable(emittedProviderIDs.sort()),
+        "connected IDs should match emitted providers",
+      )
+      check(
+        stable(body.default) === stable({ providerID: "runtime-catalog", modelID: "no-context" }),
+        "runtime default should match Provider.defaultModel",
+      )
+
+      const provider = body.all.find((item) => isRecord(item) && item.id === "runtime-catalog")
+      object(provider)
+      object(provider.models)
+      check(
+        stable(Object.keys(provider.models).sort()) === stable(["known-context", "no-context"]),
+        "runtime provider route should retain active models and exclude deprecated models",
+      )
+      const noContext = provider.models["no-context"]
+      object(noContext)
+      object(noContext.limit)
+      check(!("context" in noContext.limit), "unknown context should be omitted without dropping the model")
+      object(noContext.variants)
+      check("careful" in noContext.variants, "variant IDs should remain available")
+
+      const knownContext = provider.models["known-context"]
+      object(knownContext)
+      object(knownContext.limit)
+      check(knownContext.limit.context === 64_000, "known positive context should remain exact")
+
+      const serialized = stable(body)
+      for (const privateField of [
+        "apiKey",
+        "auth",
+        "account",
+        "organization",
+        "options",
+        "headers",
+        "baseURL",
+        "cost",
+        "env",
+      ]) {
+        check(!serialized.includes(`\"${privateField}\"`), `runtime provider route should omit ${privateField}`)
+      }
+    }),
+  http.protected
+    .get("/provider/runtime", "provider.runtime.default-unavailable")
+    .inProject({
+      git: false,
+      config: {
+        model: "runtime-catalog/deprecated",
+        provider: {
+          "runtime-catalog": {
+            name: "Runtime Catalog",
+            npm: "@ai-sdk/openai-compatible",
+            env: [],
+            options: { apiKey: "fixture-private-key" },
+            models: {
+              active: { name: "Active", tool_call: true },
+              deprecated: { name: "Deprecated", status: "deprecated", tool_call: true },
+            },
+          },
+        },
+      },
+    })
+    .json(200, (body) => {
+      object(body)
+      check(body.default === null, "a default outside the emitted connected rows should normalize to null")
+      array(body.all)
+      const provider = body.all.find((item) => isRecord(item) && item.id === "runtime-catalog")
+      object(provider)
+      object(provider.models)
+      check("active" in provider.models, "active configured model should remain emitted")
+      check(!("deprecated" in provider.models), "deprecated configured model should remain excluded")
+    }),
+  http.protected
+    .get("/provider/runtime", "provider.runtime.empty")
+    .inProject({ git: false, config: { enabled_providers: [] } })
+    .json(200, (body) => {
+      object(body)
+      array(body.all)
+      array(body.connected)
+      check(body.all.length === 0, "zero connected providers should emit an empty provider array")
+      check(body.connected.length === 0, "zero connected providers should emit an empty connected array")
+      check(body.default === null, "zero connected providers should emit a null default")
+    }),
   http.protected.get("/provider/auth", "provider.auth").json(),
   http.protected
     .post("/provider/{providerID}/oauth/authorize", "provider.oauth.authorize")
