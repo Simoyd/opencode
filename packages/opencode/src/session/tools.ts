@@ -42,7 +42,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
   model: Provider.Model
   session: Session.Info
-  processor: Pick<SessionProcessor.Handle, "message" | "registerToolCall" | "updateToolCall" | "completeToolCall">
+  processor: Pick<SessionProcessor.Handle, "message" | "registerToolCall" | "updateToolCall">
   bypassAgentCheck: boolean
   messages: SessionV1.WithParts[]
   promptOps: TaskPromptOps
@@ -55,6 +55,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   const mcp = yield* MCP.Service
   const truncate = yield* Truncate.Service
   const flags = yield* RuntimeFlags.Service
+
+  const runTool = <A, E, R>(options: ToolExecutionOptions, effect: Effect.Effect<A, E, R>) =>
+    run.promiseWithAbort(effect, options.abortSignal)
 
   const context = (args: Record<string, unknown>, options: ToolExecutionOptions): Tool.Context => ({
     sessionID: input.session.id,
@@ -100,7 +103,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       description: item.description,
       inputSchema: jsonSchema(schema),
       execute(args, options) {
-        return run.promise(
+        return runTool(
+          options,
           Effect.gen(function* () {
             const ctx = context(args, options)
             yield* input.processor.registerToolCall({ toolCallID: options.toolCallId, toolName: item.id })
@@ -124,9 +128,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
               output,
             )
-            if (options.abortSignal?.aborted) {
-              yield* input.processor.completeToolCall(options.toolCallId, output)
-            }
+            if (options.abortSignal?.aborted) return yield* Effect.interrupt
             return output
           }),
         )
@@ -154,7 +156,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         }),
       ),
       execute(args, opts) {
-        return run.promise(
+        return runTool(
+          opts,
           Effect.gen(function* () {
             yield* input.processor.registerToolCall({
               toolCallID: opts.toolCallId,
@@ -215,9 +218,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               { tool: MCP_RESOURCE_TOOLS.list, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
               output,
             )
-            if (opts.abortSignal?.aborted) {
-              yield* input.processor.completeToolCall(opts.toolCallId, output)
-            }
+            if (opts.abortSignal?.aborted) return yield* Effect.interrupt
             return output
           }),
         )
@@ -241,7 +242,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         }),
       ),
       execute(args, opts) {
-        return run.promise(
+        return runTool(
+          opts,
           Effect.gen(function* () {
             yield* input.processor.registerToolCall({
               toolCallID: opts.toolCallId,
@@ -302,9 +304,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               { tool: MCP_RESOURCE_TOOLS.listTemplates, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
               output,
             )
-            if (opts.abortSignal?.aborted) {
-              yield* input.processor.completeToolCall(opts.toolCallId, output)
-            }
+            if (opts.abortSignal?.aborted) return yield* Effect.interrupt
             return output
           }),
         )
@@ -332,7 +332,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         }),
       ),
       execute(args, opts) {
-        return run.promise(
+        return runTool(
+          opts,
           Effect.gen(function* () {
             yield* input.processor.registerToolCall({
               toolCallID: opts.toolCallId,
@@ -388,9 +389,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               { tool: MCP_RESOURCE_TOOLS.read, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
               output,
             )
-            if (opts.abortSignal?.aborted) {
-              yield* input.processor.completeToolCall(opts.toolCallId, output)
-            }
+            if (opts.abortSignal?.aborted) return yield* Effect.interrupt
             return output
           }),
         )
@@ -409,7 +408,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     const transformed = ProviderTransform.schema(input.model, { ...schema, properties: schema.properties ?? {} })
     item.inputSchema = jsonSchema(transformed)
     item.execute = (args, opts) =>
-      run.promise(
+      runTool(
+        opts,
         Effect.gen(function* () {
           yield* input.processor.registerToolCall({ toolCallID: opts.toolCallId, toolName: key })
           const ctx = context(args, opts)
@@ -494,9 +494,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             })),
             content: result.content,
           }
-          if (opts.abortSignal?.aborted) {
-            yield* input.processor.completeToolCall(opts.toolCallId, output)
-          }
+          if (opts.abortSignal?.aborted) return yield* Effect.interrupt
           return output
         }),
       )

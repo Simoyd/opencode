@@ -6,6 +6,7 @@ import { attachWith } from "./run-service"
 
 export interface Shape {
   readonly promise: <A, E, R>(effect: Effect.Effect<A, E, R>) => Promise<A>
+  readonly promiseWithAbort: <A, E, R>(effect: Effect.Effect<A, E, R>, signal?: AbortSignal) => Promise<A>
   readonly fork: <A, E, R>(effect: Effect.Effect<A, E, R>) => Fiber.Fiber<A, E>
   readonly run: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E>
   readonly bind: <Args extends readonly unknown[], Result>(fn: (...args: Args) => Result) => (...args: Args) => Result
@@ -63,6 +64,12 @@ export function make(): Effect.Effect<Shape> {
     return {
       promise: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
         restoreWorkspace(workspace, () => Effect.runPromise(wrap(effect))),
+      promiseWithAbort: <A, E, R>(effect: Effect.Effect<A, E, R>, signal?: AbortSignal) =>
+        restoreWorkspace(workspace, () => {
+          if (!signal) return Effect.runPromise(wrap(effect))
+          const guarded = signal.aborted ? Effect.interrupt : effect
+          return Effect.runPromise(wrap(guarded), { signal })
+        }),
       fork: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
         restoreWorkspace(workspace, () => Effect.runFork(wrap(effect))),
       run: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
