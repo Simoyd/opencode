@@ -773,6 +773,7 @@ const layer = Layer.effect(
         const tools = yield* cleanupToolCalls().pipe(Effect.exit)
         if (Exit.isFailure(parts)) return yield* Effect.failCause(parts.cause)
         if (Exit.isFailure(tools)) return yield* Effect.failCause(tools.cause)
+        if (ctx.blocked) ctx.assistantMessage.finish = "stop"
         ctx.assistantMessage.time.completed = Date.now()
         yield* session.updateMessage(ctx.assistantMessage)
         return yield* Effect.void
