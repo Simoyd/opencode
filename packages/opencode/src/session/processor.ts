@@ -862,8 +862,9 @@ const layer = Layer.effect(
             Effect.ensuring(cleanup()),
           )
 
+          if (ctx.blocked) return "stop"
           if (ctx.needsCompaction) return "compact"
-          if (ctx.blocked || ctx.assistantMessage.error) return "stop"
+          if (ctx.assistantMessage.error) return "stop"
           return "continue"
         })
       })
