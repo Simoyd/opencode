@@ -690,6 +690,13 @@ export const RunCommand = effectCmd({
           return false
         }
 
+        let emittedError = false
+        function emitErrorOnce(value: unknown, fallback: string) {
+          if (emittedError) return
+          emittedError = true
+          if (!emit("error", { error: value })) UI.error(fallback)
+        }
+
         // Consume one subscribed event stream for the active session and mirror it
         // to stdout/UI. `client` is passed explicitly because attach mode may
         // rebind the SDK to the session's directory after the subscription is
@@ -781,8 +788,7 @@ export const RunCommand = effectCmd({
                 err = String(props.error.data.message)
               }
               error = error ? error + EOL + err : err
-              if (emit("error", { error: props.error })) continue
-              UI.error(err)
+              emitErrorOnce(props.error, err)
             }
 
             if (
@@ -847,7 +853,7 @@ export const RunCommand = effectCmd({
               variant: args.variant,
             })
             if (result.error) {
-              if (!emit("error", { error: result.error })) UI.error(formatRunError(result.error))
+              emitErrorOnce(result.error, formatRunError(result.error))
               process.exitCode = 1
               return
             }
@@ -864,7 +870,7 @@ export const RunCommand = effectCmd({
             parts: [...files, { type: "text", text: message }],
           })
           if (result.error) {
-            if (!emit("error", { error: result.error })) UI.error(formatRunError(result.error))
+            emitErrorOnce(result.error, formatRunError(result.error))
             process.exitCode = 1
             return
           }

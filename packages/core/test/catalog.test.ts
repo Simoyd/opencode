@@ -51,26 +51,32 @@ describe("CatalogV2", () => {
       AppNodeBuilder.build(LayerNode.group([Catalog.node, Credential.node]), [[Location.node, locationLayer]]),
     )
 
-    return Effect.gen(function* () {
-      const catalog = yield* Catalog.Service
-      const credentials = yield* Credential.Service
-      yield* catalog.transform((editor) => editor.provider.update(ProviderV2.ID.make("test"), () => {}))
-      yield* credentials.create({
-        integrationID,
-        label: "First",
-        value: Credential.Key.make({ type: "key", key: "first", metadata: { tenant: "one" } }),
-      })
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const catalog = yield* Catalog.Service
+        const credentials = yield* Credential.Service
+        yield* catalog.transform((editor) => editor.provider.update(ProviderV2.ID.make("test"), () => {}))
+        yield* credentials.create({
+          integrationID,
+          label: "First",
+          value: Credential.Key.make({ type: "key", key: "first", metadata: { tenant: "one" } }),
+        })
 
-      expect((yield* catalog.provider.available()).map((provider) => provider.id)).toEqual([ProviderV2.ID.make("test")])
-      expect(required(yield* catalog.provider.get(ProviderV2.ID.make("test"))).request.body).toEqual({})
-      yield* credentials.create({
-        integrationID,
-        label: "Second",
-        value: Credential.Key.make({ type: "key", key: "second", metadata: { tenant: "two" } }),
-      })
-      expect((yield* catalog.provider.available()).map((provider) => provider.id)).toEqual([ProviderV2.ID.make("test")])
-      expect(required(yield* catalog.provider.get(ProviderV2.ID.make("test"))).request.body).toEqual({})
-    }).pipe(Effect.provide(localCatalogLayer))
+        expect((yield* catalog.provider.available()).map((provider) => provider.id)).toEqual([
+          ProviderV2.ID.make("test"),
+        ])
+        expect(required(yield* catalog.provider.get(ProviderV2.ID.make("test"))).request.body).toEqual({})
+        yield* credentials.create({
+          integrationID,
+          label: "Second",
+          value: Credential.Key.make({ type: "key", key: "second", metadata: { tenant: "two" } }),
+        })
+        expect((yield* catalog.provider.available()).map((provider) => provider.id)).toEqual([
+          ProviderV2.ID.make("test"),
+        ])
+        expect(required(yield* catalog.provider.get(ProviderV2.ID.make("test"))).request.body).toEqual({})
+      }),
+    ).pipe(Effect.provide(localCatalogLayer))
   })
 
   it.effect("derives availability from a provider's integration", () => {
@@ -82,23 +88,25 @@ describe("CatalogV2", () => {
       ]),
     )
 
-    return Effect.gen(function* () {
-      const catalog = yield* Catalog.Service
-      yield* (yield* Integration.Service).transform((editor) => editor.update(integrationID, () => {}))
-      yield* catalog.transform((editor) =>
-        editor.provider.update(providerID, (provider) => {
-          provider.integrationID = integrationID
-        }),
-      )
-      expect(yield* catalog.provider.available()).toEqual([])
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const catalog = yield* Catalog.Service
+        yield* (yield* Integration.Service).transform((editor) => editor.update(integrationID, () => {}))
+        yield* catalog.transform((editor) =>
+          editor.provider.update(providerID, (provider) => {
+            provider.integrationID = integrationID
+          }),
+        )
+        expect(yield* catalog.provider.available()).toEqual([])
 
-      yield* (yield* Credential.Service).create({
-        integrationID,
-        value: Credential.Key.make({ type: "key", key: "secret" }),
-      })
+        yield* (yield* Credential.Service).create({
+          integrationID,
+          value: Credential.Key.make({ type: "key", key: "secret" }),
+        })
 
-      expect((yield* catalog.provider.available()).map((provider) => provider.id)).toEqual([providerID])
-    }).pipe(Effect.provide(localCatalogLayer))
+        expect((yield* catalog.provider.available()).map((provider) => provider.id)).toEqual([providerID])
+      }),
+    ).pipe(Effect.provide(localCatalogLayer))
   })
 
   it.effect("projects environment connections without a catalog plugin", () =>

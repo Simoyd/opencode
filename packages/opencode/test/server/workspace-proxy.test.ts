@@ -1,7 +1,7 @@
 import { NodeHttpServer, NodeServices } from "@effect/platform-node"
 import Http from "node:http"
 import { describe, expect } from "bun:test"
-import { Context, Effect, Layer, Queue } from "effect"
+import { Context, Effect, Layer, Logger, Queue } from "effect"
 import { FetchHttpClient, HttpClient, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import * as Socket from "effect/unstable/socket/Socket"
 import { HttpApiProxy } from "../../src/server/routes/instance/httpapi/middleware/proxy"
@@ -109,6 +109,42 @@ describe("HttpApi workspace proxy", () => {
       const response = yield* HttpApiProxy.http(httpClient, "http://127.0.0.1:1/unreachable", undefined, request)
 
       expect(response.status).toBe(500)
+    }),
+  )
+
+  it.live("preserves upstream 5xx status, body, and content type while bounding the logged body", () =>
+    Effect.gen(function* () {
+      const body = JSON.stringify({ ref: "sandbox-failure", detail: "x".repeat(2500) })
+      const url = yield* listenServer(
+        () =>
+          Effect.succeed(
+            HttpServerResponse.text(body, {
+              status: 502,
+              contentType: "application/problem+json",
+            }),
+          ),
+      )
+      const request = HttpServerRequest.fromWeb(new Request("http://localhost/session/abc"))
+      const httpClient = yield* HttpClient.HttpClient
+      const messages: unknown[] = []
+      const logger = Logger.make<unknown, void>((options) => {
+        messages.push(options.message)
+      })
+
+      const response = yield* HttpApiProxy.http(httpClient, `${url}/session/abc`, undefined, request).pipe(
+        Effect.withLogger(logger),
+      )
+
+      expect(response.status).toBe(502)
+      expect(response.headers["content-type"]).toStartWith("application/problem+json")
+      expect(yield* HttpServerResponse.toClientResponse(response).text).toBe(body)
+
+      const entry = messages.find(
+        (message) => Array.isArray(message) && message[0] === "workspace proxy upstream error",
+      ) as [string, { body: string }] | undefined
+      expect(entry).toBeDefined()
+      expect(entry?.[1].body).toBe(body.slice(0, 2000))
+      expect(entry?.[1].body).toHaveLength(2000)
     }),
   )
 

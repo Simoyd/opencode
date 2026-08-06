@@ -3,7 +3,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Deferred, Effect, Layer, Option } from "effect"
+import { Deferred, Effect, Fiber, Layer, Option } from "effect"
 import { Config } from "../../src/config/config"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { McpAuth } from "../../src/mcp/auth"
@@ -161,7 +161,7 @@ mcpTest.instance("BrowserOpenFailed event is published when browser launch fails
 
     const event = yield* trackBrowserOpenFailed
     const mcp = yield* addServer("test-oauth-server", server.url)
-    yield* mcp.authenticate("test-oauth-server").pipe(Effect.ignore, Effect.forkScoped)
+    const auth = yield* mcp.authenticate("test-oauth-server").pipe(Effect.exit, Effect.forkScoped)
 
     const failure = yield* awaitWithTimeout(
       Deferred.await(event),
@@ -171,6 +171,8 @@ mcpTest.instance("BrowserOpenFailed event is published when browser launch fails
 
     expect(failure.mcpName).toBe("test-oauth-server")
     expect(failure.url).toStartWith(new URL("/authorize", server.url).toString())
+    yield* mcp.removeAuth("test-oauth-server")
+    yield* Fiber.join(auth)
   }),
 )
 

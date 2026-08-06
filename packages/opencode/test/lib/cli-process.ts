@@ -19,9 +19,9 @@
 // different return shape — see the TODO at the bottom of OpencodeCli.
 import { test, type TestOptions } from "bun:test"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Environment } from "@opencode-ai/core/environment"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { AppProcess } from "@opencode-ai/core/process"
 import { Deferred, Duration, Effect, Layer, Queue, Schedule, Scope, Stream } from "effect"
 import { FetchHttpClient, HttpClient } from "effect/unstable/http"
 import { ChildProcess } from "effect/unstable/process"
@@ -63,6 +63,7 @@ function isolatedEnv(home: string, configJson: string): Record<string, string> {
   return {
     OPENCODE_TEST_HOME: home,
     HOME: home,
+    PWD: home,
     XDG_CONFIG_HOME: path.join(home, ".config"),
     XDG_DATA_HOME: path.join(home, ".local/share"),
     XDG_STATE_HOME: path.join(home, ".local/state"),
@@ -192,8 +193,6 @@ export function withCliFixture<A, E>(
   return Effect.gen(function* () {
     const llm = yield* TestLLMServer
     const fs = yield* FSUtil.Service
-    const appProc = yield* AppProcess.Service
-
     const home = yield* fs.makeTempDirectory({ prefix: "oc-cli-" })
     yield* Effect.addFinalizer(() =>
       fs
@@ -203,6 +202,7 @@ export function withCliFixture<A, E>(
 
     const configJson = JSON.stringify(testProviderConfig(llm.url))
     const env = isolatedEnv(home, configJson)
+    const inherited = Environment.scrubUserToolEnv(process.env)
 
     const spawn = Effect.fn("opencode.spawn")(function* (args: string[], opts?: SpawnOpts) {
       const start = Date.now()
@@ -211,33 +211,61 @@ export function withCliFixture<A, E>(
       // on `Bun.stdin.text()` (see src/cli/cmd/run.ts — non-TTY stdin is
       // consumed as the prompt). The old Process.run wrapper defaulted to
       // ignore; ChildProcess.make defaults to pipe, so we set it explicitly.
-      const command = ChildProcess.make("bun", ["run", "--conditions=browser", cliEntry, ...args], {
-        cwd: home,
-        env: { ...env, ...opts?.env },
-        extendEnv: true,
-        stdin: "ignore",
-      })
-      // Pass timeout to appProc.run rather than wrapping with
-      // Effect.timeoutOrElse externally: AppProcess.run is itself scoped, so
-      // its built-in timeout triggers the acquireRelease kill finalizer
-      // inside cross-spawn-spawner *before* surfacing the AppProcessError —
-      // guaranteeing the child is dead by the time the test continues.
-      // External timeoutOrElse interrupts the run fiber but races the
-      // scope close, which can leak the child past the test boundary.
-      //
-      // Catch AppProcessError (timeout OR spawn failure) and synthesize a
-      // non-zero result so the test sees it via the usual `expectExit`
-      // path rather than as an unhandled Effect failure.
-      const result = yield* appProc.run(command, { timeout: Duration.millis(timeoutMs) }).pipe(
-        Effect.catchTag("AppProcessError", (err) =>
+      // This is an internal OpenCode test process, not a user tool. Use the
+      // same direct Bun route as the long-lived serve/ACP helpers so the
+      // production user-tool environment scrubber remains strict while this
+      // fixture can supply its isolated OpenCode config and auth variables.
+      const result = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const proc = yield* Effect.acquireRelease(
+            Effect.try({
+              try: () =>
+                Bun.spawn(["bun", "run", "--conditions=browser", cliEntry, ...args], {
+                  cwd: home,
+                  env: { ...inherited, ...env, ...opts?.env },
+                  stdin: "ignore",
+                  stdout: "pipe",
+                  stderr: "pipe",
+                }),
+              catch: (error) => error,
+            }),
+            (child) =>
+              Effect.promise(async () => {
+                if (child.exitCode === null) child.kill()
+                await child.exited
+              }).pipe(Effect.ignore),
+          )
+          const complete = Effect.promise(async () => {
+            const [exitCode, stdout, stderr] = await Promise.all([
+              proc.exited,
+              new Response(proc.stdout).arrayBuffer(),
+              new Response(proc.stderr).arrayBuffer(),
+            ])
+            return {
+              exitCode,
+              stdout: Buffer.from(stdout),
+              stderr: Buffer.from(stderr),
+            }
+          })
+          return yield* complete.pipe(
+            Effect.timeoutOrElse({
+              duration: Duration.millis(timeoutMs),
+              orElse: () =>
+                Effect.succeed({
+                  exitCode: -1,
+                  stdout: Buffer.alloc(0),
+                  stderr: Buffer.from(`Timed out after ${timeoutMs}ms\n`),
+                }),
+            }),
+          )
+        }),
+      ).pipe(
+        Effect.catch((error) =>
           Effect.succeed({
-            command: err.command,
-            exitCode: err.exitCode ?? -1,
+            exitCode: -1,
             stdout: Buffer.alloc(0),
-            stderr: Buffer.from((err.stderr ?? String(err.cause ?? err.message)) + "\n"),
-            stdoutTruncated: false,
-            stderrTruncated: false,
-          } satisfies AppProcess.RunResult),
+            stderr: Buffer.from(String(error) + "\n"),
+          }),
         ),
       )
       return {
@@ -285,7 +313,7 @@ export function withCliFixture<A, E>(
         Effect.sync(() =>
           Bun.spawn(["bun", "run", "--conditions=browser", cliEntry, ...runArgs(message, opts)], {
             cwd: home,
-            env: { ...process.env, ...env, ...options?.env },
+            env: { ...inherited, ...env, ...options?.env },
             stdin: "ignore",
             stdout: "pipe",
             stderr: "pipe",
@@ -326,7 +354,7 @@ export function withCliFixture<A, E>(
         Effect.sync(() =>
           Bun.spawn(["bun", "run", "--conditions=browser", cliEntry, ...argv], {
             cwd: home,
-            env: { ...process.env, ...env, ...opts?.env },
+            env: { ...inherited, ...env, ...opts?.env },
             stdout: "pipe",
             stderr: "pipe",
           }),
@@ -397,7 +425,7 @@ export function withCliFixture<A, E>(
         Effect.sync(() =>
           Bun.spawn(["bun", "run", "--conditions=browser", cliEntry, ...argv], {
             cwd: opts?.cwd ?? home,
-            env: { ...process.env, ...env, ...opts?.env },
+            env: { ...inherited, ...env, ...opts?.env },
             stdin: "pipe",
             stdout: "pipe",
             stderr: "pipe",
@@ -474,7 +502,7 @@ export function withCliFixture<A, E>(
       Layer.mergeAll(
         TestLLMServer.layer,
         FetchHttpClient.layer,
-        AppNodeBuilder.build(LayerNode.group([FSUtil.node, AppProcess.node])),
+        AppNodeBuilder.build(FSUtil.node),
       ),
     ),
   )

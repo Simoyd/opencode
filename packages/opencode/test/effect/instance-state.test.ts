@@ -102,6 +102,18 @@ it.live("InstanceState invalidates on disposeAll", () =>
   }),
 )
 
+it.live("InstanceState accepts interrupt-only scoped cleanup during disposeAll", () =>
+  Effect.gen(function* () {
+    const dir = yield* tmpdirScoped()
+    const state = yield* InstanceState.make(() => Effect.acquireRelease(Effect.void, () => Effect.interrupt))
+
+    yield* access(state, dir)
+    const exit = yield* Effect.exit(disposeAllInstancesEffect)
+
+    expect(Exit.isSuccess(exit)).toBe(true)
+  }),
+)
+
 it.live("InstanceState.get reads the current directory lazily", () =>
   Effect.gen(function* () {
     const one = yield* tmpdirScoped()

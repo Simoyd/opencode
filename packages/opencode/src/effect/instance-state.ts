@@ -1,4 +1,4 @@
-import { Effect, ScopedCache, Scope } from "effect"
+import { Cause, Effect, Exit, ScopedCache, Scope } from "effect"
 import type { InstanceContext } from "@/project/instance-context"
 import { InstanceRef, WorkspaceRef } from "./instance-ref"
 import { registerDisposer } from "./instance-registry"
@@ -35,7 +35,10 @@ export const make = <A, E = never, R = never>(
         }),
     })
 
-    const off = registerDisposer((directory) => Effect.runPromise(ScopedCache.invalidate(cache, directory)))
+    const off = registerDisposer(async (directory) => {
+      const exit = await Effect.runPromiseExit(ScopedCache.invalidate(cache, directory))
+      if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)) throw Cause.squash(exit.cause)
+    })
     yield* Effect.addFinalizer(() => Effect.sync(off))
 
     return {

@@ -1014,7 +1014,7 @@ it.live("session.processor effect tests retry OpenAI-compatible midstream server
           tools: {},
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = yield* MessageV2.parts({ sessionID: msg.sessionID, messageID: msg.id })
 
         expect(value).toBe("continue")
         expect(yield* llm.calls).toBe(2)
