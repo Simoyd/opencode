@@ -143,7 +143,7 @@ const layer = Layer.effect(
                 const bridge = yield* EffectBridge.make()
                 const pluginCtx: PluginToolContext = {
                   ...toolCtx,
-                  ask: (req) => bridge.promise(toolCtx.ask(req)),
+                  ask: (req) => bridge.promiseWithAbort(toolCtx.ask(req), toolCtx.abort),
                   directory: ctx.directory,
                   worktree: ctx.worktree,
                 }

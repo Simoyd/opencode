@@ -3519,7 +3519,7 @@ unixNoLLMServer(
 )
 
 unix(
-  "cancel finalizes interrupted bash tool output through normal truncation",
+  "cancel finalizes interrupted bash tool output through normal truncation using abort cleanup",
   () =>
     Effect.gen(function* () {
       const { dir, llm } = yield* useServerConfig(providerCfg)
@@ -3561,14 +3561,12 @@ unix(
       expect(Exit.isSuccess(exit)).toBe(true)
       if (Exit.isFailure(exit)) return
 
-      const tool = completedTool(exit.value.parts)
+      const tool = errorTool(exit.value.parts)
       if (!tool) return
 
-      expect(tool.state.metadata.truncated).toBe(true)
-      expect(typeof tool.state.metadata.outputPath).toBe("string")
-      expect(tool.state.output).toMatch(/\.\.\.output truncated\.\.\./)
-      expect(tool.state.output).toMatch(/Full output saved to:\s+\S+/)
-      expect(tool.state.output).not.toContain("Tool execution aborted")
+      expect(tool.state.error).toBe("Tool execution aborted")
+      expect(tool.state.metadata?.interrupted).toBe(true)
+      expect(tool.state.metadata?.output).toContain("truncation-ready")
     }),
   { git: true },
   30_000,

@@ -41,6 +41,7 @@ interface PendingEntry {
 
 interface State {
   pending: Map<QuestionID, PendingEntry>
+  closed: boolean
 }
 
 // Service
@@ -69,15 +70,23 @@ const layer = Layer.effect(
       Effect.fn("Question.state")(function* () {
         const state = {
           pending: new Map<QuestionID, PendingEntry>(),
+          closed: false,
         }
 
         yield* Effect.addFinalizer(() =>
-          Effect.gen(function* () {
-            for (const item of state.pending.values()) {
-              yield* Deferred.fail(item.deferred, new RejectedError())
-            }
-            state.pending.clear()
-          }),
+          Effect.uninterruptible(
+            Effect.gen(function* () {
+              const cancelled = yield* Effect.sync(() => {
+                state.closed = true
+                const entries = [...state.pending.values()]
+                state.pending.clear()
+                return entries
+              })
+              for (const item of cancelled) {
+                yield* Deferred.fail(item.deferred, new RejectedError())
+              }
+            }),
+          ),
         )
 
         return state
@@ -89,10 +98,10 @@ const layer = Layer.effect(
       questions: ReadonlyArray<Info>
       tool?: Tool
     }) {
-      const pending = (yield* InstanceState.get(state)).pending
+      const current = yield* InstanceState.get(state)
+      if (current.closed) return yield* new RejectedError()
+      const pending = current.pending
       const id = QuestionID.ascending()
-      yield* Effect.logInfo("asking", { id, questions: input.questions.length })
-
       const deferred = yield* Deferred.make<ReadonlyArray<Answer>, RejectedError>()
       const info: Request = {
         id,
@@ -100,13 +109,29 @@ const layer = Layer.effect(
         questions: input.questions,
         tool: input.tool,
       }
-      pending.set(id, { info, deferred })
-      yield* events.publish(Event.Asked, info)
-
-      return yield* Effect.ensuring(
-        Deferred.await(deferred),
-        Effect.sync(() => {
-          pending.delete(id)
+      const entry: PendingEntry = { info, deferred }
+      return yield* Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          const admitted = yield* Effect.sync(() => {
+            if (current.closed) return false
+            pending.set(id, entry)
+            return true
+          })
+          if (!admitted) return yield* new RejectedError()
+          return yield* restore(
+            Effect.gen(function* () {
+              if (yield* Effect.sync(() => current.closed)) return yield* new RejectedError()
+              yield* Effect.logInfo("asking", { id, questions: input.questions.length })
+              yield* Effect.raceFirst(events.publish(Event.Asked, info), Deferred.await(deferred))
+              return yield* Deferred.await(deferred)
+            }),
+          ).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                if (pending.get(id) === entry) pending.delete(id)
+              }),
+            ),
+          )
         }),
       )
     })
@@ -116,35 +141,55 @@ const layer = Layer.effect(
       answers: ReadonlyArray<Answer>
     }) {
       const pending = (yield* InstanceState.get(state)).pending
-      const existing = pending.get(input.requestID)
+      const existing = yield* Effect.uninterruptible(
+        Effect.gen(function* () {
+          const entry = yield* Effect.sync(() => {
+            const item = pending.get(input.requestID)
+            if (!item) return
+            pending.delete(input.requestID)
+            return item
+          })
+          if (!entry) return
+          yield* Deferred.succeed(entry.deferred, input.answers)
+          return entry
+        }),
+      )
       if (!existing) {
         yield* Effect.logWarning("reply for unknown request", { requestID: input.requestID })
         return yield* new NotFoundError({ requestID: input.requestID })
       }
-      pending.delete(input.requestID)
       yield* Effect.logInfo("replied", { requestID: input.requestID, answers: input.answers })
       yield* events.publish(Event.Replied, {
         sessionID: existing.info.sessionID,
         requestID: existing.info.id,
         answers: input.answers.map((a) => [...a]),
       })
-      yield* Deferred.succeed(existing.deferred, input.answers)
     })
 
     const reject = Effect.fn("Question.reject")(function* (requestID: QuestionID) {
       const pending = (yield* InstanceState.get(state)).pending
-      const existing = pending.get(requestID)
+      const existing = yield* Effect.uninterruptible(
+        Effect.gen(function* () {
+          const entry = yield* Effect.sync(() => {
+            const item = pending.get(requestID)
+            if (!item) return
+            pending.delete(requestID)
+            return item
+          })
+          if (!entry) return
+          yield* Deferred.fail(entry.deferred, new RejectedError())
+          return entry
+        }),
+      )
       if (!existing) {
         yield* Effect.logWarning("reject for unknown request", { requestID })
         return yield* new NotFoundError({ requestID })
       }
-      pending.delete(requestID)
       yield* Effect.logInfo("rejected", { requestID })
       yield* events.publish(Event.Rejected, {
         sessionID: existing.info.sessionID,
         requestID: existing.info.id,
       })
-      yield* Deferred.fail(existing.deferred, new RejectedError())
     })
 
     const list = Effect.fn("Question.list")(function* () {

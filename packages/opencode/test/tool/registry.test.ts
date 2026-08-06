@@ -2,7 +2,8 @@ import { afterEach, describe, expect } from "bun:test"
 import path from "path"
 import fs from "fs/promises"
 import { fileURLToPath, pathToFileURL } from "url"
-import { Effect, Layer, Result, Schema } from "effect"
+import { Cause, Effect, Exit, Layer, Result, Schema } from "effect"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ToolRegistry } from "@/tool/registry"
 import { Tool } from "@/tool/tool"
@@ -21,6 +22,10 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { MCP } from "@/mcp"
 import type { Tool as MCPToolDef } from "@modelcontextprotocol/sdk/types.js"
+import { Permission } from "@/permission"
+import { SessionTools } from "@/session/tools"
+import { Truncate } from "@/tool/truncate"
+import type { ToolExecutionOptions } from "ai"
 
 const configLayer = TestConfig.layer({
   directories: () => InstanceState.directory.pipe(Effect.map((dir) => [path.join(dir, ".opencode")])),
@@ -49,6 +54,48 @@ const brokenPluginLayer = Layer.succeed(
       ]),
   }),
 )
+
+const pluginAbortProbe = {
+  entered: 0,
+  executedAfterPermission: 0,
+}
+const abortPluginLayer = Layer.succeed(
+  Plugin.Service,
+  Plugin.Service.of({
+    init: () => Effect.void,
+    trigger: ((_name: unknown, _input: unknown, output: unknown) =>
+      Effect.succeed(output)) as Plugin.Interface["trigger"],
+    list: () =>
+      Effect.succeed([
+        {
+          tool: {
+            plugin_abort_probe: {
+              description: "plugin abort probe",
+              args: {},
+              execute: async (_args, ctx) => {
+                pluginAbortProbe.entered++
+                await ctx.ask({
+                  permission: "plugin_abort_probe",
+                  patterns: ["*"],
+                  always: ["*"],
+                  metadata: {},
+                })
+                pluginAbortProbe.executedAfterPermission++
+                return "executed"
+              },
+            },
+          },
+        },
+      ]),
+  }),
+)
+const emptyMcpLayer = Layer.mock(MCP.Service, {
+  clients: () => Effect.succeed({}),
+  tools: () => Effect.succeed({}),
+})
+const truncateLayer = Layer.mock(Truncate.Service, {
+  output: (content: string) => Effect.succeed({ content, truncated: false }),
+})
 
 const root = LayerNode.group([ToolRegistry.node, Agent.node])
 const replacements = [
@@ -94,12 +141,124 @@ const withEmptyCodeMode = testEffect(
   ]),
 )
 const withBrokenPlugin = testEffect(LayerNode.compile(root, [...replacements, [Plugin.node, brokenPluginLayer]]))
+const withAbortPlugin = testEffect(
+  Layer.mergeAll(
+    LayerNode.compile(LayerNode.group([ToolRegistry.node, Agent.node, Permission.node]), [
+      [Config.node, configLayer],
+      [RuntimeFlags.node, RuntimeFlags.layer()],
+      [Plugin.node, abortPluginLayer],
+      [MCP.node, emptyMcpLayer],
+    ]),
+    abortPluginLayer,
+    emptyMcpLayer,
+    truncateLayer,
+    RuntimeFlags.layer(),
+  ),
+)
 
 afterEach(async () => {
   await disposeAllInstances()
 })
 
 describe("tool.registry", () => {
+  withAbortPlugin.instance(
+    "plugin callback abort owns its nested permission ask",
+    () =>
+      Effect.gen(function* () {
+        pluginAbortProbe.entered = 0
+        pluginAbortProbe.executedAfterPermission = 0
+        let registered = 0
+        const agent = yield* Agent.Service
+        const resolvedBuild = yield* agent.get("build")
+        if (!resolvedBuild) return yield* Effect.die(new Error("build agent not found"))
+        const build = { ...resolvedBuild, permission: [] as PermissionV1.Ruleset }
+        const permission = yield* Permission.Service
+        const tools = yield* SessionTools.resolve({
+          agent: build,
+          model: {
+            api: { id: "test-model" },
+            providerID: "test",
+          } as any,
+          session: {
+            id: SessionID.make("ses_plugin_abort"),
+            permission: [] as PermissionV1.Ruleset,
+          } as any,
+          processor: {
+            message: { id: MessageID.make("msg_plugin_abort") },
+            registerToolCall: () => Effect.sync(() => void registered++),
+            updateToolCall: () => Effect.void,
+          },
+          bypassAgentCheck: false,
+          messages: [],
+          promptOps: {},
+        } as unknown as Parameters<typeof SessionTools.resolve>[0])
+        const callback = tools.plugin_abort_probe?.execute
+        if (!callback) return yield* Effect.die(new Error("missing plugin abort callback"))
+
+        const controller = new AbortController()
+        let settlements = 0
+        const callbackResult = callback({}, {
+          toolCallId: "call_plugin_abort",
+          abortSignal: controller.signal,
+          messages: [],
+        } as unknown as ToolExecutionOptions).then(
+          () => {
+            settlements++
+            return false
+          },
+          () => {
+            settlements++
+            return true
+          },
+        )
+        const pending = yield* Effect.gen(function* () {
+          for (;;) {
+            const requests = yield* permission.list()
+            if (requests.length === 1) return requests
+            yield* Effect.sleep("10 millis")
+          }
+        }).pipe(Effect.timeout("1 second"))
+        const requestID = pending[0].id
+
+        controller.abort()
+        controller.abort()
+        expect(yield* Effect.promise(() => callbackResult)).toBe(true)
+        expect(yield* permission.list()).toHaveLength(0)
+        expect(settlements).toBe(1)
+        expect(pluginAbortProbe.executedAfterPermission).toBe(0)
+        const lateReply = yield* permission.reply({ requestID, reply: "once" }).pipe(Effect.exit)
+        expect(Exit.isFailure(lateReply)).toBe(true)
+        if (Exit.isFailure(lateReply)) {
+          expect(Cause.squash(lateReply.cause)).toMatchObject({
+            _tag: "Permission.NotFoundError",
+            requestID,
+          })
+        }
+
+        const enteredBeforePreAbort = pluginAbortProbe.entered
+        const registeredBeforePreAbort = registered
+        const preAborted = new AbortController()
+        preAborted.abort()
+        preAborted.abort()
+        const preAbortRejected = yield* Effect.promise(() =>
+          callback({}, {
+            toolCallId: "call_plugin_preabort",
+            abortSignal: preAborted.signal,
+            messages: [],
+          } as unknown as ToolExecutionOptions).then(
+            () => false,
+            () => true,
+          ),
+        )
+        expect(preAbortRejected).toBe(true)
+        expect(yield* permission.list()).toHaveLength(0)
+        expect(registered).toBe(registeredBeforePreAbort)
+        expect(pluginAbortProbe.entered).toBe(enteredBeforePreAbort)
+        expect(pluginAbortProbe.executedAfterPermission).toBe(0)
+      }),
+    { git: true },
+  )
+
   it.instance("does not expose task_status", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service

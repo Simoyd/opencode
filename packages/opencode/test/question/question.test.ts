@@ -1,6 +1,6 @@
 import { afterEach, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Cause, Effect, Exit, Fiber, Layer, Queue } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Queue } from "effect"
 import { Question } from "../../src/question"
 import { InstanceRef } from "../../src/effect/instance-ref"
 import { InstanceStore } from "../../src/project/instance-store"
@@ -274,6 +274,109 @@ it.instance(
       }
     }),
   { git: true },
+)
+
+it.instance(
+  "reply settles before interrupted replied event observation",
+  () =>
+    Effect.gen(function* () {
+      const question = yield* Question.Service
+      const events = yield* EventV2Bridge.Service
+      const publicationStarted = yield* Deferred.make<void>()
+      const unsubscribe = yield* events.listen((event) => {
+        if (event.type === Question.Event.Replied.type) {
+          Deferred.doneUnsafe(publicationStarted, Effect.void)
+          return Effect.never
+        }
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsubscribe)
+
+      const waiter = yield* question
+        .ask({
+          sessionID: SessionID.make("ses_settle_reply"),
+          questions: [{ question: "Continue?", header: "Continue", options: [{ label: "Yes", description: "Yes" }] }],
+        })
+        .pipe(Effect.forkScoped)
+      const request = (yield* waitForPending(1))[0]
+      const terminal = yield* question.reply({ requestID: request.id, answers: [["Yes"]] }).pipe(Effect.forkScoped)
+      yield* Deferred.await(publicationStarted).pipe(Effect.timeout("1 second"))
+
+      expect(yield* Fiber.join(waiter).pipe(Effect.timeout("1 second"))).toEqual([["Yes"]])
+      expect(yield* question.list()).toHaveLength(0)
+      yield* Fiber.interrupt(terminal)
+      expect(
+        Exit.isFailure(yield* question.reply({ requestID: request.id, answers: [["No"]] }).pipe(Effect.exit)),
+      ).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "reject settles before interrupted rejected event observation",
+  () =>
+    Effect.gen(function* () {
+      const question = yield* Question.Service
+      const events = yield* EventV2Bridge.Service
+      const publicationStarted = yield* Deferred.make<void>()
+      const unsubscribe = yield* events.listen((event) => {
+        if (event.type === Question.Event.Rejected.type) {
+          Deferred.doneUnsafe(publicationStarted, Effect.void)
+          return Effect.never
+        }
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsubscribe)
+
+      const waiter = yield* question
+        .ask({
+          sessionID: SessionID.make("ses_settle_reject"),
+          questions: [{ question: "Continue?", header: "Continue", options: [{ label: "Yes", description: "Yes" }] }],
+        })
+        .pipe(Effect.forkScoped)
+      const request = (yield* waitForPending(1))[0]
+      const terminal = yield* question.reject(request.id).pipe(Effect.forkScoped)
+      yield* Deferred.await(publicationStarted).pipe(Effect.timeout("1 second"))
+
+      expect(Exit.isFailure(yield* Fiber.await(waiter).pipe(Effect.timeout("1 second")))).toBe(true)
+      expect(yield* question.list()).toHaveLength(0)
+      yield* Fiber.interrupt(terminal)
+      expect(Exit.isFailure(yield* question.reject(request.id).pipe(Effect.exit))).toBe(true)
+    }),
+  { git: true },
+)
+
+lifecycle.live("instance disposal settles ask blocked in asked event observation", () =>
+  Effect.gen(function* () {
+    const dir = yield* tmpdirScoped({ git: true })
+    const events = yield* EventV2Bridge.Service
+    const publicationStarted = yield* Deferred.make<void>()
+    const unsubscribe = yield* events.listen((event) => {
+      if (event.type === Question.Event.Asked.type) {
+        Deferred.doneUnsafe(publicationStarted, Effect.void)
+        return Effect.never
+      }
+      return Effect.void
+    })
+    yield* Effect.addFinalizer(() => unsubscribe)
+
+    const waiter = yield* askEffect({
+      sessionID: SessionID.make("ses_dispose_publication"),
+      questions: [{ question: "Dispose?", header: "Dispose", options: [{ label: "Yes", description: "Yes" }] }],
+    }).pipe(provideInstance(dir), Effect.forkScoped)
+    yield* Deferred.await(publicationStarted).pipe(Effect.timeout("1 second"))
+    expect(yield* waitForPending(1).pipe(provideInstance(dir))).toHaveLength(1)
+
+    const ctx = yield* Effect.gen(function* () {
+      return yield* InstanceRef
+    }).pipe(provideInstance(dir))
+    if (!ctx) return yield* Effect.die(new Error("missing test instance"))
+    yield* InstanceStore.Service.use((store) => store.dispose(ctx))
+    const exit = yield* Fiber.await(waiter).pipe(Effect.timeout("1 second"))
+    expect(Exit.isFailure(exit)).toBe(true)
+    if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toBeInstanceOf(Question.RejectedError)
+    expect(yield* listEffect.pipe(provideInstance(dir))).toHaveLength(0)
+  }),
 )
 
 // multiple questions tests

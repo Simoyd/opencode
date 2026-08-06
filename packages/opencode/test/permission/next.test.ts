@@ -963,6 +963,156 @@ it.instance(
   { git: true },
 )
 
+it.instance(
+  "reply settles once before interrupted replied event observation",
+  () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2Bridge.Service
+      const publicationStarted = yield* Deferred.make<void>()
+      const unsubscribe = yield* events.listen((event) => {
+        if (
+          event.type === Permission.Event.Replied.type &&
+          (event.data as { requestID?: string }).requestID === "per_settle_once"
+        ) {
+          Deferred.doneUnsafe(publicationStarted, Effect.void)
+          return Effect.never
+        }
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsubscribe)
+
+      const waiter = yield* ask({
+        id: PermissionV1.ID.make("per_settle_once"),
+        sessionID: SessionID.make("session_settle_once"),
+        permission: "read",
+        patterns: ["outside.txt"],
+        metadata: {},
+        always: ["outside.txt"],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+      expect(yield* waitForPending(1)).toHaveLength(1)
+
+      const terminal = yield* reply({ requestID: PermissionV1.ID.make("per_settle_once"), reply: "once" }).pipe(
+        Effect.forkScoped,
+      )
+      yield* Deferred.await(publicationStarted).pipe(Effect.timeout("1 second"))
+      expect(Exit.isSuccess(yield* Fiber.await(waiter).pipe(Effect.timeout("1 second")))).toBe(true)
+      expect(yield* list()).toHaveLength(0)
+
+      yield* Fiber.interrupt(terminal)
+      const duplicate = yield* reply({ requestID: PermissionV1.ID.make("per_settle_once"), reply: "once" }).pipe(
+        Effect.exit,
+      )
+      expect(Exit.isFailure(duplicate)).toBe(true)
+      expect(yield* list()).toHaveLength(0)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "reject-all settles same session and isolates another before event observation",
+  () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2Bridge.Service
+      const publicationStarted = yield* Deferred.make<void>()
+      const unsubscribe = yield* events.listen((event) => {
+        if (
+          event.type === Permission.Event.Replied.type &&
+          (event.data as { requestID?: string }).requestID === "per_reject_a"
+        ) {
+          Deferred.doneUnsafe(publicationStarted, Effect.void)
+          return Effect.never
+        }
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsubscribe)
+
+      const a = yield* ask({
+        id: PermissionV1.ID.make("per_reject_a"),
+        sessionID: SessionID.make("session_reject_same"),
+        permission: "read",
+        patterns: ["a"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+      const b = yield* ask({
+        id: PermissionV1.ID.make("per_reject_b"),
+        sessionID: SessionID.make("session_reject_same"),
+        permission: "read",
+        patterns: ["b"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+      const other = yield* ask({
+        id: PermissionV1.ID.make("per_reject_other"),
+        sessionID: SessionID.make("session_reject_other"),
+        permission: "read",
+        patterns: ["other"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+      expect(yield* waitForPending(3)).toHaveLength(3)
+
+      const terminal = yield* reply({ requestID: PermissionV1.ID.make("per_reject_a"), reply: "reject" }).pipe(
+        Effect.forkScoped,
+      )
+      yield* Deferred.await(publicationStarted).pipe(Effect.timeout("1 second"))
+      expect(Exit.isFailure(yield* Fiber.await(a).pipe(Effect.timeout("1 second")))).toBe(true)
+      expect(Exit.isFailure(yield* Fiber.await(b).pipe(Effect.timeout("1 second")))).toBe(true)
+      expect((yield* list()).map((item) => item.id)).toEqual([PermissionV1.ID.make("per_reject_other")])
+
+      yield* Fiber.interrupt(terminal)
+      yield* reply({ requestID: PermissionV1.ID.make("per_reject_other"), reply: "reject" })
+      expect(Exit.isFailure(yield* Fiber.await(other))).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "instance disposal settles ask blocked in asked event observation",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const store = yield* InstanceStore.Service
+      const events = yield* EventV2Bridge.Service
+      const publicationStarted = yield* Deferred.make<void>()
+      const unsubscribe = yield* events.listen((event) => {
+        if (
+          event.type === Permission.Event.Asked.type &&
+          (event.data as { id?: string }).id === "per_dispose_publication"
+        ) {
+          Deferred.doneUnsafe(publicationStarted, Effect.void)
+          return Effect.never
+        }
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsubscribe)
+
+      const waiter = yield* ask({
+        id: PermissionV1.ID.make("per_dispose_publication"),
+        sessionID: SessionID.make("session_dispose_publication"),
+        permission: "read",
+        patterns: ["outside.txt"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+      yield* Deferred.await(publicationStarted).pipe(Effect.timeout("1 second"))
+      expect(yield* waitForPending(1)).toHaveLength(1)
+
+      const ctx = yield* store.load({ directory: test.directory })
+      yield* store.dispose(ctx)
+      const exit = yield* Fiber.await(waiter).pipe(Effect.timeout("1 second"))
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toBeInstanceOf(PermissionV1.RejectedError)
+      expect(yield* store.provide({ directory: test.directory }, list())).toHaveLength(0)
+    }),
+  { git: true },
+)
+
 it.live("permission requests stay isolated by directory", () =>
   Effect.gen(function* () {
     const one = yield* tmpdirScoped({ git: true })
