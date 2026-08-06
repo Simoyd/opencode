@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Effect, type Scope } from "effect"
 import { looksJson } from "./assertions"
 import type {
   ActiveScenario,
@@ -139,7 +139,7 @@ class ScenarioBuilder<S = undefined> {
    * Seed typed state before the HTTP request. The returned value becomes `ctx.state`
    * for `.at(...)` and assertions, giving stateful route tests type-safe setup.
    */
-  seeded<Next>(seed: (ctx: ScenarioContext) => Effect.Effect<Next>) {
+  seeded<Next>(seed: (ctx: ScenarioContext) => Effect.Effect<Next, never, Scope.Scope>) {
     const builder = new ScenarioBuilder<Next>(this.state.method, this.state.path, this.state.name, this.state.auth)
     Object.assign(builder.state, this.state, { seed })
     return builder

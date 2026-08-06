@@ -1,27 +1,42 @@
-import { EventV2 } from "@opencode-ai/core/event"
 import { Database } from "@opencode-ai/core/database/database"
 import { CompactionRegionTable, MessageTable } from "@opencode-ai/core/session/sql"
+import { SessionCompactionEvent } from "@opencode-ai/schema/session-compaction-event"
 import { and, asc, desc, eq, gt, lt, or } from "drizzle-orm"
 import { Effect, Schema } from "effect"
 import { MessageV2 } from "./message-v2"
 import { MessageID, SessionID } from "./schema"
 
 export const Event = {
-  Changed: EventV2.define({
-    type: "compaction.catalog.changed",
-    schema: { sessionID: SessionID },
-  }),
+  Changed: SessionCompactionEvent.CatalogChanged,
 }
 
-const CatalogCursor = Schema.Struct({ markerID: MessageID, timeCreated: Schema.Number })
+const CatalogCursor = Schema.Struct({
+  markerID: MessageID,
+  timeCreated: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+})
 const decodeCursor = Schema.decodeUnknownSync(CatalogCursor)
 const PageSize = 50
 
+export class InvalidCursorError extends Schema.TaggedErrorClass<InvalidCursorError>()(
+  "CompactionCatalog.InvalidCursor",
+  {},
+) {}
+
+const decodePageCursor = Effect.fn("CompactionCatalog.decodeCursor")((cursor: string) =>
+  Effect.try({
+    try: () => {
+      if (!/^[A-Za-z0-9_-]+$/.test(cursor)) throw new Error("Invalid base64url cursor")
+      const bytes = Buffer.from(cursor, "base64url")
+      if (bytes.toString("base64url") !== cursor) throw new Error("Non-canonical base64url cursor")
+      return decodeCursor(JSON.parse(bytes.toString("utf8")) as unknown)
+    },
+    catch: () => new InvalidCursorError(),
+  }),
+)
+
 export const page = Effect.fn("CompactionCatalog.page")(function* (input: { sessionID: SessionID; cursor?: string }) {
   const { db } = yield* Database.Service
-  const after = input.cursor
-    ? decodeCursor(JSON.parse(Buffer.from(input.cursor, "base64url").toString("utf8")))
-    : undefined
+  const after = input.cursor ? yield* decodePageCursor(input.cursor) : undefined
   return yield* db
     .transaction(() =>
       Effect.gen(function* () {
@@ -80,7 +95,7 @@ export const page = Effect.fn("CompactionCatalog.page")(function* (input: { sess
             .get()
             .pipe(Effect.orDie))?.summaryMessageID
         }
-        const items: Array<{
+        const items = [] as Array<{
           startMessageID: MessageID
           startTimeCreated: number
           markerID: MessageID
@@ -91,7 +106,7 @@ export const page = Effect.fn("CompactionCatalog.page")(function* (input: { sess
           summaryMessageID: MessageID
           summaryPreview: string
           precedingSummaryMessageID?: MessageID
-        }> = []
+        }>
         for (const { region: row, markerTime } of selected) {
           const start = yield* db
             .select({ timeCreated: MessageTable.time_created })
@@ -100,7 +115,7 @@ export const page = Effect.fn("CompactionCatalog.page")(function* (input: { sess
             .get()
             .pipe(Effect.orDie)
           if (!start) return yield* Effect.die(`Compaction region ${row.marker_id} has no canonical start position`)
-          const item = {
+          items.push({
             startMessageID: row.start_message_id,
             startTimeCreated: start.timeCreated,
             markerID: row.marker_id,
@@ -111,9 +126,8 @@ export const page = Effect.fn("CompactionCatalog.page")(function* (input: { sess
             summaryMessageID: row.summary_message_id,
             summaryPreview: row.summary_preview,
             ...(precedingSummaryMessageID ? { precedingSummaryMessageID } : {}),
-          }
+          })
           precedingSummaryMessageID = row.summary_message_id
-          items.push(item)
         }
         const tail = selected.at(-1)
         return {

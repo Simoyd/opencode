@@ -1,5 +1,4 @@
-import { EventV2 } from "@opencode-ai/core/event"
-import { SessionID, MessageID, PartID } from "./schema"
+import { SessionID, MessageID } from "./schema"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import {
@@ -12,16 +11,16 @@ import {
   Info,
   OutputLengthError,
   Part,
-  StructuredOutputError,
   SubtaskPart,
+  ToolPart,
   User,
   WithParts,
-  type ToolPart,
 } from "@opencode-ai/core/v1/session"
 
 import { NamedError } from "@opencode-ai/core/util/error"
 import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessage, type UIMessage } from "ai"
 import { Database } from "@opencode-ai/core/database/database"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { NotFoundError } from "@/storage/storage"
 import { and } from "drizzle-orm"
 import { desc } from "drizzle-orm"
@@ -36,7 +35,6 @@ import { isMedia } from "@/util/media"
 import type { SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
 import { Effect, Schema } from "effect"
-import * as EffectLogger from "@opencode-ai/core/effect/logger"
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
 interface FetchDecompressionError extends Error {
@@ -58,16 +56,7 @@ export const Event = {
   Updated: SessionV1.Event.MessageUpdated,
   Removed: SessionV1.Event.MessageRemoved,
   PartUpdated: SessionV1.Event.PartUpdated,
-  PartDelta: EventV2.define({
-    type: "message.part.delta",
-    schema: {
-      sessionID: SessionID,
-      messageID: MessageID,
-      partID: PartID,
-      field: Schema.String,
-      delta: Schema.String,
-    },
-  }),
+  PartDelta: SessionV1.Event.PartDelta,
   PartRemoved: SessionV1.Event.PartRemoved,
 }
 
@@ -431,7 +420,7 @@ export function toModelMessages(
   model: Provider.Model,
   options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
 ): Promise<ModelMessage[]> {
-  return Effect.runPromise(toModelMessagesEffect(input, model, options).pipe(Effect.provide(EffectLogger.layer)))
+  return Effect.runPromise(toModelMessagesEffect(input, model, options))
 }
 
 export const page = Effect.fn("MessageV2.page")(function* (input: {
@@ -568,6 +557,14 @@ function selectCompacted(physical: WithParts[]) {
   result.reverse()
   return result
 }
+
+export function filterCompacted(msgs: Iterable<WithParts>) {
+  return selectCompacted([...msgs].sort(compareHydratedMessagePhysicalOrder))
+}
+
+export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
+  return filterCompacted(yield* stream(sessionID))
+})
 
 export type TerminalClassification = "successful" | "failed" | "pending"
 
@@ -1012,10 +1009,13 @@ export function modelTurn(messages: WithParts[]) {
       message.info.role === "assistant" && isGeneratedFinalResponse(message, analysis) ? [message.info.parentID] : [],
     ),
   )
-  const pendingExternal = projected.filter(
-    (message): message is WithParts & { info: User } =>
-      message.info.role === "user" && analysis.external.has(message.info.id) && !answered.has(message.info.id),
-  )
+  const boundary = projected.findLastIndex(ordinaryFinal)
+  const pendingExternal = projected
+    .slice(boundary + 1)
+    .filter(
+      (message): message is WithParts & { info: User } =>
+        message.info.role === "user" && analysis.external.has(message.info.id),
+    )
   const pendingGenerated = analysis.physical.filter(
     (message): message is WithParts & { info: User } =>
       selectedIDs.has(message.info.id) &&
@@ -1048,18 +1048,21 @@ export function modelTurn(messages: WithParts[]) {
   const assistant = assistantMessage?.info.role === "assistant" ? assistantMessage.info : undefined
   const terminalMessage = projected.findLast(ordinaryFinal)
   const terminal = terminalMessage?.info.role === "assistant" ? terminalMessage.info : undefined
-  const boundary = projected.findLastIndex(ordinaryFinal)
   const reminderBoundary = boundary >= 0 ? projected[boundary] : undefined
-  const reminders = projected
-    .slice(boundary + 1)
-    .filter(
-      (message): message is WithParts & { info: User } =>
-        message.info.role === "user" && analysis.external.has(message.info.id) && !answered.has(message.info.id),
-    )
   const tasks = analysis.executions.filter(
     (execution) => selectedIDs.has(execution.owner.info.id) && execution.state === "unstarted",
   )
-  return { messages: projected, tasks, target, assistant, terminal, reminderBoundary, pendingExternal: reminders }
+  return { messages: projected, tasks, target, assistant, terminal, reminderBoundary, pendingExternal }
+}
+
+export function latest(msgs: WithParts[]) {
+  const view = modelTurn(msgs)
+  return {
+    user: view.target,
+    assistant: view.assistant,
+    finished: view.terminal,
+    tasks: view.tasks.map((execution) => execution.task),
+  }
 }
 
 export const modelTurnEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
@@ -1197,3 +1200,4 @@ export function fromError(
 }
 
 export * as MessageV2 from "./message-v2"
+export const node = LayerNode.group([Database.node])

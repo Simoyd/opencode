@@ -62,6 +62,7 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
       const connected = yield* provider.list()
       const providers = Object.fromEntries(
         Object.entries(connected)
+          .map(([providerID, item]) => [providerID, Provider.toPublicInfo(item)] as const)
           .map(
             ([providerID, item]) =>
               [
@@ -79,7 +80,10 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
                           providerID: model.providerID,
                           name: model.name,
                           capabilities: { reasoning: model.capabilities.reasoning },
-                          limit: { context: model.limit.context },
+                          limit:
+                            Number.isFinite(model.limit.context) && model.limit.context > 0
+                              ? { context: model.limit.context }
+                              : {},
                           ...(model.variants
                             ? {
                                 variants: Object.fromEntries(
@@ -95,9 +99,15 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
           )
           .filter(([, item]) => Object.keys(item.models).length > 0),
       )
+      const effectiveDefault = yield* provider.defaultModel().pipe(Effect.catch(() => Effect.succeed(undefined)))
+      const defaultProvider = effectiveDefault ? providers[effectiveDefault.providerID] : undefined
+      const runtimeDefault =
+        effectiveDefault && defaultProvider?.models[effectiveDefault.modelID]
+          ? { providerID: effectiveDefault.providerID, modelID: effectiveDefault.modelID }
+          : null
       return {
         all: Object.values(providers),
-        default: Provider.defaultModelIDs(providers),
+        default: runtimeDefault,
         connected: Object.keys(providers),
       }
     })

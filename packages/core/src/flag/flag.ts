@@ -6,6 +6,7 @@ export function truthy(key: string) {
 }
 
 const copy = process.env["OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT"]
+const fff = process.env["OPENCODE_DISABLE_FFF"]
 
 function enabledByExperimental(key: string) {
   return process.env[key] === undefined ? truthy("OPENCODE_EXPERIMENTAL") : truthy(key)
@@ -31,8 +32,8 @@ export const Flag = {
   OPENCODE_SERVER_PASSWORD: process.env["OPENCODE_SERVER_PASSWORD"],
   OPENCODE_SERVER_USERNAME: process.env["OPENCODE_SERVER_USERNAME"],
   OPENCODE_AVALONIA_DISABLE_WORKSPACE_ROUTING: truthy("OPENCODE_AVALONIA_DISABLE_WORKSPACE_ROUTING"),
-  OPENCODE_AVALONIA_STREAM_DIAGNOSTICS: truthy("OPENCODE_AVALONIA_STREAM_DIAGNOSTICS"),
   OPENCODE_AVALONIA_ENVIRONMENT_ROOT: process.env["OPENCODE_AVALONIA_ENVIRONMENT_ROOT"],
+  OPENCODE_DISABLE_FFF: fff === undefined ? process.platform === "win32" : truthy("OPENCODE_DISABLE_FFF"),
 
   // Experimental
   OPENCODE_EXPERIMENTAL_FILEWATCHER: Config.boolean("OPENCODE_EXPERIMENTAL_FILEWATCHER").pipe(
@@ -49,7 +50,6 @@ export const Flag = {
 
   OPENCODE_WORKSPACE_ID: process.env["OPENCODE_WORKSPACE_ID"],
   OPENCODE_EXPERIMENTAL_WORKSPACES: enabledByExperimental("OPENCODE_EXPERIMENTAL_WORKSPACES"),
-  OPENCODE_EXPERIMENTAL_SESSION_SWITCHER: enabledByExperimental("OPENCODE_EXPERIMENTAL_SESSION_SWITCHER"),
 
   // Evaluated at access time (not module load) because tests, the CLI, and
   // external tooling set these env vars at runtime.

@@ -1,16 +1,20 @@
 import { afterEach, describe, expect } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Config } from "@/config/config"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Session } from "@/session/session"
+import { MessageV2 } from "@/session/message-v2"
 import type { SessionPrompt } from "../../src/session/prompt"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
-import { SessionRunState } from "@/session/run-state"
+import { SessionLifecycle } from "@/session/lifecycle"
 import { SessionStatus } from "@/session/status"
 
 import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
@@ -30,21 +34,27 @@ const ref = {
   providerID: ProviderV2.ID.make("test"),
   modelID: ModelV2.ID.make("test-model"),
 }
+const taskCallID = "call_task_test"
 
 const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
-  Layer.mergeAll(
-    Agent.defaultLayer,
-    BackgroundJob.defaultLayer,
-    EventV2Bridge.defaultLayer,
-    Config.defaultLayer,
-    CrossSpawnSpawner.defaultLayer,
-    Session.defaultLayer,
-    SessionRunState.defaultLayer,
-    SessionStatus.defaultLayer,
-    Truncate.defaultLayer,
-    ToolRegistry.defaultLayer,
-    Database.defaultLayer,
-    RuntimeFlags.layer(flags),
+  LayerNode.compile(
+    LayerNode.group([
+      Agent.node,
+      BackgroundJob.node,
+      EventV2Bridge.node,
+      Config.node,
+      CrossSpawnSpawner.node,
+      Session.node,
+      SessionProjector.node,
+      SessionLifecycle.node,
+      SessionStatus.node,
+      Truncate.node,
+      ToolRegistry.node,
+      Database.node,
+      RuntimeFlags.node,
+      Ripgrep.node,
+    ]),
+    [[RuntimeFlags.node, RuntimeFlags.layer(flags)]],
   )
 
 const it = testEffect(layer())
@@ -58,7 +68,10 @@ function defer<T>() {
   return { promise, resolve }
 }
 
-const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned") {
+const seed = Effect.fn("TaskToolTest.seed")(function* (
+  title = "Pinned",
+  taskState: "completed" | "pending" = "completed",
+) {
   const session = yield* Session.Service
   const chat = yield* session.create({ title })
   const user = yield* session.updateMessage({
@@ -85,18 +98,95 @@ const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned") {
     time: { created: Date.now() },
   }
   yield* session.updateMessage(assistant)
+  yield* session.updatePart({
+    id: PartID.ascending(),
+    messageID: assistant.id,
+    sessionID: chat.id,
+    type: "tool",
+    callID: taskCallID,
+    tool: "task",
+    state:
+      taskState === "pending"
+        ? { status: "pending", input: {}, raw: "{}" }
+        : {
+            status: "completed",
+            input: {},
+            output: "",
+            title,
+            metadata: {},
+            time: { start: Date.now(), end: Date.now() },
+          },
+  })
   return { chat, assistant }
 })
 
-function stubOps(opts?: { onPrompt?: (input: SessionPrompt.PromptInput) => void; text?: string }): TaskPromptOps {
+const stubOps = Effect.fn("TaskToolTest.stubOps")(function* (opts?: {
+  onPrompt?: (input: SessionPrompt.PromptInput) => void
+  text?: string
+}) {
+  const database = yield* Database.Service
+  const run = (input: SessionPrompt.PromptInput) =>
+    Effect.sync(() => {
+      opts?.onPrompt?.(input)
+      return reply(input, opts?.text ?? "done")
+    })
+  const admitToolCall: TaskPromptOps["admitToolCall"] = (input, admit) =>
+    MessageV2.get({ sessionID: input.sessionID, messageID: input.messageID }).pipe(
+      Effect.provideService(Database.Service, database),
+      Effect.orDie,
+      Effect.flatMap((message) => {
+        const parts = message.parts.filter(
+          (item): item is SessionV1.ToolPart => item.type === "tool" && item.callID === input.toolCallID,
+        )
+        if (parts.length !== 1) return Effect.succeed(undefined)
+        return admit(parts[0])
+      }),
+    )
   return {
     cancel: () => Effect.void,
     resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
-    prompt: (input) =>
-      Effect.sync(() => {
-        opts?.onPrompt?.(input)
-        return reply(input, opts?.text ?? "done")
-      }),
+    prompt: (input, _preparedSession, admission) => admitThen(input, admission, run(input)),
+    promptAdmitted: run,
+    admitToolCall,
+  } satisfies TaskPromptOps
+})
+
+function admitThen(
+  input: SessionPrompt.PromptInput,
+  admission: ((message: SessionV1.WithParts) => Effect.Effect<boolean>) | undefined,
+  work: Effect.Effect<SessionV1.WithParts>,
+) {
+  return Effect.gen(function* () {
+    if (admission) yield* admission(admittedPrompt(input))
+    return yield* work
+  })
+}
+
+function admittedPrompt(input: SessionPrompt.PromptInput): SessionV1.WithParts {
+  const id = input.messageID ?? MessageID.ascending()
+  return {
+    info: {
+      id,
+      role: "user",
+      sessionID: input.sessionID,
+      agent: input.agent ?? "general",
+      model: input.model ?? ref,
+      time: { created: Date.now() },
+    },
+    parts: input.parts.flatMap((part) =>
+      part.type === "text"
+        ? [
+            {
+              id: PartID.ascending(),
+              messageID: id,
+              sessionID: input.sessionID,
+              type: "text" as const,
+              text: part.text,
+              ...(part.synthetic === undefined ? {} : { synthetic: part.synthetic }),
+            },
+          ]
+        : [],
+    ),
   }
 }
 
@@ -216,7 +306,7 @@ describe("tool.task", () => {
       const tool = yield* TaskTool
       const def = yield* tool.init()
       let seen: SessionPrompt.PromptInput | undefined
-      const promptOps = stubOps({ text: "resumed", onPrompt: (input) => (seen = input) })
+      const promptOps = yield* stubOps({ text: "resumed", onPrompt: (input) => (seen = input) })
 
       const result = yield* def.execute(
         {
@@ -228,6 +318,7 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: taskCallID,
           agent: "build",
           abort: new AbortController().signal,
           extra: { promptOps },
@@ -243,11 +334,6 @@ describe("tool.task", () => {
       expect(result.metadata.sessionId).toBe(child.id)
       expect(result.output).toContain(`<task id="${child.id}" state="completed">`)
       expect(seen?.sessionID).toBe(child.id)
-      expect(seen?.messageID).toBe(result.metadata.childTurnMessageId)
-      expect((yield* sessions.get(child.id)).metadata?.taskOrigin).toMatchObject({
-        childSessionId: child.id,
-        childTurnMessageId: seen?.messageID,
-      })
       expect(seen?.variant).toBe("xhigh")
     }),
   )
@@ -258,7 +344,7 @@ describe("tool.task", () => {
       const tool = yield* TaskTool
       const def = yield* tool.init()
       const calls: unknown[] = []
-      const promptOps = stubOps()
+      const promptOps = yield* stubOps()
 
       const exec = (extra?: Record<string, any>) =>
         def.execute(
@@ -270,6 +356,7 @@ describe("tool.task", () => {
           {
             sessionID: chat.id,
             messageID: assistant.id,
+            callID: taskCallID,
             agent: "build",
             abort: new AbortController().signal,
             extra: { promptOps, ...extra },
@@ -307,16 +394,21 @@ describe("tool.task", () => {
       const cancelled = defer<SessionID>()
       const abort = new AbortController()
       const promptOps: TaskPromptOps = {
+        ...(yield* stubOps()),
         cancel: (sessionID) =>
           Effect.sync(() => {
             cancelled.resolve(sessionID)
           }),
         resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
-        prompt: (input) =>
-          Effect.promise(() => {
-            ready.resolve(input)
-            return cancelled.promise
-          }).pipe(Effect.as(reply(input, "cancelled"))),
+        prompt: (input, _preparedSession, admission) =>
+          admitThen(
+            input,
+            admission,
+            Effect.promise(() => {
+              ready.resolve(input)
+              return cancelled.promise
+            }).pipe(Effect.as(reply(input, "cancelled"))),
+          ),
       }
 
       const fiber = yield* def
@@ -329,6 +421,7 @@ describe("tool.task", () => {
           {
             sessionID: chat.id,
             messageID: assistant.id,
+            callID: taskCallID,
             agent: "build",
             abort: abort.signal,
             extra: { promptOps },
@@ -351,11 +444,11 @@ describe("tool.task", () => {
   it.instance("execute creates a child when task_id does not exist", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service
-      const { chat, assistant } = yield* seed()
+      const { chat, assistant } = yield* seed("Pinned", "pending")
       const tool = yield* TaskTool
       const def = yield* tool.init()
       let seen: SessionPrompt.PromptInput | undefined
-      const promptOps = stubOps({ text: "created", onPrompt: (input) => (seen = input) })
+      const promptOps = yield* stubOps({ text: "created", onPrompt: (input) => (seen = input) })
 
       const result = yield* def.execute(
         {
@@ -367,6 +460,7 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: taskCallID,
           agent: "build",
           abort: new AbortController().signal,
           extra: { promptOps },
@@ -382,7 +476,291 @@ describe("tool.task", () => {
       expect(result.metadata.sessionId).not.toBe("ses_missing")
       expect(result.output).toContain(`<task id="${result.metadata.sessionId}" state="completed">`)
       expect(seen?.sessionID).toBe(result.metadata.sessionId)
+      const admitted = seen as SessionPrompt.PromptInput | undefined
+      if (!admitted) return yield* Effect.die("Task prompt was not admitted")
+      const childTurnMessageID = admitted.messageID
+      if (!childTurnMessageID) return yield* Effect.die("Task prompt did not retain its exact message ID")
+      const child = yield* sessions.get(result.metadata.sessionId)
+      const childMessages = yield* sessions.messages({ sessionID: child.id })
+      const parentMessage = yield* MessageV2.get({ sessionID: chat.id, messageID: assistant.id })
+      const parentTask = parentMessage.parts.find(
+        (part): part is SessionV1.ToolPart => part.type === "tool" && part.callID === taskCallID,
+      )
+      expect(child.metadata?.taskOrigin).toEqual({
+        parentSessionId: chat.id,
+        sourceMessageId: assistant.id,
+        toolCallId: taskCallID,
+        childSessionId: child.id,
+        childTurnMessageId: childTurnMessageID,
+        agent: "general",
+        model: ref,
+      })
+      expect(childMessages).toHaveLength(1)
+      expect(childMessages[0]?.info.id).toBe(childTurnMessageID)
+      expect(childMessages[0]?.parts).toEqual([
+        expect.objectContaining({ type: "text", text: "look into the cache key path" }),
+      ])
+      expect(parentTask?.state.status).toBe("running")
+      if (parentTask?.state.status !== "running") return yield* Effect.die("Parent Task part did not become running")
+      expect(parentTask.state.input).toEqual({
+        description: "inspect bug",
+        prompt: "look into the cache key path",
+        subagent_type: "general",
+        task_id: "ses_missing",
+      })
+      expect(parentTask.state.metadata).toMatchObject({
+        parentSessionId: chat.id,
+        sessionId: child.id,
+        childTurnMessageId: childTurnMessageID,
+      })
     }),
+  )
+
+  it.instance("rejects Task admission without an owning call ID before persisting child provenance", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const exit = yield* def
+        .execute(
+          { description: "inspect bug", prompt: "inspect", subagent_type: "general" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            callID: "",
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: yield* stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(String(exit)).toContain("TaskTool requires an owning tool call ID")
+      expect(yield* sessions.children(chat.id)).toEqual([])
+    }),
+  )
+
+  it.instance("rejects mismatched Task call provenance without partial child persistence", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const exit = yield* def
+        .execute(
+          { description: "inspect bug", prompt: "inspect", subagent_type: "general" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            callID: "call-mismatched",
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: yield* stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(String(exit)).toContain("requires one exact parent tool part")
+      expect(yield* sessions.children(chat.id)).toEqual([])
+      expect((yield* sessions.messages({ sessionID: chat.id }))[0]?.parts[1]).not.toHaveProperty(
+        "state.metadata.childTurnMessageId",
+      )
+    }),
+  )
+
+  it.instance("rejects duplicate Task call provenance without partial child persistence", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const original = (yield* MessageV2.get({ sessionID: chat.id, messageID: assistant.id })).parts.find(
+        (part): part is SessionV1.ToolPart => part.type === "tool" && part.callID === taskCallID,
+      )!
+      yield* sessions.updatePart({ ...original, id: PartID.ascending() })
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const exit = yield* def
+        .execute(
+          { description: "inspect bug", prompt: "inspect", subagent_type: "general" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            callID: taskCallID,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: yield* stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(String(exit)).toContain("requires one exact parent tool part")
+      expect(yield* sessions.children(chat.id)).toEqual([])
+    }),
+  )
+
+  it.instance("rolls back all Task provenance when atomic admission is interrupted", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const events = yield* EventV2Bridge.Service
+      const { chat, assistant } = yield* seed("Pinned", "pending")
+      yield* events.project(SessionV1.Event.PartUpdated, (event) =>
+        event.data.part.type === "tool" && event.data.part.callID === taskCallID ? Effect.interrupt : Effect.void,
+      )
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const exit = yield* def
+        .execute(
+          { description: "inspect bug", prompt: "inspect", subagent_type: "general" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            callID: taskCallID,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: yield* stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(String(exit)).toContain("Task cancelled")
+      expect(yield* sessions.children(chat.id)).toEqual([])
+      const parent = yield* MessageV2.get({ sessionID: chat.id, messageID: assistant.id })
+      const task = parent.parts.find(
+        (part): part is SessionV1.ToolPart => part.type === "tool" && part.callID === taskCallID,
+      )
+      expect(task?.state).toEqual({ status: "pending", input: {}, raw: "{}" })
+      expect(task?.metadata).toBeUndefined()
+    }),
+  )
+
+  it.instance("prevents subagents from launching subagents by default", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const child = yield* sessions.create({ parentID: chat.id, title: "child" })
+      const nestedAssistant = yield* sessions.updateMessage({
+        ...assistant,
+        id: MessageID.ascending(),
+        parentID: MessageID.ascending(),
+        sessionID: child.id,
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: nestedAssistant.id,
+        sessionID: child.id,
+        type: "tool",
+        callID: taskCallID,
+        tool: "task",
+        state: {
+          status: "completed",
+          input: {},
+          output: "",
+          title: "nested",
+          metadata: {},
+          time: { start: Date.now(), end: Date.now() },
+        },
+      })
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let asked = false
+
+      const exit = yield* def
+        .execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+          },
+          {
+            sessionID: child.id,
+            messageID: nestedAssistant.id,
+            callID: taskCallID,
+            agent: "general",
+            abort: new AbortController().signal,
+            extra: { promptOps: yield* stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.sync(() => (asked = true)),
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(asked).toBe(false)
+      expect(yield* sessions.children(child.id)).toHaveLength(0)
+    }),
+  )
+
+  it.instance(
+    "allows nested subagents up to the configured depth",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const child = yield* sessions.create({ parentID: chat.id, title: "child" })
+        const nestedAssistant = yield* sessions.updateMessage({
+          ...assistant,
+          id: MessageID.ascending(),
+          parentID: MessageID.ascending(),
+          sessionID: child.id,
+        })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: nestedAssistant.id,
+          sessionID: child.id,
+          type: "tool",
+          callID: taskCallID,
+          tool: "task",
+          state: {
+            status: "completed",
+            input: {},
+            output: "",
+            title: "nested",
+            metadata: {},
+            time: { start: Date.now(), end: Date.now() },
+          },
+        })
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+
+        const result = yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+          },
+          {
+            sessionID: child.id,
+            messageID: nestedAssistant.id,
+            callID: taskCallID,
+            agent: "general",
+            abort: new AbortController().signal,
+            extra: { promptOps: yield* stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect((yield* sessions.get(result.metadata.sessionId)).parentID).toBe(child.id)
+      }),
+    { config: { subagent_depth: 2 } },
   )
 
   it.instance(
@@ -394,7 +772,7 @@ describe("tool.task", () => {
         const tool = yield* TaskTool
         const def = yield* tool.init()
         let seen: SessionPrompt.PromptInput | undefined
-        const promptOps = stubOps({ onPrompt: (input) => (seen = input) })
+        const promptOps = yield* stubOps({ onPrompt: (input) => (seen = input) })
 
         const result = yield* def.execute(
           {
@@ -405,6 +783,7 @@ describe("tool.task", () => {
           {
             sessionID: chat.id,
             messageID: assistant.id,
+            callID: taskCallID,
             agent: "build",
             abort: new AbortController().signal,
             extra: { promptOps },
@@ -426,19 +805,15 @@ describe("tool.task", () => {
           {
             permission: "bash",
             pattern: "*",
-            action: "allow",
+            action: "deny",
           },
           {
             permission: "read",
             pattern: "*",
-            action: "allow",
+            action: "deny",
           },
         ])
-        expect(seen?.tools).toEqual({
-          todowrite: false,
-          bash: false,
-          read: false,
-        })
+        expect(seen?.tools).toBeUndefined()
       }),
     {
       config: {
@@ -474,9 +849,10 @@ describe("tool.task", () => {
           {
             sessionID: chat.id,
             messageID: assistant.id,
+            callID: taskCallID,
             agent: "build",
             abort: new AbortController().signal,
-            extra: { promptOps: stubOps() },
+            extra: { promptOps: yield* stubOps() },
             messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
@@ -498,20 +874,23 @@ describe("tool.task", () => {
       const done = yield* Deferred.make<void>()
       const injected = yield* Deferred.make<SessionPrompt.PromptInput>()
       let runs = 0
+      const runPrompt = (input: SessionPrompt.PromptInput) => {
+        if (input.sessionID === chat.id) {
+          return Deferred.succeed(injected, input).pipe(Effect.as(reply(input, "injected")))
+        }
+        return Effect.gen(function* () {
+          runs += 1
+          yield* Deferred.succeed(ready, undefined)
+          yield* Deferred.await(done)
+          return reply(input, "background done")
+        })
+      }
       const promptOps: TaskPromptOps = {
         cancel: () => Effect.void,
         resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
-        prompt: (input) => {
-          if (input.sessionID === chat.id) {
-            return Deferred.succeed(injected, input).pipe(Effect.as(reply(input, "injected")))
-          }
-          return Effect.gen(function* () {
-            runs += 1
-            yield* Deferred.succeed(ready, undefined)
-            yield* Deferred.await(done)
-            return reply(input, "background done")
-          })
-        },
+        prompt: (input, _preparedSession, admission) => admitThen(input, admission, runPrompt(input)),
+        promptAdmitted: runPrompt,
+        admitToolCall: (yield* stubOps()).admitToolCall,
       }
 
       const fiber = yield* def
@@ -524,6 +903,7 @@ describe("tool.task", () => {
           {
             sessionID: chat.id,
             messageID: assistant.id,
+            callID: taskCallID,
             agent: "build",
             abort: new AbortController().signal,
             extra: { promptOps },
@@ -571,12 +951,13 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: taskCallID,
           agent: "build",
           abort: new AbortController().signal,
           extra: {
             promptOps: {
-              ...stubOps(),
-              prompt: () => Effect.never,
+              ...(yield* stubOps()),
+              prompt: (input, _preparedSession, admission) => admitThen(input, admission, Effect.never),
             } satisfies TaskPromptOps,
           },
           messages: [],
@@ -604,21 +985,31 @@ describe("tool.task", () => {
       const injected = defer<SessionPrompt.PromptInput>()
       let prompts = 0
       const promptOps: TaskPromptOps = {
-        ...stubOps(),
-        prompt: (input) => {
-          if (input.sessionID === chat.id) {
-            injected.resolve(input)
-            return Effect.succeed(reply(input, "done"))
-          }
-          prompts++
-          if (prompts === 1) return Effect.promise(() => first.promise).pipe(Effect.as(reply(input, "first done")))
-          updated.resolve(input)
-          return Effect.promise(() => second.promise).pipe(Effect.as(reply(input, "second done")))
+        ...(yield* stubOps()),
+        prompt: (input, _preparedSession, admission) =>
+          admitThen(
+            input,
+            admission,
+            Effect.suspend(() => {
+              if (input.sessionID === chat.id) {
+                injected.resolve(input)
+                return Effect.succeed(reply(input, "done"))
+              }
+              prompts++
+              if (prompts === 1) return Effect.promise(() => first.promise).pipe(Effect.as(reply(input, "first done")))
+              updated.resolve(input)
+              return Effect.promise(() => second.promise).pipe(Effect.as(reply(input, "second done")))
+            }),
+          ),
+        promptAdmitted: (input) => {
+          injected.resolve(input)
+          return Effect.succeed(reply(input, "done"))
         },
       }
       const context = {
         sessionID: chat.id,
         messageID: assistant.id,
+        callID: taskCallID,
         agent: "build",
         abort: new AbortController().signal,
         extra: { promptOps },
@@ -683,9 +1074,10 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: taskCallID,
           agent: "build",
           abort: new AbortController().signal,
-          extra: { promptOps: stubOps({ text: "background done" }) },
+          extra: { promptOps: yield* stubOps({ text: "background done" }) },
           messages: [],
           metadata: () => Effect.void,
           ask: () => Effect.void,
@@ -702,6 +1094,8 @@ describe("tool.task", () => {
   background.instance("background task completion does not wait for the parent async prompt", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
+      const releaseDelivery = yield* Deferred.make<void>()
+      const deliveryStarted = yield* Deferred.make<void>()
       const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
@@ -716,13 +1110,19 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: taskCallID,
           agent: "build",
           abort: new AbortController().signal,
           extra: {
             promptOps: {
-              ...stubOps({ text: "background done" }),
-              prompt: (input) =>
-                input.sessionID === chat.id ? Effect.never : Effect.succeed(reply(input, "background done")),
+              ...(yield* stubOps({ text: "background done" })),
+              prompt: (input, _preparedSession, admission) =>
+                admitThen(input, admission, Effect.succeed(reply(input, "background done"))),
+              promptAdmitted: (input) =>
+                Deferred.succeed(deliveryStarted, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseDelivery)),
+                  Effect.andThen(Effect.succeed(reply(input, "delivered"))),
+                ),
             } satisfies TaskPromptOps,
           },
           messages: [],
@@ -734,13 +1134,15 @@ describe("tool.task", () => {
       const waited = yield* jobs.wait({ id: result.metadata.sessionId, timeout: 1_000 })
       expect(waited.timedOut).toBe(false)
       expect(waited.info?.status).toBe("completed")
+      yield* Deferred.await(deliveryStarted)
+      yield* Deferred.succeed(releaseDelivery, undefined)
     }),
   )
 
   background.instance("removing the parent session cancels running background tasks", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
-      const sessions = yield* Session.Service
+      const lifecycle = yield* SessionLifecycle.Service
       const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
@@ -755,12 +1157,13 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: taskCallID,
           agent: "build",
           abort: new AbortController().signal,
           extra: {
             promptOps: {
-              ...stubOps(),
-              prompt: () => Effect.never,
+              ...(yield* stubOps()),
+              prompt: (input, _preparedSession, admission) => admitThen(input, admission, Effect.never),
             } satisfies TaskPromptOps,
           },
           messages: [],
@@ -769,7 +1172,7 @@ describe("tool.task", () => {
         },
       )
 
-      yield* sessions.remove(chat.id)
+      yield* lifecycle.remove(chat.id)
       const waited = yield* jobs.wait({ id: result.metadata.sessionId, timeout: 1_000 })
       expect(waited.timedOut).toBe(false)
       expect(waited.info?.status).toBe("cancelled")
@@ -779,7 +1182,7 @@ describe("tool.task", () => {
   background.instance("removing the child task session cancels its running background task", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
-      const sessions = yield* Session.Service
+      const lifecycle = yield* SessionLifecycle.Service
       const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
@@ -794,12 +1197,13 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: taskCallID,
           agent: "build",
           abort: new AbortController().signal,
           extra: {
             promptOps: {
-              ...stubOps(),
-              prompt: () => Effect.never,
+              ...(yield* stubOps()),
+              prompt: (input, _preparedSession, admission) => admitThen(input, admission, Effect.never),
             } satisfies TaskPromptOps,
           },
           messages: [],
@@ -808,7 +1212,7 @@ describe("tool.task", () => {
         },
       )
 
-      yield* sessions.remove(result.metadata.sessionId)
+      yield* lifecycle.remove(result.metadata.sessionId)
       const waited = yield* jobs.wait({ id: result.metadata.sessionId, timeout: 1_000 })
       expect(waited.timedOut).toBe(false)
       expect(waited.info?.status).toBe("cancelled")
@@ -818,7 +1222,7 @@ describe("tool.task", () => {
   background.instance("cancelling the parent run cancels running background tasks", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
-      const runState = yield* SessionRunState.Service
+      const runState = yield* SessionLifecycle.Service
       const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
@@ -833,12 +1237,13 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: taskCallID,
           agent: "build",
           abort: new AbortController().signal,
           extra: {
             promptOps: {
-              ...stubOps(),
-              prompt: () => Effect.never,
+              ...(yield* stubOps()),
+              prompt: (input, _preparedSession, admission) => admitThen(input, admission, Effect.never),
             } satisfies TaskPromptOps,
           },
           messages: [],
@@ -857,7 +1262,7 @@ describe("tool.task", () => {
   it.instance("cancelling a child run cancels its own pre-runner task job", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
-      const runState = yield* SessionRunState.Service
+      const runState = yield* SessionLifecycle.Service
       const sessions = yield* Session.Service
       const { chat } = yield* seed()
       const child = yield* sessions.create({ parentID: chat.id, title: "child" })
@@ -878,7 +1283,7 @@ describe("tool.task", () => {
   it.instance("cancelling a parent run recursively cancels descendant background tasks", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
-      const runState = yield* SessionRunState.Service
+      const runState = yield* SessionLifecycle.Service
       const sessions = yield* Session.Service
       const { chat } = yield* seed()
       const child = yield* sessions.create({ parentID: chat.id, title: "child" })

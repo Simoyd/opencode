@@ -18,12 +18,17 @@ import { described } from "./metadata"
 import { QueryBoolean } from "./query"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { SessionBusyError } from "../errors"
 
 const ConsoleStateResponse = Schema.Struct({
   consoleManagedProviders: Schema.mutable(Schema.Array(Schema.String)),
   activeOrgName: Schema.optionalKey(Schema.String),
   switchableOrgCount: NonNegativeInt,
 }).annotate({ identifier: "ConsoleState" })
+
+const CapabilitiesResponse = Schema.Struct({
+  backgroundSubagents: Schema.Boolean,
+}).annotate({ identifier: "ExperimentalCapabilities" })
 
 const ConsoleOrgOption = Schema.Struct({
   accountID: Schema.String,
@@ -84,6 +89,7 @@ export const SessionListQuery = Schema.Struct({
 })
 
 export const ExperimentalPaths = {
+  capabilities: "/experimental/capabilities",
   console: "/experimental/console",
   consoleOrgs: "/experimental/console/orgs",
   consoleSwitch: "/experimental/console/switch",
@@ -100,6 +106,16 @@ export const ExperimentalApi = HttpApi.make("experimental")
   .add(
     HttpApiGroup.make("experimental")
       .add(
+        HttpApiEndpoint.get("capabilities", ExperimentalPaths.capabilities, {
+          query: WorkspaceRoutingQuery,
+          success: described(CapabilitiesResponse, "Experimental capabilities"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "experimental.capabilities.get",
+            summary: "Get experimental capabilities",
+            description: "Get experimental features enabled on the OpenCode server.",
+          }),
+        ),
         HttpApiEndpoint.get("console", ExperimentalPaths.console, {
           query: WorkspaceRoutingQuery,
           success: described(ConsoleStateResponse, "Active Console provider metadata"),
@@ -221,7 +237,7 @@ export const ExperimentalApi = HttpApi.make("experimental")
           params: { sessionID: SessionID },
           query: WorkspaceRoutingQuery,
           success: described(Schema.Boolean, "Backgrounded subagents"),
-          error: HttpApiError.BadRequest,
+          error: [HttpApiError.BadRequest, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "experimental.session.background",

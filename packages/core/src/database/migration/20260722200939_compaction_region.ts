@@ -1,4 +1,5 @@
 import { Effect } from "effect"
+import { CompactionRegionProjection } from "../../session/compaction-region"
 import type { DatabaseMigration } from "../migration"
 
 export default {
@@ -24,6 +25,7 @@ export default {
       yield* tx.run(
         `CREATE INDEX \`compaction_region_session_start_idx\` ON \`compaction_region\` (\`session_id\`,\`start_message_id\`);`,
       )
+      yield* CompactionRegionProjection.backfill(tx)
     })
   },
 } satisfies DatabaseMigration.Migration

@@ -1,15 +1,13 @@
 import { describe, expect } from "bun:test"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Effect, Layer } from "effect"
 import path from "path"
-import * as Log from "@opencode-ai/core/util/log"
 import { resetDatabase } from "../fixture/db"
 import { TestInstance } from "../fixture/fixture"
 import { markPluginDependenciesReady } from "../fixture/plugin"
 import { testEffect } from "../lib/effect"
 import { httpApiLayer, request } from "./httpapi-layer"
-
-void Log.init({ print: false })
 
 const testStateLayer = Layer.effectDiscard(
   Effect.acquireRelease(
@@ -18,7 +16,7 @@ const testStateLayer = Layer.effectDiscard(
   ),
 )
 
-const it = testEffect(Layer.mergeAll(testStateLayer, FSUtil.defaultLayer, httpApiLayer))
+const it = testEffect(Layer.mergeAll(testStateLayer, LayerNode.compile(FSUtil.node), httpApiLayer))
 const projectOptions = { config: { formatter: false, lsp: false } }
 const providerID = "test-oauth-parity"
 const oauthURL = "https://example.com/oauth"
@@ -52,10 +50,6 @@ function providerList(input: unknown, key: "all" | "providers") {
 
 function providerByID(input: unknown, key: "all" | "providers", id: string) {
   return providerList(input, key).find((provider) => isRecord(provider) && provider.id === id)
-}
-
-function hasOnlyKeys(input: Record<string, unknown>, keys: string[]) {
-  return Object.keys(input).sort().join("\0") === keys.sort().join("\0")
 }
 
 function hasNonZeroModelCost(input: unknown, key: "all" | "providers", id: string) {
@@ -380,80 +374,6 @@ describe("provider HttpApi", () => {
       expect(hasProviderWithFetch(configBody, "providers")).toBe(false)
       expect(hasNonZeroModelCost(providerBody, "all", "google")).toBe(true)
       expect(hasNonZeroModelCost(configBody, "providers", "google")).toBe(true)
-    }),
-    { ...projectOptions, init: writeFunctionOptionsPlugin },
-  )
-
-  it.instance(
-    "serves compact connected provider facts for embedded runtimes",
-    Effect.gen(function* () {
-      const directory = (yield* TestInstance).directory
-      yield* setEnvScoped(
-        "OPENCODE_AUTH_CONTENT",
-        JSON.stringify({
-          google: { type: "oauth", refresh: "dummy", access: "dummy", expires: 9999999999999 },
-        }),
-      )
-
-      const response = yield* request("/provider/runtime", { headers: { "x-opencode-directory": directory } })
-      expect(response.status).toBe(200)
-      const body = yield* response.json
-      expect(isRecord(body)).toBe(true)
-      if (!isRecord(body)) return
-      expect(hasOnlyKeys(body, ["all", "connected", "default"])).toBe(true)
-      expect(Array.isArray(body.connected)).toBe(true)
-      expect(Array.isArray(body.all)).toBe(true)
-      expect(isRecord(body.default)).toBe(true)
-
-      const connected = new Set(Array.isArray(body.connected) ? body.connected : [])
-      const providers = Array.isArray(body.all) ? body.all : []
-      expect(connected.has("google")).toBe(true)
-      expect(providers.length).toBe(connected.size)
-      for (const value of providers) {
-        expect(isRecord(value)).toBe(true)
-        if (!isRecord(value)) continue
-        expect(typeof value.id).toBe("string")
-        if (typeof value.id !== "string") continue
-        expect(connected.has(value.id)).toBe(true)
-        expect(hasOnlyKeys(value, ["id", "models", "name"])).toBe(true)
-        expect(isRecord(value.models)).toBe(true)
-        if (!isRecord(value.models)) continue
-        expect(typeof value.name).toBe("string")
-        expect(Object.keys(value.models).length).toBeGreaterThan(0)
-        const defaultModelID = isRecord(body.default) ? body.default[value.id] : undefined
-        expect(typeof defaultModelID).toBe("string")
-        if (typeof defaultModelID !== "string") continue
-        expect(defaultModelID in value.models).toBe(true)
-        for (const [modelID, model] of Object.entries(value.models)) {
-          expect(isRecord(model)).toBe(true)
-          if (!isRecord(model)) continue
-          expect(
-            hasOnlyKeys(model, ["capabilities", "id", "limit", "name", "providerID", "variants"]) ||
-              hasOnlyKeys(model, ["capabilities", "id", "limit", "name", "providerID"]),
-          ).toBe(true)
-          expect("options" in model).toBe(false)
-          expect("headers" in model).toBe(false)
-          expect("cost" in model).toBe(false)
-          expect(model.id).toBe(modelID)
-          expect(model.providerID).toBe(value.id)
-          expect(typeof model.name).toBe("string")
-          expect(isRecord(model.capabilities)).toBe(true)
-          if (!isRecord(model.capabilities)) continue
-          expect(typeof model.capabilities.reasoning).toBe("boolean")
-          expect(isRecord(model.limit)).toBe(true)
-          if (!isRecord(model.limit)) continue
-          expect(typeof model.limit.context).toBe("number")
-          expect(
-            typeof model.limit.context === "number" && Number.isFinite(model.limit.context) && model.limit.context > 0,
-          ).toBe(true)
-          if ("variants" in model) {
-            expect(isRecord(model.variants)).toBe(true)
-            expect(isRecord(model.variants) && Object.values(model.variants).every((variant) => variant === null)).toBe(
-              true,
-            )
-          }
-        }
-      }
     }),
     { ...projectOptions, init: writeFunctionOptionsPlugin },
   )

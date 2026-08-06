@@ -5,9 +5,9 @@ import { and, asc, desc, eq, gt, inArray, lt, lte, or, sql } from "drizzle-orm"
 import type { Database } from "../database/database"
 import { SessionV1, type MessageID } from "../v1/session"
 import type { SessionSchema } from "./schema"
-import { CompactionRegionTable, MessageTable, PartTable } from "./sql"
+import { CompactionRegionTable, MessageTable, PartTable, SessionTable } from "./sql"
 
-type DatabaseService = Database.Interface["db"]
+type DatabaseService = Omit<Database.Interface["db"], "$client">
 type Position = { id: MessageID; time_created: number }
 type ReconcileInput = {
   sessionID: SessionSchema.ID
@@ -61,14 +61,21 @@ export const reconcile = Effect.fn("CompactionRegionProjection.reconcile")(funct
   if (completedAfter) markers.set(completedAfter.id, completedAfter)
 
   let didChange = false
-  if (input.removed?.marker) {
-    didChange = (yield* deleteRow(db, input.sessionID, input.removed.id)) || didChange
-  }
+  if (input.removed?.marker) didChange = (yield* deleteRow(db, input.sessionID, input.removed.id)) || didChange
   for (const marker of [...markers.values()].sort(comparePosition)) {
     const next = yield* deriveMarker(db, input.sessionID, marker.id)
     didChange = (yield* replaceRow(db, input.sessionID, marker.id, next)) || didChange
   }
   return didChange
+})
+
+export const backfill = Effect.fn("CompactionRegionProjection.backfill")(function* (db: DatabaseService) {
+  const sessions = yield* db
+    .select({ id: SessionTable.id })
+    .from(SessionTable)
+    .all()
+    .pipe(Effect.orDie)
+  for (const session of sessions) yield* reconcileAll(db, session.id)
 })
 
 function reconcileAll(db: DatabaseService, sessionID: SessionSchema.ID) {
@@ -82,15 +89,12 @@ function reconcileAll(db: DatabaseService, sessionID: SessionSchema.ID) {
       .all()
       .pipe(Effect.orDie)
     if (same(current, next)) return false
-
     const nextByMarker = new Map(next.map((row) => [row.marker_id, row]))
     for (const row of current) {
       if (nextByMarker.has(row.marker_id)) continue
       yield* deleteRow(db, sessionID, row.marker_id)
     }
-    for (const row of next) {
-      yield* replaceRow(db, sessionID, row.marker_id, row)
-    }
+    for (const row of next) yield* replaceRow(db, sessionID, row.marker_id, row)
     return true
   })
 }
@@ -316,7 +320,7 @@ function loadMessages(db: DatabaseService, sessionID: SessionSchema.ID) {
 function hydrateMessages(db: DatabaseService, messageRows: (typeof MessageTable.$inferSelect)[]) {
   return Effect.gen(function* () {
     if (messageRows.length === 0) return []
-    const messageIDs = messageRows.map((row) => row.id)
+    const messageIDs = new Set(messageRows.map((row) => row.id))
     const sessionID = messageRows[0]!.session_id
     if (messageRows.some((row) => row.session_id !== sessionID)) {
       return yield* Effect.die("Compaction hydration crossed persisted session owners")
@@ -324,12 +328,13 @@ function hydrateMessages(db: DatabaseService, messageRows: (typeof MessageTable.
     const partRows = yield* db
       .select()
       .from(PartTable)
-      .where(and(eq(PartTable.session_id, sessionID), inArray(PartTable.message_id, messageIDs)))
+      .where(eq(PartTable.session_id, sessionID))
       .orderBy(PartTable.message_id, PartTable.id)
       .all()
       .pipe(Effect.orDie)
     const parts = new Map<MessageID, SessionV1.Part[]>()
     for (const row of partRows) {
+      if (!messageIDs.has(row.message_id)) continue
       const part = { ...row.data, id: row.id, sessionID: row.session_id, messageID: row.message_id } as SessionV1.Part
       const list = parts.get(row.message_id)
       if (list) list.push(part)
@@ -443,9 +448,8 @@ function semanticCount(
       message.info.role === "assistant" &&
       replaySourcesByMessageID.has(message.info.parentID) &&
       !canonicalReplaySources.has(replaySourcesByMessageID.get(message.info.parentID)!)
-    ) {
+    )
       continue
-    }
     if (!canonicalReplaySources.has(message.info.id)) identities.add(`message:${message.info.id}`)
   }
   return identities.size
@@ -466,20 +470,29 @@ function protocol(message: SessionV1.WithParts) {
   let continuation: { owner: MessageID } | undefined
   for (const part of message.parts) {
     if (part.type !== "text") continue
-    const provenance = part.serverProvenance
-    if (provenance?.type === "compaction-replay") {
-      const owner = provenance.ownerMessageID
-      const source = provenance.sourceMessageID
+    const metadata = part.metadata as Record<string, unknown> | undefined
+    const isReplay = metadata?.compaction_replay === true
+    const isContinuation = metadata?.compaction_continue === true
+    if (!isReplay && !isContinuation) continue
+    if (isReplay && isContinuation) throw new Error(`Compaction protocol row ${message.info.id} has contradictory roles`)
+    const owner = metadata?.compaction_owner_marker_id
+    if (typeof owner !== "string" || owner.length === 0) {
+      throw new Error(`Compaction protocol row ${message.info.id} is missing marker ownership`)
+    }
+    if (isReplay) {
+      const source = metadata?.compaction_replay_source_message_id
+      if (typeof source !== "string" || source.length === 0) {
+        throw new Error(`Compaction replay ${message.info.id} is missing its source identity`)
+      }
       if ((replay && (replay.owner !== owner || replay.source !== source)) || continuation) {
-        throw new Error(`Compaction replay ${message.info.id} has contradictory server provenance`)
+        throw new Error(`Compaction replay ${message.info.id} has contradictory part metadata`)
       }
-      replay = { owner, source }
-    } else if (provenance?.type === "compaction-continuation") {
-      const owner = provenance.ownerMessageID
-      if ((continuation && continuation.owner !== owner) || replay) {
-        throw new Error(`Compaction continuation ${message.info.id} has contradictory server provenance`)
+      replay = { owner: owner as MessageID, source: source as MessageID }
+    } else {
+      if (part.synthetic !== true || (continuation && continuation.owner !== owner) || replay) {
+        throw new Error(`Compaction continuation ${message.info.id} has contradictory part metadata`)
       }
-      continuation = { owner }
+      continuation = { owner: owner as MessageID }
     }
   }
   return { replay, continuation }
@@ -550,10 +563,7 @@ function replaceRow(
   })
 }
 
-function same(
-  left: (typeof CompactionRegionTable.$inferSelect)[],
-  right: (typeof CompactionRegionTable.$inferInsert)[],
-) {
+function same(left: (typeof CompactionRegionTable.$inferSelect)[], right: (typeof CompactionRegionTable.$inferInsert)[]) {
   if (left.length !== right.length) return false
   const rightByMarker = new Map(right.map((row) => [row.marker_id, row]))
   return left.every((row) => {

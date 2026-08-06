@@ -24,7 +24,9 @@ import {
 import * as NodeChildProcess from "node:child_process"
 import { PassThrough } from "node:stream"
 import launch from "cross-spawn"
-import { scrubUserToolEnv } from "./environment"
+import { makeGlobalNode } from "./effect/app-node"
+import { filesystem, path } from "./effect/app-node-platform"
+import { Environment } from "./environment"
 
 const toError = (err: unknown): Error => (err instanceof globalThis.Error ? err : new globalThis.Error(String(err)))
 
@@ -106,9 +108,9 @@ export const make = Effect.gen(function* () {
   })
 
   const env = (opts: ChildProcess.CommandOptions) => {
-    if (opts.extendEnv) return scrubUserToolEnv({ ...globalThis.process.env, ...opts.env })
-    if (Predicate.isUndefined(opts.env)) return scrubUserToolEnv(globalThis.process.env)
-    return opts.env
+    if (opts.extendEnv) return Environment.userToolEnv(globalThis.process.env, opts.env)
+    if (Predicate.isUndefined(opts.env)) return Environment.scrubUserToolEnv(globalThis.process.env)
+    return Environment.scrubUserToolEnv(opts.env)
   }
 
   const input = (x: ChildProcess.CommandInput | undefined): NodeChildProcess.IOType | undefined =>
@@ -298,10 +300,14 @@ export const make = Effect.gen(function* () {
   ) => {
     if (globalThis.process.platform === "win32") {
       return Effect.callback<void, PlatformError.PlatformError>((resume) => {
-        NodeChildProcess.exec(`taskkill /pid ${proc.pid} /T /F`, { windowsHide: true }, (err) => {
-          if (err) return resume(Effect.fail(toPlatformError("kill", toError(err), command)))
-          resume(Effect.void)
-        })
+        NodeChildProcess.exec(
+          `taskkill /pid ${proc.pid} /T /F`,
+          { env: Environment.scrubUserToolEnv(), windowsHide: true },
+          (err) => {
+            if (err) return resume(Effect.fail(toPlatformError("kill", toError(err), command)))
+            resume(Effect.void)
+          },
+        )
       })
     }
 
@@ -499,11 +505,11 @@ export const make = Effect.gen(function* () {
   return makeSpawner(spawnCommand)
 })
 
-export const layer: Layer.Layer<ChildProcessSpawner, never, FileSystem.FileSystem | Path.Path> = Layer.effect(
+const layer: Layer.Layer<ChildProcessSpawner, never, FileSystem.FileSystem | Path.Path> = Layer.effect(
   ChildProcessSpawner,
   make,
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(NodeFileSystem.layer), Layer.provide(NodePath.layer))
+export const node = makeGlobalNode({ service: ChildProcessSpawner, layer, deps: [filesystem, path] })
 
 export * as CrossSpawnSpawner from "./cross-spawn-spawner"

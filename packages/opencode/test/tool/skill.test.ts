@@ -1,14 +1,14 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Cause, Effect, Exit, Layer } from "effect"
 import { afterEach, describe, expect } from "bun:test"
 import path from "path"
-import { pathToFileURL } from "url"
 import type { Permission } from "../../src/permission"
 import type { Tool } from "@/tool/tool"
 import { SkillTool } from "../../src/tool/skill"
 import { ToolRegistry } from "@/tool/registry"
-import { ConfigMarkdown } from "@/config/markdown"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { testEffect } from "../lib/effect"
@@ -27,9 +27,7 @@ afterEach(async () => {
   await disposeAllInstances()
 })
 
-const node = CrossSpawnSpawner.defaultLayer
-
-const it = testEffect(Layer.mergeAll(ToolRegistry.defaultLayer, node))
+const it = testEffect(LayerNode.compile(LayerNode.group([ToolRegistry.node, CrossSpawnSpawner.node, Ripgrep.node])))
 
 describe("tool.skill", () => {
   it.instance("execute returns skill content block with files", () =>
@@ -69,6 +67,9 @@ Use this skill.
       })).find((tool) => tool.id === SkillTool.id)
       if (!tool) throw new Error("Skill tool not found")
 
+      expect(tool.description).not.toContain("tool-skill")
+      expect(tool.description).not.toContain("Skill for tool tests.")
+
       const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
       const ctx: Tool.Context = {
         ...baseCtx,
@@ -87,59 +88,8 @@ Use this skill.
       expect(requests[0].always).toContain("tool-skill")
       expect(result.metadata.dir).toBe(skill)
       expect(result.output).toContain(`<skill_content name="tool-skill">`)
-      expect(result.output).toContain(`Base directory for this skill: ${pathToFileURL(skill).href}`)
+      expect(result.output).toContain(`Base directory for this skill: ${skill}`)
       expect(result.output).toContain(`<file>${file}</file>`)
-    }),
-  )
-
-  it.instance("execute loads skills whose frontmatter description contains an unquoted colon", () =>
-    Effect.gen(function* () {
-      const dir = (yield* TestInstance).directory
-      const skill = path.join(dir, ".opencode", "skill", "colon-skill")
-      yield* Effect.promise(() =>
-        Bun.write(
-          path.join(skill, "SKILL.md"),
-          `---
-name: colon-skill
-description: Build UI with MVVM: thin bindable view models.
----
-
-# Colon Skill
-
-Use this skill.
-`,
-        ),
-      )
-
-      yield* Effect.promise(() => ConfigMarkdown.parse(path.join(skill, "SKILL.md")))
-
-      const home = process.env.OPENCODE_TEST_HOME
-      process.env.OPENCODE_TEST_HOME = dir
-      yield* Effect.addFinalizer(() =>
-        Effect.sync(() => {
-          process.env.OPENCODE_TEST_HOME = home
-        }),
-      )
-
-      const registry = yield* ToolRegistry.Service
-      const agent = { name: "build", mode: "primary" as const, permission: [], options: {} }
-      const tool = (yield* registry.tools({
-        providerID: "opencode" as any,
-        modelID: "gpt-5" as any,
-        agent,
-      })).find((tool) => tool.id === SkillTool.id)
-      if (!tool) throw new Error("Skill tool not found")
-
-      const result = yield* tool.execute(
-        { name: "colon-skill" },
-        {
-          ...baseCtx,
-          ask: () => Effect.void,
-        },
-      )
-
-      expect(result.metadata.dir).toBe(skill)
-      expect(result.output).toContain(`<skill_content name="colon-skill">`)
     }),
   )
 

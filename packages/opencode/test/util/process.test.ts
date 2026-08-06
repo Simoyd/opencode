@@ -3,7 +3,6 @@ import fs from "fs/promises"
 import path from "path"
 import { Process } from "@/util/process"
 import { tmpdir } from "../fixture/fixture"
-import { Environment } from "@opencode-ai/core/environment"
 
 function node(script: string) {
   return [process.execPath, "-e", script]
@@ -76,41 +75,6 @@ describe("util.process", () => {
       },
     })
     expect(out.stdout.toString()).toBe("set")
-  })
-
-  test("scrubs sidecar controls from actual child processes while preserving normal tool env", async () => {
-    const out = await Process.run(
-      node(`process.stdout.write(JSON.stringify({
-        home: process.env.HOME === "normal-home",
-        xdg: process.env.XDG_CONFIG_HOME === "normal-xdg-config",
-        tool: process.env.OPENCODE_API_KEY === "provider-present",
-        isolated: process.env.${Environment.ISOLATED_ROOT_ENV} === undefined,
-        serverPassword: process.env.OPENCODE_SERVER_PASSWORD === undefined,
-        diagnostics: process.env.OPENCODE_AVALONIA_STREAM_DIAGNOSTICS === undefined,
-        runtimeAssetRoot: process.env.OPENCODE_AVALONIA_RUNTIME_ASSET_ROOT === undefined
-      }))`),
-      {
-        env: {
-          HOME: "normal-home",
-          XDG_CONFIG_HOME: "normal-xdg-config",
-          OPENCODE_API_KEY: "provider-present",
-          [Environment.ISOLATED_ROOT_ENV]: "isolated-root",
-          OPENCODE_SERVER_PASSWORD: "sidecar-secret",
-          OPENCODE_AVALONIA_STREAM_DIAGNOSTICS: "1",
-          OPENCODE_AVALONIA_RUNTIME_ASSET_ROOT: "sidecar-assets",
-        },
-      },
-    )
-
-    expect(JSON.parse(out.stdout.toString())).toEqual({
-      home: true,
-      xdg: true,
-      tool: true,
-      isolated: true,
-      serverPassword: true,
-      diagnostics: true,
-      runtimeAssetRoot: true,
-    })
   })
 
   test("uses shell in run on Windows", async () => {

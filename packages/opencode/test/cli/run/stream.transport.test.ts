@@ -5,6 +5,7 @@ import type { FooterApi, FooterEvent, LocalReplayRow, RunFilePart, StreamCommit 
 
 type EventStream = Awaited<ReturnType<OpencodeClient["event"]["subscribe"]>>["stream"]
 type GlobalEventStream = Awaited<ReturnType<OpencodeClient["global"]["event"]>>["stream"]
+type RoutedGlobalEvent = Extract<GlobalEvent, { directory: string }>
 type SdkEvent = EventStream extends AsyncGenerator<infer T, unknown, unknown> ? T : never
 type SessionMessage = NonNullable<Awaited<ReturnType<OpencodeClient["session"]["messages"]>>["data"]>[number]
 type SessionChild = NonNullable<Awaited<ReturnType<OpencodeClient["session"]["children"]>>["data"]>[number]
@@ -363,11 +364,11 @@ function child(id: string): SessionChild {
   }
 }
 
-function globalEvent(payload: GlobalEvent["payload"]): GlobalEvent {
+function globalEvent(payload: SdkEvent): RoutedGlobalEvent {
   return {
     directory: "/tmp",
     project: "project-1",
-    payload,
+    payload: payload as RoutedGlobalEvent["payload"],
   }
 }
 
@@ -1183,7 +1184,7 @@ describe("run stream transport", () => {
     }
   })
 
-  test("drops completed historical subagent tabs during bootstrap", async () => {
+  test("keeps completed historical subagent tabs during bootstrap", async () => {
     const src = eventFeed()
     const ui = footer()
     const transport = await createSessionTransport({
@@ -1231,7 +1232,7 @@ describe("run stream transport", () => {
         return item?.type === "stream.subagent" ? item.state : undefined
       })
 
-      expect(state.tabs).toEqual([])
+      expect(state.tabs).toEqual([expect.objectContaining({ sessionID: "child-1", status: "completed" })])
       expect(state.details).toEqual({})
     } finally {
       src.close()

@@ -19,7 +19,7 @@ const RuntimeProviderModel = Schema.Struct({
     reasoning: Schema.Boolean,
   }),
   limit: Schema.Struct({
-    context: Schema.Finite,
+    context: Schema.optional(Schema.Finite),
   }),
   variants: Schema.optional(Schema.Record(Schema.String, Schema.Null)),
 })
@@ -30,9 +30,14 @@ const RuntimeProviderInfo = Schema.Struct({
   models: Schema.Record(Schema.String, RuntimeProviderModel),
 })
 
+const RuntimeProviderDefault = Schema.Struct({
+  providerID: Schema.String,
+  modelID: Schema.String,
+}).annotate({ identifier: "RuntimeProviderDefault" })
+
 export const ProviderRuntimeListResult = Schema.Struct({
   all: Schema.Array(RuntimeProviderInfo),
-  default: Schema.Record(Schema.String, Schema.String),
+  default: Schema.NullOr(RuntimeProviderDefault),
   connected: Schema.Array(Schema.String),
 })
 

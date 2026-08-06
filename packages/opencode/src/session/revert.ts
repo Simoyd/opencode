@@ -1,18 +1,14 @@
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect, Layer, Context, Schema } from "effect"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Snapshot } from "../snapshot"
 import { Storage } from "@/storage/storage"
-import { Log } from "@opencode-ai/core/util/log"
 import { Session } from "./session"
 import { MessageV2 } from "./message-v2"
 import { SessionID, MessageID, PartID } from "./schema"
-import { SessionRunState } from "./run-state"
+import { SessionLifecycle } from "./lifecycle"
 import { SessionSummary } from "./summary"
-import { Database } from "@opencode-ai/core/database/database"
-import { SessionMaintenance } from "@opencode-ai/core/session/maintenance"
-
-const log = Log.create({ service: "session.revert" })
 
 export const RevertInput = Schema.Struct({
   sessionID: SessionID,
@@ -22,14 +18,14 @@ export const RevertInput = Schema.Struct({
 export type RevertInput = Schema.Schema.Type<typeof RevertInput>
 
 export interface Interface {
-  readonly revert: (input: RevertInput) => Effect.Effect<Session.Info, Session.BusyError>
-  readonly unrevert: (input: { sessionID: SessionID }) => Effect.Effect<Session.Info, Session.BusyError>
+  readonly revert: (input: RevertInput) => Effect.Effect<Session.Info, Session.NotFound | Session.BusyError>
+  readonly unrevert: (input: { sessionID: SessionID }) => Effect.Effect<Session.Info, Session.NotFound | Session.BusyError>
   readonly cleanup: (session: Session.Info) => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionRevert") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const sessions = yield* Session.Service
@@ -37,72 +33,73 @@ export const layer = Layer.effect(
     const storage = yield* Storage.Service
     const events = yield* EventV2Bridge.Service
     const summary = yield* SessionSummary.Service
-    const state = yield* SessionRunState.Service
-    const { db } = yield* Database.Service
+    const state = yield* SessionLifecycle.Service
 
     const revert = Effect.fn("SessionRevert.revert")(function* (input: RevertInput) {
-      yield* state.assertNotBusy(input.sessionID)
-      const all = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
-      let lastUser: SessionV1.User | undefined
-      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      return yield* state.commit(input.sessionID, Effect.gen(function* () {
+        const all = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
+        let lastUser: SessionV1.User | undefined
+        const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
 
-      let rev: Session.Info["revert"]
-      const patches: Snapshot.Patch[] = []
-      for (const msg of all) {
-        if (msg.info.role === "user") lastUser = msg.info
-        const remaining = []
-        for (const part of msg.parts) {
-          if (rev) {
-            if (part.type === "patch") patches.push(part)
-            continue
-          }
-
-          if (!rev) {
-            if ((msg.info.id === input.messageID && !input.partID) || part.id === input.partID) {
-              const partID = remaining.some((item) => ["text", "tool"].includes(item.type)) ? input.partID : undefined
-              rev = {
-                messageID: !partID && lastUser ? lastUser.id : msg.info.id,
-                partID,
-              }
+        let rev: Session.Info["revert"]
+        const patches: Snapshot.Patch[] = []
+        for (const msg of all) {
+          if (msg.info.role === "user") lastUser = msg.info
+          const remaining = []
+          for (const part of msg.parts) {
+            if (rev) {
+              if (part.type === "patch") patches.push(part)
+              continue
             }
-            remaining.push(part)
+
+            if (!rev) {
+              if ((msg.info.id === input.messageID && !input.partID) || part.id === input.partID) {
+                const partID = remaining.some((item) => ["text", "tool"].includes(item.type)) ? input.partID : undefined
+                rev = {
+                  messageID: !partID && lastUser ? lastUser.id : msg.info.id,
+                  partID,
+                }
+              }
+              remaining.push(part)
+            }
           }
         }
-      }
 
-      if (!rev) return session
+        if (!rev) return session
 
-      rev.snapshot = session.revert?.snapshot ?? (yield* snap.track())
-      if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot)
-      yield* snap.revert(patches)
-      if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot)
-      const boundaryIndex = all.findIndex((msg) => msg.info.id === rev.messageID)
-      if (boundaryIndex < 0)
-        return yield* Effect.die("Revert boundary is absent from the canonical session message order")
-      const range = all.slice(boundaryIndex)
-      const diffs = yield* summary.computeDiff({ messages: range })
-      yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
-      yield* events.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
-      yield* sessions.setRevert({
-        sessionID: input.sessionID,
-        revert: rev,
-        summary: {
-          additions: diffs.reduce((sum, x) => sum + x.additions, 0),
-          deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
-          files: diffs.length,
-        },
-      })
-      return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+        rev.snapshot = session.revert?.snapshot ?? (yield* snap.track())
+        if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot)
+        yield* snap.revert(patches)
+        if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot)
+        const boundaryIndex = all.findIndex((msg) => msg.info.id === rev.messageID)
+        if (boundaryIndex < 0)
+          return yield* Effect.die("Revert boundary is absent from the canonical session message order")
+        const range = all.slice(boundaryIndex)
+        const diffs = yield* summary.computeDiff({ messages: range })
+        yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
+        yield* events.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
+        yield* sessions.setRevert({
+          sessionID: input.sessionID,
+          revert: rev,
+          summary: {
+            additions: diffs.reduce((sum, x) => sum + x.additions, 0),
+            deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
+            files: diffs.length,
+          },
+        })
+        return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      }))
     })
 
     const unrevert = Effect.fn("SessionRevert.unrevert")(function* (input: { sessionID: SessionID }) {
-      log.info("unreverting", input)
-      yield* state.assertNotBusy(input.sessionID)
-      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-      if (!session.revert) return session
-      if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot)
-      yield* sessions.clearRevert(input.sessionID)
-      return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      return yield* state.commit(input.sessionID, Effect.gen(function* () {
+        yield* Effect.logInfo("unreverting", { sessionID: input.sessionID })
+        const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+        if (!session.revert) return session
+        if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot)
+        yield* sessions.clearRevert(input.sessionID)
+        return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      }))
     })
 
     const cleanup = Effect.fn("SessionRevert.cleanup")(function* (session: Session.Info) {
@@ -132,27 +129,14 @@ export const layer = Layer.effect(
       yield* sessions.clearRevert(sessionID)
     })
 
-    return Service.of({
-      revert: (input) =>
-        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "revert" }, revert(input)),
-      unrevert: (input) =>
-        SessionMaintenance.withAdmission(db, { sessionID: input.sessionID, kind: "unrevert" }, unrevert(input)),
-      cleanup: (session) =>
-        SessionMaintenance.withAdmission(db, { sessionID: session.id, kind: "revert-cleanup" }, cleanup(session)),
-    })
+    return Service.of({ revert, unrevert, cleanup })
   }),
 )
 
-export const defaultLayer = Layer.suspend(() =>
-  layer.pipe(
-    Layer.provide(SessionRunState.defaultLayer),
-    Layer.provide(Session.defaultLayer),
-    Layer.provide(Snapshot.defaultLayer),
-    Layer.provide(Storage.defaultLayer),
-    Layer.provide(EventV2Bridge.defaultLayer),
-    Layer.provide(SessionSummary.defaultLayer),
-    Layer.provide(Database.defaultLayer),
-  ),
-)
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: [Session.node, Snapshot.node, Storage.node, EventV2Bridge.node, SessionSummary.node, SessionLifecycle.node],
+})
 
 export * as SessionRevert from "./revert"

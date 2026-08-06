@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import type { AgentSideConnection } from "@agentclientprotocol/sdk"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import type { Event, Message, OpencodeClient, Part, SessionMessageResponse, ToolPart } from "@opencode-ai/sdk/v2"
 import { Effect, ManagedRuntime } from "effect"
 import { ACPEvent } from "@/acp/event"
@@ -30,7 +31,7 @@ const pollUntil = async (
 }
 
 function makeSessionService() {
-  return ManagedRuntime.make(ACPSession.defaultLayer).runSync(
+  return ManagedRuntime.make(LayerNode.compile(ACPSession.node)).runSync(
     ACPSession.Service.use((service) => Effect.succeed(service)),
   )
 }
@@ -86,7 +87,7 @@ function createHarness(messages: Record<string, SessionMessageResponse> = {}) {
   const events = createEventStream()
   const sdk = {
     global: {
-      event: (options?: { signal?: AbortSignal }) => {
+      event: (_parameters?: unknown, options?: { signal?: AbortSignal }) => {
         calls.eventSubscribe++
         return Promise.resolve({ stream: events.stream(options?.signal) })
       },
@@ -448,7 +449,8 @@ describe("acp event routing", () => {
     const service = ACPService.make({
       sdk: {
         global: {
-          event: (options?: { signal?: AbortSignal }) => Promise.resolve({ stream: events.stream(options?.signal) }),
+          event: (_parameters?: unknown, options?: { signal?: AbortSignal }) =>
+            Promise.resolve({ stream: events.stream(options?.signal) }),
         },
         session: {
           get: () => Promise.resolve({ data: { id: "ses_loaded" } }),
@@ -517,7 +519,7 @@ describe("acp event routing", () => {
     expect(harness.updates).toHaveLength(0)
   })
 
-  it("emits synthetic pending before the first running tool update", async () => {
+  it("exposes the shell command on the synthetic pending tool call", async () => {
     const harness = createHarness()
     await Effect.runPromise(harness.session.create({ id: "ses_tool", cwd: "/workspace" }))
 
@@ -527,8 +529,47 @@ describe("acp event routing", () => {
       "tool_call",
       "tool_call_update",
     ])
-    expect(harness.updates[0]?.update).toMatchObject({ status: "pending", toolCallId: "call_1" })
+    expect(harness.updates[0]?.update).toMatchObject({
+      status: "pending",
+      toolCallId: "call_1",
+      title: "printf hello",
+      kind: "execute",
+      locations: [{ path: "/workspace" }],
+      rawInput: { cmd: "printf hello", cwd: "/workspace" },
+    })
     expect(harness.updates[1]?.update).toMatchObject({ status: "in_progress", toolCallId: "call_1" })
+  })
+
+  it("includes available input in the synthetic pending tool call", async () => {
+    const harness = createHarness()
+    await Effect.runPromise(harness.session.create({ id: "ses_pending_input", cwd: "/workspace" }))
+
+    await harness.subscription.handle(
+      toolUpdated({
+        id: "part_call_read",
+        sessionID: "ses_pending_input",
+        messageID: "msg_call_read",
+        type: "tool",
+        callID: "call_read",
+        tool: "read",
+        state: {
+          status: "running",
+          input: { filePath: "/workspace/file.ts" },
+          title: "Read file.ts",
+          time: { start: Date.now() },
+        },
+      } satisfies ToolPart),
+    )
+
+    expect(harness.updates[0]?.update).toMatchObject({
+      sessionUpdate: "tool_call",
+      toolCallId: "call_read",
+      status: "pending",
+      title: "Read file.ts",
+      kind: "read",
+      rawInput: { filePath: "/workspace/file.ts" },
+      locations: [{ path: "/workspace/file.ts" }],
+    })
   })
 
   it("does not emit duplicate synthetic pending after a replayed running tool", async () => {

@@ -2,11 +2,9 @@ import { Config } from "@/config/config"
 import { GlobalBus, type GlobalEvent as GlobalBusEvent } from "@/bus/global"
 import { EffectBridge } from "@/effect/bridge"
 import { EventV2 } from "@opencode-ai/core/event"
-import { StreamDiagnostics } from "@/diagnostic/stream"
 import { Installation } from "@/installation"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
-import * as Log from "@opencode-ai/core/util/log"
 import { Effect, Queue, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
@@ -14,20 +12,9 @@ import { HttpApiBuilder } from "effect/unstable/httpapi"
 import * as Sse from "effect/unstable/encoding/Sse"
 import { RootHttpApi } from "../api"
 import { GlobalUpgradeInput } from "../groups/global"
-import * as SelectedEventProjection from "@/server/shared/selected-event-projection"
-
-const log = Log.create({ service: "server" })
+import { SelectedEventProjection } from "@/server/shared/selected-event-projection"
 
 function eventData(data: unknown): Sse.Event {
-  StreamDiagnostics.record({
-    stage: "route.global",
-    action: "write",
-    eventType: StreamDiagnostics.eventType(data),
-    length: JSON.stringify(data).length,
-    routeMode: "global",
-    shape: StreamDiagnostics.shape(data),
-    correlation: StreamDiagnostics.correlationForPayload(data),
-  })
   return {
     _tag: "Event",
     event: "message",
@@ -44,16 +31,17 @@ function parseBody(body: string) {
   }
 }
 
-export function globalEventStream(beforeConnected: Effect.Effect<void> = Effect.void, selectedProjection = false) {
+function eventResponse() {
   return Effect.gen(function* () {
-    // Register eagerly so an event published after request admission cannot be
+    const request = yield* HttpServerRequest.HttpServerRequest
+    const selectedProjection = SelectedEventProjection.selected(request)
+    // Register eagerly so events published after request admission cannot be
     // lost while the response body starts or emits server.connected.
     const queue = yield* Queue.unbounded<GlobalBusEvent>()
-    const handler = (event: GlobalBusEvent) => {
-      return Queue.offerUnsafe(queue, event)
-    }
+    const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
     GlobalBus.on("event", handler)
     yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", handler)))
+    yield* Effect.logInfo("global event connected")
     const events = Stream.fromQueue(queue).pipe(
       Stream.filter((event) =>
         selectedProjection
@@ -67,77 +55,16 @@ export function globalEventStream(beforeConnected: Effect.Effect<void> = Effect.
     const heartbeat = Stream.tick("10 seconds").pipe(
       Stream.drop(1),
       Stream.map(() => ({ payload: { id: EventV2.ID.create(), type: "server.heartbeat", properties: {} } })),
-      Stream.tap((event) =>
-        Effect.sync(() =>
-          StreamDiagnostics.record({
-            stage: "route.global",
-            action: "queue",
-            eventType: "server.heartbeat",
-            length: JSON.stringify(event).length,
-            routeMode: "global",
-            shape: "global-envelope",
-          }),
-        ),
-      ),
     )
-    yield* beforeConnected
 
-    log.info("global event connected")
-    StreamDiagnostics.record({
-      stage: "route.global",
-      action: "connect",
-      routeMode: "global",
-      readiness: "connected",
-    })
     const connected = { payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }
-    StreamDiagnostics.record({
-      stage: "route.global",
-      action: "queue",
-      eventType: "server.connected",
-      length: JSON.stringify(connected).length,
-      routeMode: "global",
-      shape: "global-envelope",
-    })
-
-    return Stream.make(connected).pipe(
-      Stream.concat(
-        events.pipe(
-          Stream.tap((event) =>
-            Effect.sync(() => {
-              StreamDiagnostics.record({
-                stage: "route.global",
-                action: "queue",
-                eventType: StreamDiagnostics.eventType(event),
-                length: JSON.stringify(event).length,
-                routeMode: "global",
-                shape: StreamDiagnostics.shape(event),
-                correlation: StreamDiagnostics.correlationForPayload(event),
-              })
-            }),
-          ),
-          Stream.merge(heartbeat, { haltStrategy: "left" }),
-        ),
-      ),
-    )
-  })
-}
-
-function eventResponse() {
-  return Effect.gen(function* () {
-    const request = yield* HttpServerRequest.HttpServerRequest
-    const selectedProjection = SelectedEventProjection.selected(request)
-    const events = yield* globalEventStream(Effect.void, selectedProjection)
     return HttpServerResponse.stream(
-      events.pipe(
+      Stream.make(connected).pipe(
+        Stream.concat(events.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
         Stream.map(eventData),
         Stream.pipeThroughChannel(Sse.encode()),
         Stream.encodeText,
-        Stream.ensuring(
-          Effect.sync(() => {
-            log.info("global event disconnected")
-            StreamDiagnostics.record({ stage: "route.global", action: "disconnect", routeMode: "global" })
-          }),
-        ),
+        Stream.ensuring(Effect.logInfo("global event disconnected")),
       ),
       {
         contentType: "text/event-stream",
@@ -145,9 +72,7 @@ function eventResponse() {
           "Cache-Control": "no-cache, no-transform",
           "X-Accel-Buffering": "no",
           "X-Content-Type-Options": "nosniff",
-          ...(selectedProjection
-            ? { [SelectedEventProjection.AcknowledgementHeader]: SelectedEventProjection.Selector }
-            : {}),
+          ...SelectedEventProjection.acknowledgement(selectedProjection),
         },
       },
     )

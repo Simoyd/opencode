@@ -1,14 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import net from "node:net"
+import path from "node:path"
+import { pathToFileURL } from "node:url"
 import { Flag } from "@opencode-ai/core/flag/flag"
-import * as Log from "@opencode-ai/core/util/log"
 import { Server } from "../../src/server/server"
 import { PtyPaths } from "../../src/server/routes/instance/httpapi/groups/pty"
 import { withTimeout } from "../../src/util/timeout"
 import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, tmpdir } from "../fixture/fixture"
-
-void Log.init({ print: false })
 
 const original = {
   OPENCODE_SERVER_PASSWORD: Flag.OPENCODE_SERVER_PASSWORD,
@@ -98,10 +97,10 @@ async function createCat(listener: Awaited<ReturnType<typeof startListener>>, di
   return (await response.json()) as { id: string }
 }
 
-async function openSocket(url: URL, init?: { headers?: Record<string, string> }) {
+async function openSocket(url: URL, headers?: Record<string, string>) {
   // Bun's WebSocket accepts an init object with headers; standard DOM types don't reflect that.
   const Ctor = WebSocket as unknown as new (url: URL, init?: { headers?: Record<string, string> }) => WebSocket
-  const ws = new Ctor(url, init)
+  const ws = new Ctor(url, headers ? { headers } : undefined)
   ws.binaryType = "arraybuffer"
   await withTimeout(
     new Promise<void>((resolve, reject) => {
@@ -162,9 +161,7 @@ function waitForMessage(ws: WebSocket, predicate: (message: string) => boolean) 
 async function openPtySocket(listener: Awaited<ReturnType<typeof startListener>>, dir: string) {
   const info = await createCat(listener, dir)
   const ticket = await connectTicket(listener, info.id, dir)
-  const ws = await openSocket(socketURL(listener, info.id, dir, ticket.ticket), {
-    headers: { authorization: authorization() },
-  })
+  const ws = await openSocket(socketURL(listener, info.id, dir, ticket.ticket), { authorization: authorization() })
   return {
     ws,
     closed: new Promise<void>((resolve) => ws.addEventListener("close", () => resolve(), { once: true })),
@@ -195,7 +192,7 @@ describe("HttpApi Server.listen", () => {
       const ticket = await connectTicket(listener, info.id, tmp.path)
       expect(ticket.expires_in).toBeGreaterThan(0)
       const ws = await openSocket(socketURL(listener, info.id, tmp.path, ticket.ticket), {
-        headers: { authorization: authorization() },
+        authorization: authorization(),
       })
       const closed = new Promise<void>((resolve) => ws.addEventListener("close", () => resolve(), { once: true }))
 
@@ -213,7 +210,7 @@ describe("HttpApi Server.listen", () => {
         const nextInfo = await createCat(restarted, tmp.path)
         const nextTicket = await connectTicket(restarted, nextInfo.id, tmp.path)
         const nextWs = await openSocket(socketURL(restarted, nextInfo.id, tmp.path, nextTicket.ticket), {
-          headers: { authorization: authorization() },
+          authorization: authorization(),
         })
         const nextMessage = waitForMessage(nextWs, (message) => message.includes("ping-restarted"))
         nextWs.send("ping-restarted\n")
@@ -294,8 +291,6 @@ describe("HttpApi Server.listen", () => {
   })
 
   test("default in-process handler does not emit Effect HTTP response logs", async () => {
-    Flag.OPENCODE_SERVER_PASSWORD = undefined
-    delete process.env.OPENCODE_SERVER_PASSWORD
     let output = ""
     // oxlint-disable-next-line typescript-eslint/unbound-method -- restored in finally after temporarily capturing stderr.
     const original = process.stderr.write
@@ -304,13 +299,64 @@ describe("HttpApi Server.listen", () => {
       return true
     }) as typeof process.stderr.write
     try {
-      const response = await Server.Default().app.request("/status", { headers: { authorization: authorization() } })
+      const response = await Server.Default().app.request("/status")
       expect(response.status).toBe(200)
     } finally {
       process.stderr.write = original
     }
 
     expect(output).not.toContain("Sent HTTP response")
+  })
+
+  test("plugin client requests reuse the listening server instance", async () => {
+    await using tmp = await tmpdir({
+      init: async (directory) => {
+        const plugin = path.join(directory, "plugin.ts")
+        const initialized = path.join(directory, "initialized.txt")
+        const completed = path.join(directory, "completed.txt")
+        await Bun.write(
+          plugin,
+          [
+            "export default async function plugin(input) {",
+            `  await Bun.write(${JSON.stringify(initialized)}, (await Bun.file(${JSON.stringify(initialized)}).text().catch(() => "")) + "initialized\\n")`,
+            "  setTimeout(async () => {",
+            "    await input.client.config.get()",
+            `    await Bun.write(${JSON.stringify(completed)}, "completed")`,
+            "  }, 50)",
+            "  return {}",
+            "}",
+            "",
+          ].join("\n"),
+        )
+        await Bun.write(
+          path.join(directory, "opencode.json"),
+          JSON.stringify({ formatter: false, lsp: false, plugin: [pathToFileURL(plugin).href] }),
+        )
+        return { initialized, completed }
+      },
+    })
+    const previous = process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS
+    process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS = "1"
+    let listener: Awaited<ReturnType<typeof startListener>> | undefined
+    try {
+      listener = await startListener()
+      const response = await fetch(new URL("/config", listener.url), {
+        headers: { authorization: authorization(), "x-opencode-directory": tmp.path },
+      })
+      expect(response.status).toBe(200)
+      await withTimeout(
+        (async () => {
+          while (!(await Bun.file(tmp.extra.completed).exists())) await Bun.sleep(10)
+        })(),
+        5_000,
+        "timed out waiting for plugin client request",
+      )
+      expect(await Bun.file(tmp.extra.initialized).text()).toBe("initialized\n")
+    } finally {
+      if (listener) await stop(listener, "timed out cleaning up plugin client listener").catch(() => undefined)
+      if (previous === undefined) delete process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS
+      else process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS = previous
+    }
   })
 
   test("port 0 prefers 4096 when free", async () => {
@@ -368,9 +414,8 @@ describe("HttpApi Server.listen", () => {
       )
       expect(directoryScoped.status).toBe(200)
       const mint = (await directoryScoped.json()) as { ticket: string }
-      await expectSocketRejected(socketURL(listener, info.id, tmp.path, mint.ticket))
       const scopedWs = await openSocket(socketURL(listener, info.id, tmp.path, mint.ticket), {
-        headers: { authorization: authorization() },
+        authorization: authorization(),
       })
       scopedWs.close(1000)
 
@@ -379,8 +424,9 @@ describe("HttpApi Server.listen", () => {
       })
 
       const reusable = await connectTicket(listener, info.id, tmp.path)
+      await expectSocketRejected(socketURL(listener, info.id, tmp.path, reusable.ticket))
       const ws = await openSocket(socketURL(listener, info.id, tmp.path, reusable.ticket), {
-        headers: { authorization: authorization() },
+        authorization: authorization(),
       })
       await expectSocketRejected(socketURL(listener, info.id, tmp.path, reusable.ticket), {
         headers: { authorization: authorization() },

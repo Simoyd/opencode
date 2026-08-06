@@ -49,7 +49,7 @@ type OpenApiSchema = {
 
 type OpenApiResponse = {
   description?: string
-  content?: Record<string, { schema?: OpenApiSchema }>
+  content?: Record<string, { schema?: OpenApiSchema; "x-effect-stream"?: unknown }>
 }
 
 // Query schemas describe decoded Effect values, but the generated SDK needs the
@@ -141,6 +141,10 @@ function matchLegacyOpenApi(input: Record<string, unknown>) {
       for (const response of Object.values(operation.responses ?? {})) {
         for (const content of Object.values(response.content ?? {})) {
           if (content.schema) content.schema = stripOptionalNull(structuredClone(content.schema))
+          if (path === "/provider/runtime" && method === "get" && content.schema?.properties?.default) {
+            // This required field is genuinely nullable when no effective connected default exists.
+            content.schema.properties.default = nullable(content.schema.properties.default)
+          }
         }
       }
       if (!isV2Api) {
@@ -152,17 +156,22 @@ function matchLegacyOpenApi(input: Record<string, unknown>) {
         normalizeLegacyErrorResponses(operation)
       }
       normalizeLegacyOperation(operation, path, method)
-      if ((path === "/event" || path === "/global/event") && method === "get") {
-        // HttpApi has no first-class SSE response schema, and these handlers are
-        // raw/streaming routes. Document the actual wire protocol explicitly.
+      if ((path === "/event" || path === "/global/event" || path === "/api/event") && method === "get") {
+        // Preserve the typed SSE response and its headers while selecting the
+        // legacy schema name consumed by the checked-in SDK.
+        const response = operation.responses!["200"] ?? { description: "Event stream" }
         operation.responses!["200"] = {
-          description: "Event stream",
+          ...response,
           content: {
+            ...response.content,
             "text/event-stream": {
+              ...response.content?.["text/event-stream"],
               schema:
                 path === "/event"
                   ? { $ref: "#/components/schemas/Event" }
-                  : { $ref: "#/components/schemas/GlobalEvent" },
+                  : path === "/global/event"
+                    ? { $ref: "#/components/schemas/GlobalEvent" }
+                    : { $ref: "#/components/schemas/V2Event" },
             },
           },
         }

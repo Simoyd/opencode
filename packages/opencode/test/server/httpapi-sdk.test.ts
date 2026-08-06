@@ -5,15 +5,20 @@ import { Deferred, Effect, Layer } from "effect"
 import type * as Scope from "effect/Scope"
 import { HttpServer } from "effect/unstable/http"
 import { ChildProcessSpawner } from "effect/unstable/process"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
-import { validateSession } from "../../src/cli/cmd/tui/validate-session"
-import { InstanceBootstrap } from "../../src/project/bootstrap-service"
+import { validateSession } from "../../src/cli/tui/validate-session"
+import { InstanceBootstrap } from "../../src/project/bootstrap"
 import { InstanceStore } from "../../src/project/instance-store"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { MessageV2 } from "../../src/session/message-v2"
+import { EventV2Bridge } from "../../src/event-v2-bridge"
+import { SessionStatus } from "../../src/session/status"
+import { GlobalBus } from "../../src/bus/global"
 
 import type { Config } from "@/config/config"
 import { Session as SessionNs } from "@/session/session"
@@ -21,24 +26,27 @@ import { errorMessage } from "../../src/util/error"
 import { TestLLMServer } from "../lib/llm-server"
 import path from "path"
 import { resetDatabase } from "../fixture/db"
-import { disposeAllInstances, TestInstance, tmpdirScoped } from "../fixture/fixture"
-import { awaitWithTimeout, testEffect } from "../lib/effect"
+import { disposeAllInstances, provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
+import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
 import { testProviderConfig } from "../lib/test-provider"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Database } from "@opencode-ai/core/database/database"
 import { httpApiLayer } from "./httpapi-layer"
 
-const noopBootstrap = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
-const it = testEffect(
-  Layer.mergeAll(
-    FSUtil.defaultLayer,
-    CrossSpawnSpawner.defaultLayer,
-    InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
-    Database.defaultLayer,
-    httpApiLayer,
-  ),
+const noopBootstrapLayer = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
+const appLayer = AppNodeBuilder.build(
+  LayerNode.group([
+    FSUtil.node,
+    CrossSpawnSpawner.node,
+    InstanceStore.node,
+    Database.node,
+    SessionNs.node,
+    EventV2Bridge.node,
+  ]),
+  [[InstanceStore.bootstrapNode, noopBootstrapLayer]],
 )
+const it = testEffect(Layer.mergeAll(appLayer, httpApiLayer))
 
 const original = {
   OPENCODE_SERVER_PASSWORD: Flag.OPENCODE_SERVER_PASSWORD,
@@ -55,6 +63,8 @@ type TestServices =
   | FSUtil.Service
   | ChildProcessSpawner.ChildProcessSpawner
   | InstanceStore.Service
+  | SessionNs.Service
+  | EventV2Bridge.Service
   | HttpServer.HttpServer
 type TestScope = Scope.Scope | TestServices
 
@@ -323,7 +333,7 @@ function seedMessage(directory: string, sessionID: string) {
           })
           return { message, part }
         }),
-      ).pipe(Effect.provide(SessionNs.defaultLayer)),
+      ),
     ),
   )
 }
@@ -345,7 +355,7 @@ describe("HttpApi SDK", () => {
 
       expect(health.response.status).toBe(200)
       expect(health.data).toMatchObject({ healthy: true })
-      expect(yield* firstEvent((signal) => sdk.global.event({}, { signal }))).toMatchObject({
+      expect(yield* firstEvent((signal) => sdk.global.event(undefined, { signal }))).toMatchObject({
         payload: { type: "server.connected" },
       })
       expect(log.response.status).toBe(200)
@@ -389,11 +399,16 @@ describe("HttpApi SDK", () => {
           workspaceID,
           onRequest: (value) => (request = value),
         })
-        const file = yield* call(() => sdk.v2.fs.read({ path: "hello.txt" }))
+        const found = yield* pollWithTimeout(
+          call(() => sdk.v2.fs.find({ query: "hello", type: "file" })).pipe(
+            Effect.map((result) => (result.data?.data.length ? result : undefined)),
+          ),
+          "SDK file search index was not ready",
+        )
         const url = new URL(request!.url)
 
-        expect(file.response.status).toBe(200)
-        expect(file.data).toMatchObject({ data: { content: "hello" } })
+        expect(found.response.status).toBe(200)
+        expect(found.data).toMatchObject({ data: [{ path: "hello.txt", type: "file" }] })
         expect(url.searchParams.get("directory")).toBe(directory)
         expect(url.searchParams.get("workspace")).toBe(workspaceID)
         expect(url.searchParams.get("location[directory]")).toBe(directory)
@@ -422,7 +437,7 @@ describe("HttpApi SDK", () => {
   serverPathParity("matches generated SDK global event stream", (serverPath) =>
     Effect.gen(function* () {
       const sdk = yield* client(serverPath)
-      const event = yield* firstEvent((signal) => sdk.global.event({}, { signal }))
+      const event = yield* firstEvent((signal) => sdk.global.event(undefined, { signal }))
       return { type: record(record(event).payload).type }
     }),
   )
@@ -432,6 +447,317 @@ describe("HttpApi SDK", () => {
       firstEvent((signal) => sdk.event.subscribe(undefined, { signal })).pipe(
         Effect.map((event) => ({ type: record(record(event).payload).type })),
       ),
+    ),
+  )
+
+  httpapi(
+    "delivers selected instance status in admission order while busy observers remain blocked",
+    withFakeLlm("raw", ({ sdk, llm }) =>
+      Effect.gen(function* () {
+        yield* llm.hang
+        const created = yield* call(() => sdk.session.create({ title: "selected event order" }))
+        const sessionID = String(record(created.data).id)
+        const admitted = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        const finished = yield* Deferred.make<void>()
+        const eventService = yield* EventV2Bridge.Service
+        const unsubscribe = yield* eventService.listen((event) => {
+          if (event.type !== SessionStatus.Event.Status.type) return Effect.void
+          const data = event.data as typeof SessionStatus.Event.Status.data.Type
+          if (data.sessionID !== sessionID || data.status.type !== "busy") return Effect.void
+          return Deferred.succeed(admitted, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.ensuring(Deferred.succeed(finished, undefined)),
+            Effect.asVoid,
+          )
+        })
+        yield* Effect.addFinalizer(() =>
+          Deferred.succeed(release, undefined).pipe(Effect.andThen(unsubscribe), Effect.asVoid),
+        )
+
+        const controller = new AbortController()
+        yield* Effect.addFinalizer(() => Effect.sync(() => controller.abort()))
+        const events = yield* call(() =>
+          sdk.event.subscribe(
+            { sessionID, oca_event_projection: "transcript-history-v1" },
+            { signal: controller.signal },
+          ),
+        )
+        yield* Effect.addFinalizer(() =>
+          call(async () => void (await events.stream.return?.(undefined))).pipe(Effect.ignore),
+        )
+        const connected = yield* Deferred.make<void>()
+        const statuses = yield* Deferred.make<string[]>()
+        const received = new Array<string>()
+        yield* call(async () => {
+          for await (const event of events.stream) {
+            const payload = record(event).payload ?? event
+            if (record(payload).type === "server.connected") {
+              Deferred.doneUnsafe(connected, Effect.void)
+              continue
+            }
+            if (record(payload).type !== SessionStatus.Event.Status.type) continue
+            const properties = record(record(payload).properties)
+            if (properties.sessionID !== sessionID) continue
+            const status = String(record(properties.status).type)
+            received.push(status)
+            if (received.length === 2) {
+              Deferred.doneUnsafe(statuses, Effect.succeed([...received]))
+              return
+            }
+          }
+        }).pipe(Effect.forkScoped)
+
+        yield* awaitWithTimeout(Deferred.await(connected), "selected /event did not connect", "2 seconds")
+        const prompt = yield* call(() =>
+          sdk.session.promptAsync({
+            sessionID,
+            agent: "build",
+            model: { providerID: "test", modelID: "test-model" },
+            parts: [{ type: "text", text: "block after busy admission" }],
+          }),
+        )
+        expect(prompt.response.status).toBe(204)
+        yield* awaitWithTimeout(Deferred.await(admitted), "busy observer was not admitted", "5 seconds")
+        yield* awaitWithTimeout(llm.wait(1), "provider transport did not start", "5 seconds")
+        expect(yield* Deferred.isDone(finished)).toBeFalse()
+
+        const aborted = yield* call(() => sdk.session.abort({ sessionID }))
+        expect(aborted.response.status).toBe(200)
+        expect(
+          yield* awaitWithTimeout(
+            Deferred.await(statuses),
+            "selected /event did not preserve status order",
+            "5 seconds",
+          ),
+        ).toEqual(["busy", "idle"])
+        expect(yield* Deferred.isDone(finished)).toBeFalse()
+
+        yield* Deferred.succeed(release, undefined)
+        yield* Deferred.await(finished)
+        yield* unsubscribe
+      }),
+    ),
+  )
+
+  httpapi(
+    "keeps selected SDK part updates read-only for server provenance",
+    withStandardProject("raw", ({ sdk, directory }) =>
+      Effect.gen(function* () {
+        const seeded = yield* Effect.gen(function* () {
+          const sessions = yield* SessionNs.Service
+          const chat = yield* sessions.create({ title: "selected provenance" })
+          const marker = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            sessionID: chat.id,
+            role: "user" as const,
+            agent: "build",
+            model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") },
+            time: { created: Date.now() },
+          })
+          const part = yield* sessions.updatePart({
+            id: PartID.ascending(),
+            sessionID: chat.id,
+            messageID: marker.id,
+            type: "text" as const,
+            text: "trusted continuity",
+            serverProvenance: { type: "compaction-continuation" as const, ownerMessageID: marker.id },
+          })
+          return { chat, marker, part }
+        }).pipe(provideInstance(directory))
+
+        const controller = new AbortController()
+        yield* Effect.addFinalizer(() => Effect.sync(() => controller.abort()))
+        const events = yield* call(() =>
+          sdk.event.subscribe(
+            { sessionID: seeded.chat.id, oca_event_projection: "transcript-history-v1" },
+            { signal: controller.signal },
+          ),
+        )
+        yield* Effect.addFinalizer(() =>
+          call(async () => void (await events.stream.return?.(undefined))).pipe(Effect.ignore),
+        )
+        const connected = yield* awaitWithTimeout(
+          call(() => events.stream.next()),
+          "selected /event did not connect",
+        )
+        expect(record(record(connected.value).payload ?? connected.value).type).toBe("server.connected")
+
+        const forgedOwner = MessageID.ascending()
+        const updated = yield* call(() =>
+          sdk.part.update({
+            sessionID: seeded.chat.id,
+            messageID: seeded.marker.id,
+            partID: seeded.part.id,
+            partUpdateInput: {
+              ...seeded.part,
+              text: "public mutation",
+              serverProvenance: { type: "compaction-continuation", ownerMessageID: forgedOwner },
+            },
+          } as Parameters<typeof sdk.part.update>[0]),
+        )
+        expect(updated.response.status).toBe(200)
+        expect(record(updated.data).serverProvenance).toEqual(seeded.part.serverProvenance)
+
+        const observed = yield* awaitWithTimeout(
+          call(() => events.stream.next()),
+          "selected part update was not observed",
+        )
+        const payload = record(record(observed.value).payload ?? observed.value)
+        expect(payload.type).toBe("message.part.updated")
+        const selectedPart = record(record(payload.properties).part)
+        expect(selectedPart.text).toBe("public mutation")
+        expect(selectedPart.serverProvenance).toEqual(seeded.part.serverProvenance)
+      }),
+    ),
+  )
+
+  httpapi(
+    "retains an admitted selected event before instance disposal closes a blocked consumer",
+    withStandardProject("raw", ({ sdk, directory }) =>
+      Effect.gen(function* () {
+        const controller = new AbortController()
+        yield* Effect.addFinalizer(() => Effect.sync(() => controller.abort()))
+        const events = yield* call(() =>
+          sdk.event.subscribe({ oca_event_projection: "transcript-history-v1" }, { signal: controller.signal }),
+        )
+        yield* Effect.addFinalizer(() =>
+          call(async () => void (await events.stream.return?.(undefined))).pipe(Effect.ignore),
+        )
+        const connected = yield* awaitWithTimeout(
+          call(() => events.stream.next()),
+          "selected /event did not connect",
+          "2 seconds",
+        )
+        expect(record(record(connected.value).payload ?? connected.value).type).toBe("server.connected")
+
+        const created = yield* call(() => sdk.session.create({ title: "queued before instance disposal" }))
+        const sessionID = String(record(created.data).id)
+        expect(created.response.status).toBe(200)
+        GlobalBus.emit("event", {
+          directory,
+          payload: { id: "evt_instance_disposed_order", type: "server.instance.disposed", properties: {} },
+        })
+
+        const observed = yield* awaitWithTimeout(
+          call(async () => {
+            const payloads = new Array<Record<string, unknown>>()
+            for await (const event of events.stream) payloads.push(record(record(event).payload ?? event))
+            return payloads
+          }),
+          "selected /event did not close after instance disposal",
+          "2 seconds",
+        )
+        expect(observed.map((event) => event.type)).toEqual(["session.created", "server.instance.disposed"])
+        expect(record(record(observed[0]).properties).sessionID).toBe(sessionID)
+        expect(observed.filter((event) => event.type === "server.instance.disposed")).toHaveLength(1)
+      }),
+    ),
+  )
+
+  httpapi(
+    "retains an admitted selected event before global disposal closes a blocked consumer",
+    withStandardProject("raw", ({ sdk }) =>
+      Effect.gen(function* () {
+        const controller = new AbortController()
+        yield* Effect.addFinalizer(() => Effect.sync(() => controller.abort()))
+        const events = yield* call(() =>
+          sdk.event.subscribe({ oca_event_projection: "transcript-history-v1" }, { signal: controller.signal }),
+        )
+        yield* Effect.addFinalizer(() =>
+          call(async () => void (await events.stream.return?.(undefined))).pipe(Effect.ignore),
+        )
+        const connected = yield* awaitWithTimeout(
+          call(() => events.stream.next()),
+          "selected /event did not connect",
+          "2 seconds",
+        )
+        expect(record(record(connected.value).payload ?? connected.value).type).toBe("server.connected")
+
+        const created = yield* call(() => sdk.session.create({ title: "queued before global disposal" }))
+        expect(created.response.status).toBe(200)
+        GlobalBus.emit("event", {
+          payload: { id: "evt_global_disposed_order", type: "global.disposed", properties: {} },
+        })
+
+        const observed = yield* awaitWithTimeout(
+          call(async () => {
+            const payloads = new Array<Record<string, unknown>>()
+            for await (const event of events.stream) payloads.push(record(record(event).payload ?? event))
+            return payloads
+          }),
+          "selected /event did not close after global disposal",
+          "2 seconds",
+        )
+        expect(observed.map((event) => event.type)).toEqual(["session.created", "global.disposed"])
+        expect(observed.filter((event) => event.type === "global.disposed")).toHaveLength(1)
+      }),
+    ),
+  )
+
+  httpapi(
+    "keeps selected streams independent when one unregisters after semantic admission",
+    withStandardProject("raw", ({ sdk, directory }) =>
+      Effect.gen(function* () {
+        const firstController = new AbortController()
+        const secondController = new AbortController()
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            firstController.abort()
+            secondController.abort()
+          }),
+        )
+        const first = yield* call(() =>
+          sdk.event.subscribe({ oca_event_projection: "transcript-history-v1" }, { signal: firstController.signal }),
+        )
+        const second = yield* call(() =>
+          sdk.event.subscribe({ oca_event_projection: "transcript-history-v1" }, { signal: secondController.signal }),
+        )
+        yield* Effect.addFinalizer(() =>
+          Effect.all(
+            [first, second].map((events) =>
+              call(async () => void (await events.stream.return?.(undefined))).pipe(Effect.ignore),
+            ),
+            { discard: true },
+          ),
+        )
+        const connected = yield* Effect.all([
+          awaitWithTimeout(
+            call(() => first.stream.next()),
+            "first selected /event did not connect",
+            "2 seconds",
+          ),
+          awaitWithTimeout(
+            call(() => second.stream.next()),
+            "second selected /event did not connect",
+            "2 seconds",
+          ),
+        ])
+        expect(connected.map((item) => record(record(item.value).payload ?? item.value).type)).toEqual([
+          "server.connected",
+          "server.connected",
+        ])
+
+        const created = yield* call(() => sdk.session.create({ title: "multi-stream admission" }))
+        expect(created.response.status).toBe(200)
+        yield* call(async () => void (await first.stream.return?.(undefined)))
+        GlobalBus.emit("event", {
+          directory,
+          payload: { id: "evt_multi_disposed_order", type: "server.instance.disposed", properties: {} },
+        })
+
+        const observed = yield* awaitWithTimeout(
+          call(async () => {
+            const payloads = new Array<Record<string, unknown>>()
+            for await (const event of second.stream) payloads.push(record(record(event).payload ?? event))
+            return payloads
+          }),
+          "remaining selected /event did not close after peer unregistered",
+          "2 seconds",
+        )
+        expect(observed.map((event) => event.type)).toEqual(["session.created", "server.instance.disposed"])
+        expect(observed.filter((event) => event.type === "server.instance.disposed")).toHaveLength(1)
+      }),
     ),
   )
 
@@ -726,6 +1052,76 @@ describe("HttpApi SDK", () => {
         const properties = record(record(event).properties)
         expect(record(properties.part)).toMatchObject({ id: seeded.part.id, type: "text" })
         return { type: record(event).type, partType: record(properties.part).type }
+      }),
+    ),
+  )
+
+  httpapi(
+    "starts one promptAsync successor with the complete admitted follow-up cohort",
+    withFakeLlm("raw", ({ sdk, llm }) =>
+      Effect.gen(function* () {
+        let releaseFirst!: () => void
+        const firstGate = new Promise<void>((resolve) => {
+          releaseFirst = resolve
+        })
+        yield* llm.hold("predecessor-output", firstGate)
+        yield* llm.text("successor-output")
+
+        const created = yield* call(() => sdk.session.create())
+        const sessionID = String(record(created.data).id)
+        const first = yield* call(() =>
+          sdk.session.promptAsync({
+            sessionID,
+            agent: "general",
+            model: { providerID: "test", modelID: "test-model" },
+            parts: [{ type: "text", text: "root-user" }],
+          }),
+        )
+        expect(first.response.status).toBe(204)
+        yield* awaitWithTimeout(llm.wait(2), "predecessor provider request did not start", "5 seconds")
+
+        const second = yield* call(() =>
+          sdk.session.promptAsync({
+            sessionID,
+            agent: "general",
+            model: { providerID: "test", modelID: "test-model" },
+            parts: [{ type: "text", text: "cohort-two" }],
+          }),
+        )
+        expect(second.response.status).toBe(204)
+        const third = yield* call(() =>
+          sdk.session.promptAsync({
+            sessionID,
+            agent: "general",
+            model: { providerID: "test", modelID: "test-model" },
+            parts: [{ type: "text", text: "cohort-three" }],
+          }),
+        )
+        expect(third.response.status).toBe(204)
+
+        releaseFirst()
+        yield* pollWithTimeout(
+          llm.inputs.pipe(Effect.map((inputs) => (inputs.length === 3 ? true : undefined))),
+          "timed out waiting for active promptAsync successor",
+        )
+        const inputs = yield* llm.inputs
+        expect(inputs).toHaveLength(3)
+        expect(inputs[0]?.messages).toContainEqual({
+          role: "user",
+          content: "Generate a title for this conversation:\n",
+        })
+        expect(array(inputs[1]?.messages).at(-1)).toEqual({ role: "user", content: "root-user" })
+        const successor = inputs[2]?.messages
+        if (!Array.isArray(successor)) throw new Error("expected successor provider messages")
+        const tail = successor.slice(-4)
+        expect(tail.map((message) => message.role)).toEqual(["user", "assistant", "user", "user"])
+        expect(tail[0]).toEqual({ role: "user", content: "root-user" })
+        expect(tail[2]).toEqual({ role: "user", content: "cohort-two" })
+        expect(tail[3]).toEqual({ role: "user", content: "cohort-three" })
+        const serialized = JSON.stringify(successor)
+        for (const text of ["root-user", "predecessor-output", "cohort-two", "cohort-three"]) {
+          expect(serialized.match(new RegExp(text, "g"))).toHaveLength(1)
+        }
       }),
     ),
   )

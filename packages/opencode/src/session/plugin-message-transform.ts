@@ -25,10 +25,7 @@ export function stripServerProvenance<T>(part: T): T {
 }
 
 function withoutServerProvenance(messages: SessionV1.WithParts[]) {
-  return messages.map((message) => ({
-    ...message,
-    parts: message.parts.map(stripServerProvenance),
-  }))
+  return messages.map((message) => ({ ...message, parts: message.parts.map(stripServerProvenance) }))
 }
 
 export const toPluginTransformedModelMessages = Effect.fnUntraced(function* (input: {
@@ -39,6 +36,5 @@ export const toPluginTransformedModelMessages = Effect.fnUntraced(function* (inp
 }) {
   const output = { messages: withoutServerProvenance(structuredClone(input.messages)) }
   yield* input.plugin.trigger("experimental.chat.messages.transform", {}, output)
-  const sanitized = withoutServerProvenance(output.messages)
-  return yield* MessageV2.toModelMessagesEffect(sanitized, input.model, input.options)
+  return yield* MessageV2.toModelMessagesEffect(withoutServerProvenance(output.messages), input.model, input.options)
 })

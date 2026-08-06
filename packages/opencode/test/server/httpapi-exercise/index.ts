@@ -17,7 +17,7 @@
  * - `.json(...)` / `.jsonEffect(...)` assert response shape and optional side effects.
  * - `.mutating()` tells the runner to reset isolated state after destructive routes.
  */
-import { Effect } from "effect"
+import { Effect, Fiber } from "effect"
 import { OpenApi } from "effect/unstable/httpapi"
 import { TestLLMServer } from "../../lib/llm-server"
 import path from "path"
@@ -36,8 +36,6 @@ import { runScenario } from "./runner"
 import { disposeApps } from "./backend"
 import { runtime } from "./runtime"
 import { type Scenario } from "./types"
-
-void (await import("@opencode-ai/core/util/log")).init({ print: false })
 
 function cursor(input: Record<string, unknown>) {
   return Buffer.from(JSON.stringify(input)).toString("base64url")
@@ -117,7 +115,6 @@ const scenarios: Scenario[] = [
       },
       "status",
     ),
-  http.protected.get("/debug/stream-diagnostics", "debug.streamDiagnostics").global().status(404, undefined, "status"),
   http.protected.get("/path", "path.get").json(200, (body, ctx) => {
     object(body)
     check(body.directory === ctx.directory, "directory should resolve from x-opencode-directory")
@@ -226,6 +223,18 @@ const scenarios: Scenario[] = [
     }))
     .json(200, array, "status"),
   http.protected
+    .post("/experimental/project/{projectID}/copy/generate-name", "experimental.projectCopy.generateName")
+    .seeded((ctx) => ctx.project())
+    .at((ctx) => ({
+      path: route("/experimental/project/{projectID}/copy/generate-name", { projectID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: {},
+    }))
+    .json(200, (body) => {
+      object(body)
+      check(typeof body.name === "string" && body.name.length > 0, "generated copy name should be non-empty")
+    }),
+  http.protected
     .post("/experimental/project/{projectID}/copy", "experimental.projectCopy.create")
     .seeded((ctx) => ctx.project())
     .at((ctx) => ({
@@ -253,6 +262,140 @@ const scenarios: Scenario[] = [
     }))
     .status(204, undefined, "status"),
   http.protected.get("/provider", "provider.list").json(),
+  http.protected
+    .get("/provider/runtime", "provider.runtime")
+    .inProject({
+      git: false,
+      config: {
+        model: "runtime-catalog/no-context",
+        provider: {
+          "runtime-catalog": {
+            name: "Runtime Catalog",
+            npm: "@ai-sdk/openai-compatible",
+            env: [],
+            options: {
+              apiKey: "fixture-private-key",
+              baseURL: "https://fixture.invalid/v1",
+              headers: { "x-fixture-private": "fixture-private-header" },
+            },
+            models: {
+              "no-context": {
+                name: "No Context",
+                reasoning: true,
+                tool_call: true,
+                variants: { careful: {} },
+              },
+              "known-context": {
+                name: "Known Context",
+                tool_call: true,
+                limit: { context: 64_000, output: 4_096 },
+                cost: { input: 1, output: 2 },
+              },
+              deprecated: {
+                name: "Deprecated",
+                status: "deprecated",
+                tool_call: true,
+              },
+            },
+          },
+        },
+      },
+    })
+    .json(200, (body) => {
+      object(body)
+      array(body.all)
+      object(body.default)
+      array(body.connected)
+
+      const emittedProviderIDs = body.all.map((item) => {
+        object(item)
+        check(typeof item.id === "string", "runtime provider IDs should be strings")
+        return item.id
+      })
+      check(
+        stable([...body.connected].sort()) === stable(emittedProviderIDs.sort()),
+        "connected IDs should match emitted providers",
+      )
+      check(
+        stable(body.default) === stable({ providerID: "runtime-catalog", modelID: "no-context" }),
+        "runtime default should match Provider.defaultModel",
+      )
+
+      const provider = body.all.find((item) => isRecord(item) && item.id === "runtime-catalog")
+      object(provider)
+      object(provider.models)
+      check(
+        stable(Object.keys(provider.models).sort()) === stable(["known-context", "no-context"]),
+        "runtime provider route should retain active models and exclude deprecated models",
+      )
+      const noContext = provider.models["no-context"]
+      object(noContext)
+      object(noContext.limit)
+      check(!("context" in noContext.limit), "unknown context should be omitted without dropping the model")
+      object(noContext.variants)
+      check("careful" in noContext.variants, "variant IDs should remain available")
+
+      const knownContext = provider.models["known-context"]
+      object(knownContext)
+      object(knownContext.limit)
+      check(knownContext.limit.context === 64_000, "known positive context should remain exact")
+
+      const serialized = stable(body)
+      for (const privateField of [
+        "apiKey",
+        "auth",
+        "account",
+        "organization",
+        "options",
+        "headers",
+        "baseURL",
+        "cost",
+        "env",
+      ]) {
+        check(!serialized.includes(`\"${privateField}\"`), `runtime provider route should omit ${privateField}`)
+      }
+    }),
+  http.protected
+    .get("/provider/runtime", "provider.runtime.default-unavailable")
+    .inProject({
+      git: false,
+      config: {
+        model: "runtime-catalog/deprecated",
+        provider: {
+          "runtime-catalog": {
+            name: "Runtime Catalog",
+            npm: "@ai-sdk/openai-compatible",
+            env: [],
+            options: { apiKey: "fixture-private-key" },
+            models: {
+              active: { name: "Active", tool_call: true },
+              deprecated: { name: "Deprecated", status: "deprecated", tool_call: true },
+            },
+          },
+        },
+      },
+    })
+    .json(200, (body) => {
+      object(body)
+      check(body.default === null, "a default outside the emitted connected rows should normalize to null")
+      array(body.all)
+      const provider = body.all.find((item) => isRecord(item) && item.id === "runtime-catalog")
+      object(provider)
+      object(provider.models)
+      check("active" in provider.models, "active configured model should remain emitted")
+      check(!("deprecated" in provider.models), "deprecated configured model should remain excluded")
+    }),
+  http.protected
+    .get("/provider/runtime", "provider.runtime.empty")
+    .inProject({ git: false, config: { enabled_providers: [] } })
+    .json(200, (body) => {
+      object(body)
+      array(body.all)
+      array(body.connected)
+      check(body.all.length === 0, "zero connected providers should emit an empty provider array")
+      check(body.connected.length === 0, "zero connected providers should emit an empty connected array")
+      check(body.default === null, "zero connected providers should emit a null default")
+    }),
   http.protected.get("/provider/auth", "provider.auth").json(),
   http.protected
     .post("/provider/{providerID}/oauth/authorize", "provider.oauth.authorize")
@@ -527,6 +670,7 @@ const scenarios: Scenario[] = [
   http.protected
     .post("/experimental/worktree", "worktree.create")
     .mutating()
+    .seeded((ctx) => ctx.worktreeReady("api-dsl").pipe(Effect.forkScoped))
     .at((ctx) => ({ path: "/experimental/worktree", headers: ctx.headers(), body: { name: "api-dsl" } }))
     .jsonEffect(
       200,
@@ -534,6 +678,7 @@ const scenarios: Scenario[] = [
         Effect.gen(function* () {
           object(body)
           check(typeof body.directory === "string", "created worktree should include directory")
+          yield* Fiber.join(ctx.state)
           yield* ctx.worktreeRemove(body.directory)
         }),
       "status",
@@ -569,6 +714,10 @@ const scenarios: Scenario[] = [
     .get("/experimental/session", "experimental.session.list")
     .at((ctx) => ({ path: "/experimental/session?roots=false&archived=false", headers: ctx.headers() }))
     .json(200, array),
+  http.protected.get("/experimental/capabilities", "experimental.capabilities.get").json(200, (body) => {
+    check(typeof body === "object" && body !== null, "capabilities should be an object")
+    check("backgroundSubagents" in body, "capabilities should report background subagents")
+  }),
   http.protected
     .post("/experimental/session/{sessionID}/background", "experimental.session.background")
     .mutating()
@@ -649,9 +798,71 @@ const scenarios: Scenario[] = [
     object(body)
     check(body.healthy === true, "v2 server should report healthy")
   }),
+  http.protected.get("/api/location", "v2.location.get").json(200, object),
   http.protected.get("/api/agent", "v2.agent.list").json(200, locationData(array)),
   http.protected.get("/api/model", "v2.model.list").json(200, locationData(array)),
   http.protected.get("/api/provider", "v2.provider.list").json(200, locationData(array)),
+  http.protected.get("/api/integration", "v2.integration.list").json(200, locationData(array)),
+  http.protected
+    .get("/api/integration/{integrationID}", "v2.integration.get")
+    .at((ctx) => ({
+      path: route("/api/integration/{integrationID}", { integrationID: "missing" }),
+      headers: ctx.headers(),
+    }))
+    .json(200, object),
+  http.protected
+    .post("/api/integration/{integrationID}/connect/key", "v2.integration.connect.key")
+    .at((ctx) => ({
+      path: route("/api/integration/{integrationID}/connect/key", { integrationID: "missing" }),
+      headers: ctx.headers(),
+      body: { key: "test" },
+    }))
+    .status(500, undefined, "status"),
+  http.protected
+    .post("/api/integration/{integrationID}/connect/oauth", "v2.integration.connect.oauth")
+    .at((ctx) => ({
+      path: route("/api/integration/{integrationID}/connect/oauth", { integrationID: "missing" }),
+      headers: ctx.headers(),
+      body: { methodID: "missing", inputs: {} },
+    }))
+    .status(500, undefined, "status"),
+  http.protected
+    .get("/api/integration/attempt/{attemptID}", "v2.integration.attempt.status")
+    .at((ctx) => ({
+      path: route("/api/integration/attempt/{attemptID}", { attemptID: "con_missing" }),
+      headers: ctx.headers(),
+    }))
+    .status(500, undefined, "status"),
+  http.protected
+    .post("/api/integration/attempt/{attemptID}/complete", "v2.integration.attempt.complete")
+    .at((ctx) => ({
+      path: route("/api/integration/attempt/{attemptID}/complete", { attemptID: "con_missing" }),
+      headers: ctx.headers(),
+      body: {},
+    }))
+    .status(500, undefined, "status"),
+  http.protected
+    .delete("/api/integration/attempt/{attemptID}", "v2.integration.attempt.cancel")
+    .at((ctx) => ({
+      path: route("/api/integration/attempt/{attemptID}", { attemptID: "con_missing" }),
+      headers: ctx.headers(),
+    }))
+    .status(204, undefined, "status"),
+  http.protected
+    .delete("/api/credential/{credentialID}", "v2.credential.remove")
+    .at((ctx) => ({
+      path: route("/api/credential/{credentialID}", { credentialID: "cred_missing" }),
+      headers: ctx.headers(),
+    }))
+    .status(204, undefined, "status"),
+  http.protected
+    .patch("/api/credential/{credentialID}", "v2.credential.update")
+    .at((ctx) => ({
+      path: route("/api/credential/{credentialID}", { credentialID: "cred_missing" }),
+      headers: ctx.headers(),
+      body: { label: "Work" },
+    }))
+    .status(204, undefined, "status"),
   http.protected.get("/api/command", "v2.command.list").json(200, locationData(array)),
   http.protected.get("/api/skill", "v2.skill.list").json(200, locationData(array)),
   http.protected
@@ -659,20 +870,72 @@ const scenarios: Scenario[] = [
     .stream()
     .status(
       200,
-      (ctx, result) =>
+      (_ctx, result) =>
         Effect.sync(() => {
           check(result.contentType.includes("text/event-stream"), "v2 event should be an SSE stream")
           check(result.text.includes("server.connected"), "v2 event should emit initial connection event")
-          check(!!ctx.directory && result.text.includes(ctx.directory), "v2 event should include the resolved location")
+          check(!result.text.includes('"location"'), "v2 connection event should not be scoped to a location")
         }),
       "status",
     ),
   http.protected
-    .get("/api/fs/read", "v2.fs.read")
+    .get("/api/fs/read/*", "v2.fs.read")
     .seeded((ctx) => ctx.file("hello.txt", "hello\n"))
-    .at((ctx) => ({ path: "/api/fs/read?path=hello.txt", headers: ctx.headers() }))
-    .json(200, locationData(object)),
+    .at((ctx) => ({ path: "/api/fs/read/hello.txt", headers: ctx.headers() }))
+    .status(
+      200,
+      (_ctx, result) =>
+        Effect.sync(() => {
+          check(result.text === "hello\n", "v2 fs read should return the file body")
+          check(result.contentType.includes("text/plain"), "v2 fs read should return the file content type")
+        }),
+      "status",
+    ),
   http.protected.get("/api/fs/list", "v2.fs.list").json(200, locationData(array)),
+  http.protected
+    .get("/api/fs/find", "v2.fs.find")
+    .seeded((ctx) => ctx.file("hello.txt", "hello\n"))
+    .at((ctx) => ({ path: "/api/fs/find?query=hello&type=file", headers: ctx.headers() }))
+    .json(200, locationData(array)),
+  http.protected.get("/api/pty", "v2.pty.list").json(200, locationData(array)),
+  http.protected
+    .post("/api/pty", "v2.pty.create")
+    .mutating()
+    .at((ctx) => ({ path: "/api/pty", headers: ctx.headers(), body: controlledPtyInput("HTTP API V2 PTY") }))
+    .json(200, locationData(object)),
+  http.protected
+    .get("/api/pty/{ptyID}", "v2.pty.get")
+    .at((ctx) => ({ path: route("/api/pty/{ptyID}", { ptyID: "pty_httpapi_missing" }), headers: ctx.headers() }))
+    .json(404, object, "status"),
+  http.protected
+    .put("/api/pty/{ptyID}", "v2.pty.update")
+    .mutating()
+    .at((ctx) => ({
+      path: route("/api/pty/{ptyID}", { ptyID: "pty_httpapi_missing" }),
+      headers: ctx.headers(),
+      body: { title: "missing" },
+    }))
+    .json(404, object, "status"),
+  http.protected
+    .delete("/api/pty/{ptyID}", "v2.pty.remove")
+    .mutating()
+    .at((ctx) => ({ path: route("/api/pty/{ptyID}", { ptyID: "pty_httpapi_missing" }), headers: ctx.headers() }))
+    .json(404, object, "status"),
+  http.protected
+    .post("/api/pty/{ptyID}/connect-token", "v2.pty.connectToken")
+    .at((ctx) => ({
+      path: route("/api/pty/{ptyID}/connect-token", { ptyID: "pty_httpapi_missing" }),
+      headers: { ...ctx.headers(), "x-opencode-ticket": "1" },
+    }))
+    .json(404, object, "status"),
+  http.protected
+    .get("/api/pty/{ptyID}/connect", "v2.pty.connect")
+    .at((ctx) => ({
+      path: route("/api/pty/{ptyID}/connect", { ptyID: "pty_httpapi_missing" }),
+      headers: ctx.headers(),
+    }))
+    .status(404, undefined, "none"),
+  http.protected.get("/api/reference", "v2.reference.list").json(200, object),
   http.protected
     .get("/api/provider/{providerID}", "v2.provider.get")
     .at((ctx) => ({ path: route("/api/provider/{providerID}", { providerID: "missing" }), headers: ctx.headers() }))
@@ -688,18 +951,51 @@ const scenarios: Scenario[] = [
     array(body.data)
   }),
   http.protected
-    .get("/api/session/{sessionID}/permission/request", "v2.session.permission.list")
+    .post("/api/session/{sessionID}/permission", "v2.session.permission.create")
+    .seeded((ctx) => ctx.session({ title: "Permission create owner" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/permission", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: { action: "read", resources: [".env"] },
+    }))
+    .json(200, (body) => {
+      object(body)
+      object(body.data)
+      check(typeof body.data.id === "string", "permission create should return an ID")
+      check(body.data.effect === "ask", "permission create should create a pending request")
+    }),
+  http.protected
+    .get("/api/session/{sessionID}/permission", "v2.session.permission.list")
     .seeded((ctx) => ctx.session({ title: "Permission list owner" }))
     .at((ctx) => ({
-      path: route("/api/session/{sessionID}/permission/request", { sessionID: ctx.state.id }),
+      path: route("/api/session/{sessionID}/permission", { sessionID: ctx.state.id }),
       headers: ctx.headers(),
     }))
     .json(200, data(array)),
   http.protected
-    .post("/api/session/{sessionID}/permission/request/{requestID}/reply", "v2.session.permission.reply")
+    .get("/api/session/{sessionID}/permission/{requestID}", "v2.session.permission.get")
+    .seeded((ctx) => ctx.session({ title: "Permission get owner" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/permission/{requestID}", {
+        sessionID: ctx.state.id,
+        requestID: "per_httpapi_missing",
+      }),
+      headers: ctx.headers(),
+    }))
+    .json(404, object, "status"),
+  http.protected
+    .get("/api/session/{sessionID}/question", "v2.session.question.list")
+    .seeded((ctx) => ctx.session({ title: "Question list owner" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/question", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, data(array)),
+  http.protected
+    .post("/api/session/{sessionID}/permission/{requestID}/reply", "v2.session.permission.reply")
     .seeded((ctx) => ctx.session({ title: "Permission owner" }))
     .at((ctx) => ({
-      path: route("/api/session/{sessionID}/permission/request/{requestID}/reply", {
+      path: route("/api/session/{sessionID}/permission/{requestID}/reply", {
         sessionID: ctx.state.id,
         requestID: "per_httpapi_missing",
       }),
@@ -708,10 +1004,10 @@ const scenarios: Scenario[] = [
     }))
     .json(404, object, "status"),
   http.protected
-    .post("/api/session/{sessionID}/question/request/{requestID}/reply", "v2.session.question.reply")
+    .post("/api/session/{sessionID}/question/{requestID}/reply", "v2.session.question.reply")
     .seeded((ctx) => ctx.session({ title: "Question reply owner" }))
     .at((ctx) => ({
-      path: route("/api/session/{sessionID}/question/request/{requestID}/reply", {
+      path: route("/api/session/{sessionID}/question/{requestID}/reply", {
         sessionID: ctx.state.id,
         requestID: "que_httpapi_missing",
       }),
@@ -720,10 +1016,10 @@ const scenarios: Scenario[] = [
     }))
     .json(404, object, "status"),
   http.protected
-    .post("/api/session/{sessionID}/question/request/{requestID}/reject", "v2.session.question.reject")
+    .post("/api/session/{sessionID}/question/{requestID}/reject", "v2.session.question.reject")
     .seeded((ctx) => ctx.session({ title: "Question reject owner" }))
     .at((ctx) => ({
-      path: route("/api/session/{sessionID}/question/request/{requestID}/reject", {
+      path: route("/api/session/{sessionID}/question/{requestID}/reject", {
         sessionID: ctx.state.id,
         requestID: "que_httpapi_missing",
       }),
@@ -804,10 +1100,67 @@ const scenarios: Scenario[] = [
       headers: ctx.headers(),
     }))
     .status(400, undefined, "none"),
+  http.protected.get("/api/session/active", "v2.session.active").json(200, data(object), "none"),
+  http.protected
+    .post("/api/session", "v2.session.create")
+    .at((ctx) => ({
+      path: "/api/session",
+      headers: { ...ctx.headers(), "content-type": "application/json" },
+      body: {},
+    }))
+    .json(200, data(object)),
+  http.protected
+    .get("/api/session/{sessionID}", "v2.session.get")
+    .seeded((ctx) => ctx.session({ title: "Session get" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, data(object)),
+  http.protected
+    .post("/api/session/{sessionID}/agent", "v2.session.switchAgent")
+    .seeded((ctx) => ctx.session({ title: "Switch agent" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/agent", { sessionID: ctx.state.id }),
+      headers: { ...ctx.headers(), "content-type": "application/json" },
+      body: { agent: "plan" },
+    }))
+    .status(204, undefined, "none"),
+  http.protected
+    .post("/api/session/{sessionID}/model", "v2.session.switchModel")
+    .seeded((ctx) => ctx.session({ title: "Switch model" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/model", { sessionID: ctx.state.id }),
+      headers: { ...ctx.headers(), "content-type": "application/json" },
+      body: { model: { providerID: "opencode", id: "big-pickle" } },
+    }))
+    .status(204, undefined, "none"),
   http.protected
     .get("/api/session/{sessionID}/context", "v2.session.context")
     .at((ctx) => ({
       path: route("/api/session/{sessionID}/context", { sessionID: "ses_httpapi_missing" }),
+      headers: ctx.headers(),
+    }))
+    .json(404, object, "status"),
+  http.protected
+    .post("/api/session/{sessionID}/revert/stage", "v2.session.revert.stage")
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/revert/stage", { sessionID: "ses_httpapi_missing" }),
+      headers: { ...ctx.headers(), "content-type": "application/json" },
+      body: { messageID: "msg_httpapi_missing" },
+    }))
+    .json(404, object, "status"),
+  http.protected
+    .post("/api/session/{sessionID}/revert/clear", "v2.session.revert.clear")
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/revert/clear", { sessionID: "ses_httpapi_missing" }),
+      headers: ctx.headers(),
+    }))
+    .json(404, object, "status"),
+  http.protected
+    .post("/api/session/{sessionID}/revert/commit", "v2.session.revert.commit")
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/revert/commit", { sessionID: "ses_httpapi_missing" }),
       headers: ctx.headers(),
     }))
     .json(404, object, "status"),
@@ -841,8 +1194,9 @@ const scenarios: Scenario[] = [
     .json(404, object, "status"),
   http.protected
     .get("/api/session/{sessionID}/message", "v2.session.messages.cursor.invalid")
+    .seeded((ctx) => ctx.session({ title: "Invalid message cursor owner" }))
     .at((ctx) => ({
-      path: `${route("/api/session/{sessionID}/message", { sessionID: "ses_httpapi_missing" })}?${new URLSearchParams({
+      path: `${route("/api/session/{sessionID}/message", { sessionID: ctx.state.id })}?${new URLSearchParams({
         cursor: cursor({ id: "msg_httpapi_missing", time: 0, order: "desc", direction: "next" }),
         order: "asc",
       })}`,
@@ -850,9 +1204,69 @@ const scenarios: Scenario[] = [
     }))
     .status(400, undefined, "none"),
   http.protected
-    .post("/api/session/{sessionID}/prompt", "v2.session.prompt.invalid")
+    .get("/api/session/{sessionID}/history", "v2.session.history")
+    .seeded((ctx) => ctx.session({ title: "Session history" }))
     .at((ctx) => ({
-      path: route("/api/session/{sessionID}/prompt", { sessionID: "ses_httpapi_missing" }),
+      path: `${route("/api/session/{sessionID}/history", { sessionID: ctx.state.id })}?${new URLSearchParams({
+        after: "0",
+        limit: "2",
+      })}`,
+      headers: ctx.headers(),
+    }))
+    .json(
+      200,
+      (body) => {
+        object(body)
+        array(body.data)
+        check(typeof body.hasMore === "boolean", "Expected a history exhaustion signal")
+      },
+      "none",
+    ),
+  http.protected
+    .get("/api/session/{sessionID}/history", "v2.session.history.missing")
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/history", { sessionID: "ses_httpapi_missing" }),
+      headers: ctx.headers(),
+    }))
+    .json(404, object, "status"),
+  http.protected
+    .get("/api/session/{sessionID}/history", "v2.session.history.invalid")
+    .seeded((ctx) => ctx.session({ title: "Invalid history sequence" }))
+    .at((ctx) => ({
+      path: `${route("/api/session/{sessionID}/history", { sessionID: ctx.state.id })}?after=-1`,
+      headers: ctx.headers(),
+    }))
+    .json(400, object, "status"),
+  http.protected
+    .get("/api/session/{sessionID}/event", "v2.session.events.missing")
+    .at((ctx) => ({
+      path: `${route("/api/session/{sessionID}/event", { sessionID: "ses_httpapi_missing" })}?after=0`,
+      headers: ctx.headers(),
+    }))
+    .status(404, undefined, "status"),
+  http.protected
+    .post("/api/session/{sessionID}/interrupt", "v2.session.interrupt")
+    .seeded((ctx) => ctx.session({ title: "Interrupt session" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/interrupt", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .status(204, undefined, "none"),
+  http.protected
+    .get("/api/session/{sessionID}/message/{messageID}", "v2.session.message.missing")
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/message/{messageID}", {
+        sessionID: "ses_httpapi_missing",
+        messageID: "msg_httpapi_missing",
+      }),
+      headers: ctx.headers(),
+    }))
+    .json(404, object, "status"),
+  http.protected
+    .post("/api/session/{sessionID}/prompt", "v2.session.prompt.invalid")
+    .seeded((ctx) => ctx.session({ title: "Invalid prompt owner" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/prompt", { sessionID: ctx.state.id }),
       headers: ctx.headers(),
       body: {},
     }))
@@ -977,7 +1391,7 @@ const scenarios: Scenario[] = [
     .seeded((ctx) =>
       Effect.gen(function* () {
         const session = yield* ctx.session({ title: "Todo session" })
-        const todos = [{ content: "cover session todo", status: "pending", priority: "high" }]
+        const todos = [{ content: "cover session todo", status: "pending" as const, priority: "high" as const }]
         yield* ctx.todos(session.id, todos)
         return { session, todos }
       }),
@@ -990,55 +1404,6 @@ const scenarios: Scenario[] = [
       check(stable(body) === stable(ctx.state.todos), "todos should match seeded state")
     }),
   http.protected
-    .post("/session/{sessionID}/context/stage", "session.context.stage")
-    .seeded((ctx) => ctx.session({ title: "Stage context session" }))
-    .at((ctx) => ({
-      path: route("/session/{sessionID}/context/stage", { sessionID: ctx.state.id }),
-      headers: ctx.headers(),
-      body: { parts: [{ type: "text", text: "provider-only context", label: "Context" }] },
-    }))
-    .json(200, (body, ctx) => {
-      object(body)
-      check(body.sessionID === ctx.state.id, "staged context should report requested session")
-      check(Array.isArray(body.parts) && body.parts.length === 1, "staged context should include text part")
-    }),
-  http.protected
-    .post("/session/{sessionID}/context/stage", "session.context.stage.empty")
-    .seeded((ctx) => ctx.session({ title: "Empty staged context session" }))
-    .at((ctx) => ({
-      path: route("/session/{sessionID}/context/stage", { sessionID: ctx.state.id }),
-      headers: ctx.headers(),
-      body: { parts: [{ type: "text", text: "" }] },
-    }))
-    .status(400),
-  http.protected
-    .get("/session/{sessionID}/context/stage", "session.context.listStaged")
-    .seeded((ctx) => ctx.session({ title: "List staged context session" }))
-    .at((ctx) => ({
-      path: route("/session/{sessionID}/context/stage", { sessionID: ctx.state.id }),
-      headers: ctx.headers(),
-    }))
-    .json(200, array),
-  http.protected
-    .delete("/session/{sessionID}/context/stage", "session.context.clearStaged")
-    .seeded((ctx) => ctx.session({ title: "Clear staged context session" }))
-    .at((ctx) => ({
-      path: route("/session/{sessionID}/context/stage", { sessionID: ctx.state.id }),
-      headers: ctx.headers(),
-    }))
-    .status(204),
-  http.protected
-    .delete("/session/{sessionID}/context/stage/{contextID}", "session.context.clearStagedItem")
-    .seeded((ctx) => ctx.session({ title: "Clear staged context item session" }))
-    .at((ctx) => ({
-      path: route("/session/{sessionID}/context/stage/{contextID}", {
-        sessionID: ctx.state.id,
-        contextID: "ctx_missing",
-      }),
-      headers: ctx.headers(),
-    }))
-    .status(204),
-  http.protected
     .get("/session/{sessionID}/diff", "session.diff")
     .seeded((ctx) => ctx.session({ title: "Diff session" }))
     .at((ctx) => ({ path: route("/session/{sessionID}/diff", { sessionID: ctx.state.id }), headers: ctx.headers() }))
@@ -1050,6 +1415,59 @@ const scenarios: Scenario[] = [
     .json(200, (body) => {
       array(body)
       check(body.length === 0, "new session should have no messages")
+    }),
+  http.protected
+    .post("/session/{sessionID}/context/stage", "session.context.stage")
+    .mutating()
+    .seeded((ctx) => ctx.session({ title: "Staged context session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/context/stage", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: { id: "ctx_httpapi", parts: [{ type: "text", text: "exercise staged context" }] },
+    }))
+    .json(200, (body) => {
+      object(body)
+      check(body.id === "ctx_httpapi", "staged context should preserve its requested ID")
+    }),
+  http.protected
+    .get("/session/{sessionID}/context/stage", "session.context.stage.list")
+    .seeded((ctx) => ctx.session({ title: "List staged context session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/context/stage", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, array),
+  http.protected
+    .delete("/session/{sessionID}/context/stage", "session.context.stage.clear")
+    .mutating()
+    .seeded((ctx) => ctx.session({ title: "Clear staged context session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/context/stage", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .status(204),
+  http.protected
+    .delete("/session/{sessionID}/context/stage/{contextID}", "session.context.stage.clear.item")
+    .mutating()
+    .seeded((ctx) => ctx.session({ title: "Clear staged context item session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/context/stage/{contextID}", {
+        sessionID: ctx.state.id,
+        contextID: "ctx_httpapi_missing",
+      }),
+      headers: ctx.headers(),
+    }))
+    .status(204),
+  http.protected
+    .get("/session/{sessionID}/compaction", "session.compaction.catalog")
+    .seeded((ctx) => ctx.session({ title: "Compaction catalog session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/compaction", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, (body) => {
+      object(body)
+      array(body.items)
     }),
   http.protected
     .get("/session/{sessionID}/message/{messageID}", "session.message")
@@ -1191,16 +1609,15 @@ const scenarios: Scenario[] = [
     .seeded((ctx) =>
       Effect.gen(function* () {
         const session = yield* ctx.session({ title: "Init session" })
-        const message = yield* ctx.message(session.id, { text: "initialize" })
         yield* ctx.llmText("initialized")
         yield* ctx.llmText("initialized")
-        return { session, message }
+        return { session, messageID: ctx.messageID() }
       }),
     )
     .at((ctx) => ({
       path: route("/session/{sessionID}/init", { sessionID: ctx.state.session.id }),
       headers: ctx.headers(),
-      body: { providerID: "test", modelID: "test-model", messageID: ctx.state.message.info.id },
+      body: { providerID: "test", modelID: "test-model", messageID: ctx.state.messageID },
     }))
     .jsonEffect(200, (body, ctx) =>
       Effect.gen(function* () {
@@ -1327,33 +1744,21 @@ const scenarios: Scenario[] = [
         const session = yield* ctx.session({ title: "Summarize session" })
         yield* ctx.message(session.id, { text: "summarize this work" })
         const summary = [
-          "## Goal",
+          "## Objective",
           "- Exercise session summarize.",
           "",
-          "## Constraints & Preferences",
+          "## Important Details",
           "- Use fake LLM.",
-          "",
-          "## Progress",
-          "### Done",
-          "- Summary generated.",
-          "",
-          "### In Progress",
-          "- (none)",
-          "",
-          "### Blocked",
-          "- (none)",
-          "",
-          "## Key Decisions",
           "- Keep route local.",
+          "- Test fixture: test/server/httpapi-exercise/index.ts.",
           "",
-          "## Next Steps",
-          "- (none)",
+          "## Work State",
+          "- Completed: Summary generated.",
+          "- Active: (none)",
+          "- Blocked: (none)",
           "",
-          "## Critical Context",
-          "- Test fixture.",
-          "",
-          "## Relevant Files",
-          "- test/server/httpapi-exercise/index.ts: scenario",
+          "## Next Move",
+          "1. (none)",
         ].join("\n")
         yield* ctx.llmText(summary)
         yield* ctx.llmText(summary)
@@ -1520,7 +1925,6 @@ const scenarios: Scenario[] = [
   http.protected
     .post("/global/upgrade", "global.upgrade")
     .global()
-    .probe({ path: "/global/upgrade", body: { target: 1 } })
     .at(() => ({ path: "/global/upgrade", body: { target: 1 } }))
     .status(400),
 ]

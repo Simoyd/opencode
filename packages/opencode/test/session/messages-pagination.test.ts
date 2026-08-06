@@ -1,21 +1,21 @@
 import { describe, expect, test } from "bun:test"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { Database } from "@opencode-ai/core/database/database"
-import { Cause, Effect, Exit, Layer, Option } from "effect"
-import { SqlError, UnknownError } from "effect/unstable/sql/SqlError"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
+import { Effect, Option } from "effect"
 import { Session as SessionNs } from "@/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
+import { SessionLifecycle } from "@/session/lifecycle"
 
 import { NotFoundError } from "@/storage/storage"
-import * as Log from "@opencode-ai/core/util/log"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 
-void Log.init({ print: false })
-
-const it = testEffect(Layer.mergeAll(SessionNs.defaultLayer, Database.defaultLayer))
+const it = testEffect(
+  LayerNode.compile(LayerNode.group([SessionNs.node, SessionLifecycle.node, MessageV2.node, SessionProjector.node])),
+)
 
 const withSession = <A, E, R>(
   fn: (input: { session: SessionNs.Interface; sessionID: SessionID }) => Effect.Effect<A, E, R>,
@@ -27,15 +27,17 @@ const withSession = <A, E, R>(
       return { session, sessionID: created.id }
     }),
     fn,
-    (input) => input.session.remove(input.sessionID).pipe(Effect.ignore),
+    (input) => input.session.removeLeaf(input.sessionID).pipe(Effect.ignore),
   )
 
 // Helper functions using Effect.gen
-const fill = Effect.fn("Test.fill")(function* (sessionID: SessionID, count: number, time?: (i: number) => number) {
+const fill = Effect.fn("Test.fill")(function* (
+  sessionID: SessionID,
+  count: number,
+  time = (i: number) => Date.now() + i,
+) {
   const session = yield* SessionNs.Service
   const ids = [] as MessageID[]
-  const baseTime = Date.now()
-  const createdAt = time ?? ((i: number) => baseTime + i)
   for (let i = 0; i < count; i++) {
     const id = MessageID.ascending()
     ids.push(id)
@@ -43,7 +45,7 @@ const fill = Effect.fn("Test.fill")(function* (sessionID: SessionID, count: numb
       id,
       sessionID,
       role: "user",
-      time: { created: createdAt(i) },
+      time: { created: time(i) },
       agent: "test",
       model: { providerID: "test", modelID: "test" },
       tools: {},
@@ -58,32 +60,6 @@ const fill = Effect.fn("Test.fill")(function* (sessionID: SessionID, count: numb
     })
   }
   return ids
-})
-
-const fillExact = Effect.fn("Test.fillExact")(function* (
-  sessionID: SessionID,
-  rows: ReadonlyArray<{ id: MessageID; time: number }>,
-) {
-  const session = yield* SessionNs.Service
-  for (const [index, row] of rows.entries()) {
-    yield* session.updateMessage({
-      id: row.id,
-      sessionID,
-      role: "user",
-      time: { created: row.time },
-      agent: "test",
-      model: { providerID: "test", modelID: "test" },
-      tools: {},
-      mode: "",
-    } as unknown as SessionV1.Info)
-    yield* session.updatePart({
-      id: PartID.ascending(),
-      sessionID,
-      messageID: row.id,
-      type: "text",
-      text: `exact-${index}`,
-    })
-  }
 })
 
 const addUser = Effect.fn("Test.addUser")(function* (sessionID: SessionID, text?: string) {
@@ -298,44 +274,6 @@ describe("MessageV2.page", () => {
     ),
   )
 
-  it.instance("orders anti-correlated ids by timestamp before id", () =>
-    withSession(({ sessionID }) =>
-      Effect.gen(function* () {
-        const rows = [
-          { id: MessageID.make("msg_z-late-id-early-time"), time: 1000 },
-          { id: MessageID.make("msg_a-early-id-late-time"), time: 3000 },
-          { id: MessageID.make("msg_m-middle"), time: 2000 },
-        ]
-        yield* fillExact(sessionID, rows)
-
-        const result = yield* MessageV2.page({ sessionID, limit: 10 })
-        expect(result.items.map((item) => item.info.id)).toEqual([rows[0].id, rows[2].id, rows[1].id])
-      }),
-    ),
-  )
-
-  it.instance("paginates equal timestamps using binary id order", () =>
-    withSession(({ sessionID }) =>
-      Effect.gen(function* () {
-        const rows = [
-          MessageID.make("msg_z"),
-          MessageID.make("msg_A"),
-          MessageID.make("msg_a"),
-          MessageID.make("msg_Z"),
-        ].map((id) => ({ id, time: 1000 }))
-        yield* fillExact(sessionID, rows)
-
-        const newest = yield* MessageV2.page({ sessionID, limit: 2 })
-        expect(newest.items.map((item) => item.info.id)).toEqual([MessageID.make("msg_a"), MessageID.make("msg_z")])
-        expect(newest.cursor).toBeTruthy()
-
-        const oldest = yield* MessageV2.page({ sessionID, limit: 2, before: newest.cursor! })
-        expect(oldest.items.map((item) => item.info.id)).toEqual([MessageID.make("msg_A"), MessageID.make("msg_Z")])
-        expect(oldest.more).toBe(false)
-      }),
-    ),
-  )
-
   it.instance("does not return messages from other sessions", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service
@@ -351,8 +289,8 @@ describe("MessageV2.page", () => {
       expect(resultA.items.every((item) => item.info.sessionID === a.id)).toBe(true)
       expect(resultB.items.every((item) => item.info.sessionID === b.id)).toBe(true)
 
-      yield* session.remove(a.id)
-      yield* session.remove(b.id)
+      yield* session.removeLeaf(a.id)
+      yield* session.removeLeaf(b.id)
     }),
   )
 
@@ -499,9 +437,8 @@ describe("MessageV2.parts", () => {
 
   it.instance("returns empty for non-existent message id", () =>
     Effect.gen(function* () {
-      yield* SessionNs.Service
       const result = yield* MessageV2.parts({
-        sessionID: SessionID.make("ses_missing_message_parts"),
+        sessionID: SessionID.make("ses_missing"),
         messageID: MessageID.ascending(),
       })
       expect(result).toEqual([])
@@ -537,41 +474,6 @@ describe("MessageV2.get", () => {
     ),
   )
 
-  it.instance("converts page and get transaction SQL failures to defects instead of typed not-found failures", () =>
-    withSession(({ sessionID }) =>
-      Effect.gen(function* () {
-        const database = yield* Database.Service
-        const sqlError = new SqlError({
-          reason: new UnknownError({ cause: new Error("injected transaction failure"), operation: "transaction" }),
-        })
-        const failingDb = new Proxy(database.db, {
-          get(target, property, receiver) {
-            if (property === "transaction") return () => Effect.fail(sqlError)
-            return Reflect.get(target, property, receiver)
-          },
-        }) as typeof database.db
-
-        const pageExit = yield* MessageV2.page({ sessionID, limit: 10 }).pipe(
-          Effect.provideService(Database.Service, { db: failingDb }),
-          Effect.exit,
-        )
-        const getExit = yield* MessageV2.get({ sessionID, messageID: MessageID.ascending() }).pipe(
-          Effect.provideService(Database.Service, { db: failingDb }),
-          Effect.exit,
-        )
-        const exits: ReadonlyArray<Exit.Exit<unknown, unknown>> = [pageExit, getExit]
-        for (const exit of exits) {
-          expect(Exit.isFailure(exit)).toBe(true)
-          if (!Exit.isFailure(exit)) continue
-          expect(exit.cause.reasons).toHaveLength(1)
-          expect(Cause.isDieReason(exit.cause.reasons[0])).toBe(true)
-          const reason = exit.cause.reasons[0]
-          if (Cause.isDieReason(reason)) expect(reason.defect).toBe(sqlError)
-        }
-      }),
-    ),
-  )
-
   it.instance("fails with NotFoundError for non-existent message", () =>
     withSession(({ sessionID }) =>
       Effect.gen(function* () {
@@ -596,8 +498,8 @@ describe("MessageV2.get", () => {
       const result = yield* MessageV2.get({ sessionID: a.id, messageID: id })
       expect(result.info.id).toBe(id)
 
-      yield* session.remove(a.id)
-      yield* session.remove(b.id)
+      yield* session.removeLeaf(a.id)
+      yield* session.removeLeaf(b.id)
     }),
   )
 
@@ -699,13 +601,13 @@ describe("Session.findMessage", () => {
   )
 })
 
-describe("MessageV2.modelTurn", () => {
+describe("MessageV2.filterCompacted", () => {
   it.instance("returns all messages when no compaction", () =>
     withSession(({ sessionID }) =>
       Effect.gen(function* () {
         const ids = yield* fill(sessionID, 5)
 
-        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
+        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
         expect(result).toHaveLength(5)
         // reversed from newest-first to chronological
         expect(result.map((item) => item.info.id)).toEqual(ids)
@@ -739,7 +641,7 @@ describe("MessageV2.modelTurn", () => {
           text: "new response",
         })
 
-        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
+        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
         // Includes compaction boundary: u1, a1, u2, a2
         expect(result[0].info.id).toBe(u1)
         expect(result.length).toBe(4)
@@ -749,7 +651,7 @@ describe("MessageV2.modelTurn", () => {
 
   it.live("handles empty iterable", () =>
     Effect.sync(() => {
-      const result = MessageV2.modelTurn([]).messages
+      const result = MessageV2.filterCompacted([])
       expect(result).toEqual([])
     }),
   )
@@ -761,7 +663,7 @@ describe("MessageV2.modelTurn", () => {
         yield* addCompactionPart(sessionID, u1)
         yield* addUser(sessionID, "world")
 
-        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
+        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
         expect(result).toHaveLength(2)
       }),
     ),
@@ -780,7 +682,7 @@ describe("MessageV2.modelTurn", () => {
         yield* addAssistant(sessionID, u1, { summary: true, finish: "end_turn", error })
         yield* addUser(sessionID, "retry")
 
-        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
+        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
         // Error assistant doesn't add to completed, so compaction boundary never triggers
         expect(result).toHaveLength(3)
       }),
@@ -797,7 +699,7 @@ describe("MessageV2.modelTurn", () => {
         yield* addAssistant(sessionID, u1, { summary: true })
         yield* addUser(sessionID, "next")
 
-        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
+        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
         expect(result).toHaveLength(3)
       }),
     ),
@@ -847,7 +749,7 @@ describe("MessageV2.modelTurn", () => {
           text: "third reply",
         })
 
-        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
+        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
 
         expect(result.map((item) => item.info.id)).toEqual([c1, s1, u2, a2, u3, a3])
       }),
@@ -857,6 +759,7 @@ describe("MessageV2.modelTurn", () => {
   it.instance("fork remaps compaction tail_start_id for filterCompacted", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service
+      const lifecycle = yield* SessionLifecycle.Service
       const created = yield* session.create({})
 
       const u1 = yield* addUser(created.id, "first")
@@ -890,30 +793,6 @@ describe("MessageV2.modelTurn", () => {
         text: "summary",
       })
 
-      const replay = yield* addUser(created.id)
-      yield* session.updatePart({
-        id: PartID.ascending(),
-        sessionID: created.id,
-        messageID: replay,
-        type: "text",
-        text: "replayed prompt",
-        serverProvenance: {
-          type: "compaction-replay",
-          ownerMessageID: c1,
-          sourceMessageID: u1,
-        },
-      })
-      const continuation = yield* addUser(created.id)
-      yield* session.updatePart({
-        id: PartID.ascending(),
-        sessionID: created.id,
-        messageID: continuation,
-        type: "text",
-        text: "continue",
-        synthetic: true,
-        serverProvenance: { type: "compaction-continuation", ownerMessageID: c1 },
-      })
-
       const u3 = yield* addUser(created.id, "third")
       const a3 = yield* addAssistant(created.id, u3, { finish: "end_turn" })
       yield* session.updatePart({
@@ -924,30 +803,12 @@ describe("MessageV2.modelTurn", () => {
         text: "third reply",
       })
 
-      const parentFiltered = MessageV2.modelTurn(yield* MessageV2.stream(created.id)).messages
-      expect(parentFiltered.map((item) => item.info.id)).toEqual([c1, s1, u2, a2, replay, continuation, u3, a3])
+      const parentFiltered = MessageV2.filterCompacted(yield* MessageV2.stream(created.id))
+      expect(parentFiltered.map((item) => item.info.id)).toEqual([c1, s1, u2, a2, u3, a3])
 
-      const forked = yield* session.fork({ sessionID: created.id })
-      const childFiltered = MessageV2.modelTurn(yield* MessageV2.stream(forked.id)).messages
+      const forked = yield* lifecycle.fork({ sessionID: created.id })
+      const childFiltered = MessageV2.filterCompacted(yield* MessageV2.stream(forked.id))
       expect(childFiltered).toHaveLength(parentFiltered.length)
-
-      const childMessages = yield* session.messages({ sessionID: forked.id })
-      const childIDs = new Set(childMessages.map((message) => message.info.id))
-      const protocol = childMessages
-        .flatMap((message) => message.parts)
-        .filter((part): part is SessionV1.TextPart => part.type === "text" && part.serverProvenance !== undefined)
-        .map((part) => part.serverProvenance!)
-        .filter(
-          (provenance) => provenance.type === "compaction-replay" || provenance.type === "compaction-continuation",
-        )
-      expect(protocol).toHaveLength(2)
-      for (const provenance of protocol) {
-        expect(childIDs.has(provenance.ownerMessageID)).toBe(true)
-        expect(provenance.ownerMessageID).not.toBe(c1)
-        if (provenance.type !== "compaction-replay") continue
-        expect(childIDs.has(provenance.sourceMessageID)).toBe(true)
-        expect(provenance.sourceMessageID).not.toBe(u1)
-      }
 
       const tailPart = childFiltered.flatMap((m) => m.parts).find((p) => p.type === "compaction")
       expect(tailPart?.type).toBe("compaction")
@@ -955,8 +816,8 @@ describe("MessageV2.modelTurn", () => {
       expect(tailPart.tail_start_id).toBeDefined()
       expect(childFiltered.some((m) => m.info.id === tailPart.tail_start_id)).toBe(true)
 
-      yield* session.remove(forked.id)
-      yield* session.remove(created.id)
+      yield* session.removeLeaf(forked.id)
+      yield* session.removeLeaf(created.id)
     }),
   )
 
@@ -1012,7 +873,7 @@ describe("MessageV2.modelTurn", () => {
           text: "third reply",
         })
 
-        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
+        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
 
         expect(result.map((item) => item.info.id)).toEqual([c1, s1, a3, u3, a4])
       }),
@@ -1084,7 +945,7 @@ describe("MessageV2.modelTurn", () => {
           text: "fourth reply",
         })
 
-        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
+        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
 
         expect(result.map((item) => item.info.id)).toEqual([c2, s2, u3, a3, u4, a4])
       }),
@@ -1107,7 +968,7 @@ describe("MessageV2.modelTurn", () => {
         parts: [{ type: "text", text: "hello" }] as unknown as SessionV1.Part[],
       },
     ]
-    const result = MessageV2.modelTurn(items).messages
+    const result = MessageV2.filterCompacted(items)
     expect(result).toHaveLength(1)
     expect(result[0].info.id).toBe(id)
   })
@@ -1192,7 +1053,7 @@ describe("MessageV2 consistency", () => {
         yield* fill(sessionID, 4)
 
         const stream = yield* MessageV2.stream(sessionID)
-        const filtered = MessageV2.modelTurn(stream).messages
+        const filtered = MessageV2.filterCompacted(stream)
         const all = stream.toReversed()
 
         expect(filtered.map((m) => m.info.id)).toEqual(all.map((m) => m.info.id))

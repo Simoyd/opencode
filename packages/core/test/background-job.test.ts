@@ -1,7 +1,10 @@
 import { describe, expect } from "bun:test"
 import { BackgroundJob } from "@opencode-ai/core/background-job"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Deferred, Effect, Exit, Scope } from "effect"
 import { it } from "./lib/effect"
+
+const jobsLayer = LayerNode.compile(BackgroundJob.node)
 
 describe("BackgroundJob", () => {
   it.live("tracks process-local work through explicit observation", () =>
@@ -25,7 +28,7 @@ describe("BackgroundJob", () => {
         timedOut: false,
         info: { status: "completed", output: "done" },
       })
-    }).pipe(Effect.provide(BackgroundJob.layer)),
+    }).pipe(Effect.provide(jobsLayer)),
   )
 
   it.live("publishes jobs before starting immediately settling work", () =>
@@ -55,7 +58,7 @@ describe("BackgroundJob", () => {
           })
         })
       })
-    }).pipe(Effect.provide(BackgroundJob.layer)),
+    }).pipe(Effect.provide(jobsLayer)),
   )
 
   it.live("increments pending work before starting immediately settling extensions", () =>
@@ -80,7 +83,80 @@ describe("BackgroundJob", () => {
           })
         }),
       )
-    }).pipe(Effect.provide(BackgroundJob.layer)),
+    }).pipe(Effect.provide(jobsLayer)),
+  )
+
+  it.live("publishes terminal completion after delivery registration but before delivery finishes", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const finish = yield* Deferred.make<void>()
+      const registered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const delivered = yield* Deferred.make<void>()
+      const job = yield* jobs.start({
+        type: "test",
+        metadata: { background: true },
+        run: Deferred.await(finish).pipe(Effect.as("done")),
+        terminalDelivery: () =>
+          Deferred.succeed(registered, undefined).pipe(
+            Effect.as({
+              run: Deferred.await(release).pipe(Effect.ensuring(Deferred.succeed(delivered, undefined))),
+            }),
+          ),
+      })
+
+      yield* Deferred.succeed(finish, undefined)
+      yield* Deferred.await(registered)
+      const completed = yield* jobs.wait({ id: job.id })
+
+      expect(completed.info).toMatchObject({ status: "completed", output: "done" })
+      expect(yield* Deferred.isDone(delivered)).toBeFalse()
+      yield* Deferred.succeed(release, undefined)
+      yield* Deferred.await(delivered)
+    }).pipe(Effect.provide(jobsLayer)),
+  )
+
+  it.live("reports terminal registration failure without exposing successful completion", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const job = yield* jobs.start({
+        type: "test",
+        metadata: { background: true },
+        run: Effect.succeed("done"),
+        terminalDelivery: () => Effect.fail(new Error("registration rejected")),
+      })
+
+      expect(yield* jobs.wait({ id: job.id })).toMatchObject({
+        timedOut: false,
+        info: { status: "error", error: "registration rejected" },
+      })
+    }).pipe(Effect.provide(jobsLayer)),
+  )
+
+  it.live("keeps completion nonblocking and records a later terminal delivery failure", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const release = yield* Deferred.make<void>()
+      const delivered = yield* Deferred.make<void>()
+      const job = yield* jobs.start({
+        type: "test",
+        metadata: { background: true },
+        run: Effect.succeed("done"),
+        terminalDelivery: () =>
+          Effect.succeed({
+            run: Deferred.await(release).pipe(
+              Effect.andThen(Effect.fail(new Error("delivery failed"))),
+              Effect.ensuring(Deferred.succeed(delivered, undefined)),
+            ),
+          }),
+      })
+
+      expect(yield* jobs.wait({ id: job.id })).toMatchObject({ info: { status: "completed" } })
+      yield* Deferred.succeed(release, undefined)
+      yield* Deferred.await(delivered)
+      yield* Effect.yieldNow
+      expect(yield* jobs.get(job.id)).toMatchObject({ status: "error", error: "delivery failed" })
+    }).pipe(Effect.provide(jobsLayer)),
   )
 
   it.live("interrupts live work without promising settlement after the owning process-local scope closes", () =>

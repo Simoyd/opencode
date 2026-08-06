@@ -1,8 +1,11 @@
 #!/usr/bin/env bun
 
+import { $ } from "bun"
 import { rm } from "fs/promises"
 import path from "path"
 import { Script } from "@opencode-ai/script"
+import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
+import pkg from "../package.json"
 import { modelsData } from "./generate"
 
 const dir = path.resolve(import.meta.dirname, "..")
@@ -13,7 +16,9 @@ await rm("dist", { recursive: true, force: true })
 
 const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")
+const skipInstall = process.argv.includes("--skip-install")
 const sourcemapsFlag = process.argv.includes("--sourcemaps")
+const plugin = createSolidTransformPlugin()
 
 const allTargets: {
   os: string
@@ -43,6 +48,8 @@ const targets = singleFlag
     })
   : allTargets
 
+if (!skipInstall) await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`
+
 for (const item of targets) {
   const target = [
     binary,
@@ -58,6 +65,7 @@ for (const item of targets) {
   const result = await Bun.build({
     entrypoints: ["./src/index.ts"],
     tsconfig: "./tsconfig.json",
+    plugins: [plugin],
     external: ["node-gyp"],
     format: "esm",
     minify: true,
@@ -79,6 +87,9 @@ for (const item of targets) {
       OPENCODE_MODELS_DEV: modelsData,
       OPENCODE_CHANNEL: `'${Script.channel}'`,
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "undefined",
+      // FFF_LIBC selects the fff native lib variant: "musl" or "gnu".
+      FFF_LIBC: item.os === "linux" ? `'${item.abi ?? "gnu"}'` : "undefined",
+      ...(item.os === "linux" ? { "process.env.OPENTUI_LIBC": JSON.stringify(item.abi ?? "glibc") } : {}),
     },
   })
 

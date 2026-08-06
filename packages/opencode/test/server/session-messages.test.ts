@@ -1,24 +1,19 @@
 import { afterEach, describe, expect } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect, Layer } from "effect"
 import { HttpClientResponse } from "effect/unstable/http"
 import { Session as SessionNs } from "@/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
 
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
-import * as Log from "@opencode-ai/core/util/log"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { httpApiLayer, requestInDirectory } from "./httpapi-layer"
-import { Database } from "@opencode-ai/core/database/database"
-import { CompactionRegionTable } from "@opencode-ai/core/session/sql"
-import { eq } from "drizzle-orm"
 
-void Log.init({ print: false })
-
-const it = testEffect(Layer.mergeAll(Database.defaultLayer, SessionNs.defaultLayer, httpApiLayer))
+const it = testEffect(Layer.mergeAll(LayerNode.compile(SessionNs.node), httpApiLayer))
 
 const model = {
   providerID: ProviderV2.ID.make("test"),
@@ -47,14 +42,13 @@ const withoutWatcher = <A, E, R>(effect: Effect.Effect<A, E, R>) => {
 }
 
 const sessionScoped = Effect.acquireRelease(SessionNs.use.create({}), (session) =>
-  SessionNs.use.remove(session.id).pipe(Effect.ignore),
+  SessionNs.use.removeLeaf(session.id).pipe(Effect.ignore),
 )
 
 const fill = Effect.fn("SessionMessagesTest.fill")(function* (
   sessionID: SessionID,
   count: number,
   time = (i: number) => Date.now() + i,
-  includeParts = true,
 ) {
   const session = yield* SessionNs.Service
   return yield* Effect.forEach(
@@ -71,135 +65,16 @@ const fill = Effect.fn("SessionMessagesTest.fill")(function* (
           model,
           tools: {},
         } satisfies SessionV1.User)
-        if (includeParts) {
-          yield* session.updatePart({
-            id: PartID.ascending(),
-            sessionID,
-            messageID: id,
-            type: "text",
-            text: `m${i}`,
-          } satisfies SessionV1.TextPart)
-        }
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID,
+          messageID: id,
+          type: "text",
+          text: `m${i}`,
+        } satisfies SessionV1.TextPart)
         return id
       }),
   )
-})
-
-const addUser = Effect.fn("SessionMessagesTest.addUser")(function* (
-  sessionID: SessionID,
-  text: string,
-  opts?: {
-    replay?: boolean
-    replaySourceMessageID?: MessageID
-    syntheticContinue?: boolean
-    ownerMarkerID?: MessageID
-    id?: MessageID
-    created?: number
-  },
-) {
-  const session = yield* SessionNs.Service
-  const id = opts?.id ?? MessageID.ascending()
-  const serverProvenance = opts?.replay
-    ? {
-        type: "compaction-replay" as const,
-        ownerMessageID: opts.ownerMarkerID!,
-        sourceMessageID: opts.replaySourceMessageID!,
-      }
-    : opts?.syntheticContinue
-      ? { type: "compaction-continuation" as const, ownerMessageID: opts.ownerMarkerID! }
-      : undefined
-  yield* session.updateMessage({
-    id,
-    sessionID,
-    role: "user",
-    time: { created: opts?.created ?? Date.now() },
-    agent: "test",
-    model,
-    tools: {},
-    mode: "",
-  } as unknown as SessionV1.Info)
-  yield* session.updatePart({
-    id: PartID.ascending(),
-    sessionID,
-    messageID: id,
-    type: "text",
-    text,
-    synthetic: opts?.syntheticContinue ? true : undefined,
-    serverProvenance,
-  } as any)
-  return id
-})
-
-const addAssistant = Effect.fn("SessionMessagesTest.addAssistant")(function* (
-  sessionID: SessionID,
-  parentID: MessageID,
-  text: string,
-  opts?: { summary?: boolean; finish?: string; id?: MessageID; created?: number; reasoning?: string },
-) {
-  const session = yield* SessionNs.Service
-  const id = opts?.id ?? MessageID.ascending()
-  yield* session.updateMessage({
-    id,
-    sessionID,
-    role: "assistant",
-    time: { created: opts?.created ?? Date.now() },
-    parentID,
-    modelID: ModelV2.ID.make("test"),
-    providerID: ProviderV2.ID.make("test"),
-    mode: "",
-    agent: "test",
-    path: { cwd: "/", root: "/" },
-    cost: 0,
-    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-    summary: opts?.summary,
-    finish: opts?.finish,
-  } as unknown as SessionV1.Info)
-  if (opts?.reasoning) {
-    yield* session.updatePart({
-      id: PartID.ascending(),
-      sessionID,
-      messageID: id,
-      type: "reasoning",
-      text: opts.reasoning,
-      time: { start: Date.now(), end: Date.now() },
-    })
-  }
-  yield* session.updatePart({
-    id: PartID.ascending(),
-    sessionID,
-    messageID: id,
-    type: "text",
-    text,
-  })
-  return id
-})
-
-const addCompaction = Effect.fn("SessionMessagesTest.addCompaction")(function* (
-  sessionID: SessionID,
-  tailStartID: MessageID,
-  opts?: { auto?: boolean; id?: MessageID; created?: number },
-) {
-  const session = yield* SessionNs.Service
-  const id = opts?.id ?? MessageID.ascending()
-  yield* session.updateMessage({
-    id,
-    sessionID,
-    role: "user",
-    time: { created: opts?.created ?? Date.now() },
-    agent: "test",
-    model,
-    tools: {},
-    mode: "",
-  } as unknown as SessionV1.Info)
-  yield* session.updatePart({
-    id: PartID.ascending(),
-    sessionID,
-    messageID: id,
-    type: "compaction",
-    auto: opts?.auto ?? true,
-    tail_start_id: tailStartID,
-  } as any)
-  return id
 })
 
 function request(path: string) {
@@ -210,7 +85,7 @@ function json<T>(response: HttpClientResponse.HttpClientResponse) {
   return response.json.pipe(Effect.map((body) => body as T))
 }
 
-describe("session messages and compaction catalog", () => {
+describe("session messages endpoint", () => {
   it.instance(
     "returns cursor headers for older pages",
     withoutWatcher(
@@ -272,7 +147,7 @@ describe("session messages and compaction catalog", () => {
     withoutWatcher(
       Effect.gen(function* () {
         const session = yield* sessionScoped
-        yield* fill(session.id, 520, undefined, false)
+        yield* fill(session.id, 520)
 
         const res = yield* request(`/session/${session.id}/message?limit=510`)
         expect(res.status).toBe(200)
@@ -298,343 +173,6 @@ describe("session messages and compaction catalog", () => {
         const body = yield* json<unknown[]>(res)
         expect(Array.isArray(body)).toBe(true)
         expect(body).toHaveLength(1)
-      }),
-    ),
-    { git: true },
-  )
-
-  it.instance(
-    "publishes metadata-only completed regions with persisted 80-code-unit preview",
-    withoutWatcher(
-      Effect.gen(function* () {
-        const session = yield* sessionScoped
-        const prompt = yield* addUser(session.id, "catalog prompt")
-        const answer = yield* addAssistant(session.id, prompt, "catalog answer", { finish: "end_turn" })
-        const marker = yield* addCompaction(session.id, prompt, { auto: false })
-        const longSummary = "word ".repeat(30)
-        const summary = yield* addAssistant(session.id, marker, longSummary, { summary: true, finish: "end_turn" })
-
-        const response = yield* request(`/session/${session.id}/compaction`)
-        expect(response.status).toBe(200)
-        const page = yield* json<{
-          items: Array<{
-            startMessageID: string
-            markerID: string
-            endExclusiveCursor: string
-            physicalMessageCount: number
-            semanticMessageCount: number
-            summaryMessageID: string
-            summaryPreview: string
-          }>
-          nextCursor?: string
-        }>(response)
-        expect(page.items).toHaveLength(1)
-        const descriptor = page.items[0]!
-        expect(descriptor.startMessageID).toBe(prompt)
-        expect(descriptor.markerID).toBe(marker)
-        expect(descriptor.summaryMessageID).toBe(summary)
-        expect(descriptor.summaryPreview).toHaveLength(80)
-        expect(descriptor.summaryPreview.endsWith("...")).toBe(true)
-        expect(descriptor.physicalMessageCount).toBe(2)
-        expect(descriptor.semanticMessageCount).toBe(2)
-        expect(page.nextCursor).toBeUndefined()
-
-        const ordinary = yield* request(
-          `/session/${session.id}/message?limit=50&before=${encodeURIComponent(descriptor.endExclusiveCursor)}`,
-        )
-        const messages = yield* json<SessionV1.WithParts[]>(ordinary)
-        expect(messages.map((message) => message.info.id)).toEqual([prompt, answer])
-      }),
-    ),
-    { git: true },
-  )
-
-  it.instance(
-    "paginates every completed region in fixed pages of 50",
-    withoutWatcher(
-      Effect.gen(function* () {
-        const session = yield* sessionScoped
-        const markers: MessageID[] = []
-        const created = Date.now()
-        for (let index = 0; index < 51; index++) {
-          const prompt = yield* addUser(session.id, `prompt ${index}`, { created: created + index * 4 })
-          yield* addAssistant(session.id, prompt, `answer ${index}`, {
-            created: created + index * 4 + 1,
-            finish: "end_turn",
-          })
-          const marker = yield* addCompaction(session.id, prompt, { auto: false, created: created + index * 4 + 2 })
-          yield* addAssistant(session.id, marker, `summary ${index}`, {
-            created: created + index * 4 + 3,
-            summary: true,
-            finish: "end_turn",
-          })
-          markers.push(marker)
-        }
-
-        const firstResponse = yield* request(`/session/${session.id}/compaction`)
-        const first = yield* json<{ items: Array<{ markerID: MessageID }>; nextCursor?: string }>(firstResponse)
-        expect(first.items).toHaveLength(50)
-        expect(first.items.map((item) => item.markerID)).toEqual(markers.slice(0, 50))
-        expect(first.nextCursor).toBeTruthy()
-
-        const secondResponse = yield* request(
-          `/session/${session.id}/compaction?cursor=${encodeURIComponent(first.nextCursor!)}`,
-        )
-        const second = yield* json<{
-          items: Array<{ markerID: MessageID; precedingSummaryMessageID?: MessageID }>
-          nextCursor?: string
-        }>(secondResponse)
-        expect(second.items).toHaveLength(1)
-        expect(second.items[0]!.markerID).toBe(markers[50])
-        expect(second.items[0]!.precedingSummaryMessageID).toBeTruthy()
-        expect(second.nextCursor).toBeUndefined()
-      }),
-    ),
-    { git: true },
-  )
-
-  it.instance(
-    "stores normalized previews at and above the 80-code-unit boundary",
-    withoutWatcher(
-      Effect.gen(function* () {
-        const session = yield* sessionScoped
-        const exactPrompt = yield* addUser(session.id, "exact preview")
-        const exactMarker = yield* addCompaction(session.id, exactPrompt, { auto: false })
-        yield* addAssistant(session.id, exactMarker, "x".repeat(80), { summary: true, finish: "end_turn" })
-        const longPrompt = yield* addUser(session.id, "long preview")
-        const longMarker = yield* addCompaction(session.id, longPrompt, { auto: false })
-        yield* addAssistant(session.id, longMarker, `  ${"y".repeat(81)}  `, { summary: true, finish: "end_turn" })
-
-        const response = yield* request(`/session/${session.id}/compaction`)
-        const page = yield* json<{ items: Array<{ summaryPreview: string }> }>(response)
-        expect(page.items.map((item) => item.summaryPreview)).toEqual(["x".repeat(80), `${"y".repeat(77)}...`])
-      }),
-    ),
-    { git: true },
-  )
-
-  it.instance(
-    "uses only canonical text for completed summary previews",
-    withoutWatcher(
-      Effect.gen(function* () {
-        const session = yield* sessionScoped
-        const prompt = yield* addUser(session.id, "visible summary")
-        const marker = yield* addCompaction(session.id, prompt, { auto: false })
-        yield* addAssistant(session.id, marker, "public summary", {
-          summary: true,
-          finish: "end_turn",
-          reasoning: "private reasoning",
-        })
-        const reasoningOnlyPrompt = yield* addUser(session.id, "reasoning-only summary")
-        const reasoningOnlyMarker = yield* addCompaction(session.id, reasoningOnlyPrompt, { auto: false })
-        yield* addAssistant(session.id, reasoningOnlyMarker, "", {
-          summary: true,
-          finish: "end_turn",
-          reasoning: "not a summary body",
-        })
-
-        const response = yield* request(`/session/${session.id}/compaction`)
-        const page = yield* json<{ items: Array<{ markerID: MessageID; summaryPreview: string }> }>(response)
-        expect(page.items).toHaveLength(1)
-        expect(page.items[0]).toMatchObject({ markerID: marker, summaryPreview: "public summary" })
-        expect(page.items.some((item) => item.markerID === reasoningOnlyMarker)).toBe(false)
-      }),
-    ),
-    { git: true },
-  )
-
-  it.instance(
-    "classifies owned replay once while hiding summary and continuation protocol rows",
-    withoutWatcher(
-      Effect.gen(function* () {
-        const session = yield* sessionScoped
-        const service = yield* SessionNs.Service
-        const source = yield* addUser(session.id, "original prompt")
-        yield* addAssistant(session.id, source, "original answer", { finish: "end_turn" })
-        const firstMarker = yield* addCompaction(session.id, source, { auto: false })
-        yield* addAssistant(session.id, firstMarker, "first summary", { summary: true, finish: "end_turn" })
-        yield* addUser(session.id, "replayed prompt", {
-          replay: true,
-          replaySourceMessageID: source,
-          ownerMarkerID: firstMarker,
-        })
-        yield* addUser(session.id, "duplicate replay", {
-          replay: true,
-          replaySourceMessageID: source,
-          ownerMarkerID: firstMarker,
-        })
-        const continuation = yield* addUser(session.id, "continue", {
-          syntheticContinue: true,
-          ownerMarkerID: firstMarker,
-        })
-        const zeroPart = MessageID.ascending()
-        yield* service.updateMessage({
-          id: zeroPart,
-          sessionID: session.id,
-          role: "user",
-          time: { created: Date.now() },
-          agent: "test",
-          model,
-          tools: {},
-        } satisfies SessionV1.User)
-        yield* addAssistant(session.id, continuation, "continued output", { finish: "end_turn" })
-        const secondMarker = yield* addCompaction(session.id, zeroPart, { auto: false })
-        yield* addAssistant(session.id, secondMarker, "second summary", { summary: true, finish: "end_turn" })
-
-        const response = yield* request(`/session/${session.id}/compaction`)
-        const page = yield* json<{
-          items: Array<{
-            markerID: MessageID
-            physicalMessageCount: number
-            semanticMessageCount: number
-          }>
-        }>(response)
-        const second = page.items.find((item) => item.markerID === secondMarker)!
-        expect(second.physicalMessageCount).toBe(6)
-        expect(second.semanticMessageCount).toBe(3)
-
-        yield* service.removeMessage({ sessionID: session.id, messageID: source })
-        const afterDelete = yield* request(`/session/${session.id}/compaction`).pipe(
-          Effect.flatMap(
-            json<{
-              items: Array<{
-                markerID: MessageID
-                semanticMessageCount: number
-              }>
-            }>,
-          ),
-        )
-        expect(afterDelete.items.find((item) => item.markerID === secondMarker)?.semanticMessageCount).toBe(2)
-      }),
-    ),
-    { git: true },
-  )
-
-  it.instance(
-    "rejects contradictory protocol ownership without publishing a partial region",
-    withoutWatcher(
-      Effect.gen(function* () {
-        const session = yield* sessionScoped
-        const source = yield* addUser(session.id, "source")
-        const firstMarker = yield* addCompaction(session.id, source, { auto: false })
-        yield* addAssistant(session.id, firstMarker, "first summary", { summary: true, finish: "end_turn" })
-        yield* addUser(session.id, "bad continuation", {
-          syntheticContinue: true,
-          ownerMarkerID: MessageID.ascending(),
-        })
-        const secondMarker = yield* addCompaction(session.id, source, { auto: false })
-        const attempted = yield* Effect.exit(
-          addAssistant(session.id, secondMarker, "must not publish", { summary: true, finish: "end_turn" }),
-        )
-        expect(attempted._tag).toBe("Failure")
-
-        const response = yield* request(`/session/${session.id}/compaction`)
-        const page = yield* json<{ items: Array<{ markerID: MessageID }> }>(response)
-        expect(page.items.map((item) => item.markerID)).toEqual([firstMarker])
-      }),
-    ),
-    { git: true },
-  )
-
-  it.instance(
-    "retires metadata when its canonical summary is removed",
-    withoutWatcher(
-      Effect.gen(function* () {
-        const session = yield* sessionScoped
-        const prompt = yield* addUser(session.id, "retire region")
-        const marker = yield* addCompaction(session.id, prompt, { auto: false })
-        const summary = yield* addAssistant(session.id, marker, "summary", { summary: true, finish: "end_turn" })
-        const before = yield* request(`/session/${session.id}/compaction`).pipe(
-          Effect.flatMap(json<{ items: unknown[] }>),
-        )
-        expect(before.items).toHaveLength(1)
-
-        const service = yield* SessionNs.Service
-        yield* service.removeMessage({ sessionID: session.id, messageID: summary })
-
-        const after = yield* request(`/session/${session.id}/compaction`).pipe(
-          Effect.flatMap(json<{ items: unknown[] }>),
-        )
-        expect(after.items).toEqual([])
-      }),
-    ),
-    { git: true },
-  )
-
-  it.instance(
-    "uses only completed markers as region boundaries",
-    withoutWatcher(
-      Effect.gen(function* () {
-        const session = yield* sessionScoped
-        const first = yield* addUser(session.id, "before failed compaction")
-        const failedMarker = yield* addCompaction(session.id, first, { auto: false })
-        yield* addAssistant(session.id, failedMarker, "failed summary", { summary: true })
-        const current = yield* addUser(session.id, "after failed compaction")
-        const validMarker = yield* addCompaction(session.id, current, { auto: false })
-        yield* addAssistant(session.id, validMarker, "valid summary", { summary: true, finish: "end_turn" })
-
-        const response = yield* request(`/session/${session.id}/compaction`).pipe(
-          Effect.flatMap(
-            json<{
-              items: Array<{ markerID: MessageID; startMessageID: MessageID; physicalMessageCount: number }>
-            }>,
-          ),
-        )
-        expect(response.items).toHaveLength(1)
-        expect(response.items[0]).toMatchObject({
-          markerID: validMarker,
-          startMessageID: first,
-          physicalMessageCount: 4,
-        })
-      }),
-    ),
-    { git: true },
-  )
-
-  it.instance(
-    "deletes a later marker without treating its orphaned summary as an earlier contradiction",
-    withoutWatcher(
-      Effect.gen(function* () {
-        const session = yield* sessionScoped
-        const service = yield* SessionNs.Service
-        const first = yield* addUser(session.id, "first region")
-        const firstMarker = yield* addCompaction(session.id, first, { auto: false })
-        yield* addAssistant(session.id, firstMarker, "first summary", { summary: true, finish: "end_turn" })
-        const second = yield* addUser(session.id, "second region")
-        const secondMarker = yield* addCompaction(session.id, second, { auto: false })
-        yield* addAssistant(session.id, secondMarker, "second summary", { summary: true, finish: "end_turn" })
-
-        yield* service.removeMessage({ sessionID: session.id, messageID: secondMarker })
-
-        const response = yield* request(`/session/${session.id}/compaction`).pipe(
-          Effect.flatMap(json<{ items: Array<{ markerID: MessageID }> }>),
-        )
-        expect(response.items.map((item) => item.markerID)).toEqual([firstMarker])
-      }),
-    ),
-    { git: true },
-  )
-
-  it.instance(
-    "cascades compact-region metadata when the session is removed",
-    withoutWatcher(
-      Effect.gen(function* () {
-        const session = yield* SessionNs.Service
-        const db = (yield* Database.Service).db
-        const info = yield* session.create({})
-        const prompt = yield* addUser(info.id, "cascade region")
-        const marker = yield* addCompaction(info.id, prompt, { auto: false })
-        yield* addAssistant(info.id, marker, "summary", { summary: true, finish: "end_turn" })
-
-        expect(
-          yield* db.select().from(CompactionRegionTable).where(eq(CompactionRegionTable.session_id, info.id)).all(),
-        ).toHaveLength(1)
-
-        yield* session.remove(info.id)
-
-        expect(
-          yield* db.select().from(CompactionRegionTable).where(eq(CompactionRegionTable.session_id, info.id)).all(),
-        ).toEqual([])
       }),
     ),
     { git: true },

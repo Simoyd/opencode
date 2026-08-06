@@ -13,7 +13,13 @@ export function shell(template: string) {
   return Array.from(template.matchAll(SHELL_REGEX))
 }
 
-function parseTemplate(filePath: string, template: string) {
+// other coding agents like claude code allow invalid yaml in their
+// frontmatter, we need to fallback to a more permissive parser for those cases
+export const fallbackSanitization = ConfigMarkdownCore.sanitize
+
+export async function parse(filePath: string) {
+  const template = await Filesystem.readText(filePath)
+
   try {
     return ConfigMarkdownCore.parse(template)
   } catch (err) {
@@ -25,10 +31,6 @@ function parseTemplate(filePath: string, template: string) {
       { cause: err },
     )
   }
-}
-
-export async function parse(filePath: string) {
-  return parseTemplate(filePath, await Filesystem.readText(filePath))
 }
 
 export * as ConfigMarkdown from "./markdown"

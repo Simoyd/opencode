@@ -41,6 +41,7 @@ type StreamInput = {
   readonly providerOptions?: Record<string, any>
   readonly headers: Record<string, string>
   readonly abort: AbortSignal
+  readonly providerStarted?: Effect.Effect<void>
 }
 
 export function status(input: Pick<StreamInput, "model" | "provider" | "auth">): RuntimeStatus {
@@ -100,18 +101,19 @@ export function stream(input: StreamInput): StreamResult {
     providerOptions: ProviderTransform.providerOptions(input.model, input.providerOptions ?? {}),
     headers: { ...providerHeaders(input.provider.options.headers), ...input.headers },
   })
+  const providerRequest = LLMRequest.update(request, {
+    tools: [...request.tools, ...toDefinitions(tools)],
+  })
   const stream = Stream.scoped(
     Stream.unwrap(
       Effect.gen(function* () {
+        const started = yield* Effect.cached(input.providerStarted ?? Effect.void)
         const settlements = yield* FiberSet.make<void>()
         const results = yield* Queue.unbounded<LLMEvent, Cause.Done>()
         const provider = input.llmClient
-          .stream(
-            LLMRequest.update(request, {
-              tools: [...request.tools, ...toDefinitions(tools)],
-            }),
-          )
+          .stream(providerRequest)
           .pipe(
+            Stream.tap(() => started),
             Stream.flatMap((event) =>
               event.type !== "tool-call" || event.providerExecuted
                 ? Stream.make(event)

@@ -15,8 +15,15 @@ export const ISOLATED_ROOT_CONFLICT_KEYS = [
 
 export const USER_TOOL_SCRUB_KEYS = [
   ISOLATED_ROOT_ENV,
+  "OPENCODE_AUTO_SHARE",
+  "OPENCODE_CLIENT",
+  "OPENCODE_DISABLE_CHANNEL_DB",
+  "OPENCODE_EXPERIMENTAL",
+  "OPENCODE_PERMISSION",
+  "OPENCODE_PURE",
   "OPENCODE_SERVER_PASSWORD",
   "OPENCODE_SERVER_USERNAME",
+  "OPENCODE_TUI_CONFIG",
   "OPENCODE_AVALONIA_BUN_PATH",
   "OPENCODE_AVALONIA_DISABLE_WORKSPACE_ROUTING",
   "OPENCODE_AVALONIA_ENABLE_DEV_SOURCE_LAUNCH",
@@ -26,13 +33,14 @@ export const USER_TOOL_SCRUB_KEYS = [
   "OPENCODE_AVALONIA_MANAGED_WSL_STATE_ENVIRONMENT_ROOT_HASH",
   "OPENCODE_AVALONIA_MANAGED_WSL_STATE_LAYOUT_VERSION",
   "OPENCODE_AVALONIA_RUNTIME_ASSET_ROOT",
-  "OPENCODE_AVALONIA_STREAM_DIAGNOSTICS",
   "OPENCODE_AVALONIA_UPSTREAM_ROOT",
   "OPENCODE_AVALONIA_WSL_LINUX_SIDECAR_PATH",
   "OPENCODE_AVALONIA_WSL_PACKAGE_ASSET_ROOT",
   "OPENCODE_WORKSPACE_ID",
   ...ISOLATED_ROOT_CONFLICT_KEYS,
 ] as const
+
+export const USER_TOOL_SCRUB_PREFIXES = ["OPENCODE_EXPERIMENTAL_"] as const
 
 export interface IsolatedPaths {
   readonly root: string
@@ -80,12 +88,14 @@ export function assertNoIsolatedRootConflicts(env: NodeJS.ProcessEnv = process.e
   throw new Error(`${ISOLATED_ROOT_ENV} cannot be combined with ${conflicts.join(", ")}`)
 }
 
-export function scrubUserToolEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+export function scrubUserToolEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const scrub = new Set(USER_TOOL_SCRUB_KEYS.map((key) => key.toLowerCase()))
-  const result: NodeJS.ProcessEnv = {}
+  const prefixes = USER_TOOL_SCRUB_PREFIXES.map((prefix) => prefix.toLowerCase())
+  const result: Record<string, string> = {}
   for (const [key, value] of Object.entries(env)) {
-    if (scrub.has(key.toLowerCase())) continue
-    result[key] = value
+    const lower = key.toLowerCase()
+    if (scrub.has(lower) || prefixes.some((prefix) => lower.startsWith(prefix))) continue
+    if (value !== undefined) result[key] = value
   }
   return result
 }
@@ -93,7 +103,7 @@ export function scrubUserToolEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.P
 export function userToolEnv(
   env: NodeJS.ProcessEnv = process.env,
   ...overrides: Array<NodeJS.ProcessEnv | Record<string, string | undefined> | undefined>
-): NodeJS.ProcessEnv {
+): Record<string, string> {
   const result = scrubUserToolEnv(env)
   for (const override of overrides) {
     if (override) Object.assign(result, override)

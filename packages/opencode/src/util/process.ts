@@ -1,10 +1,11 @@
 import { type ChildProcess } from "child_process"
+import type { Stream } from "node:stream"
 import launch from "cross-spawn"
 import { buffer } from "node:stream/consumers"
 import { errorMessage } from "./error"
 import { Environment } from "@opencode-ai/core/environment"
 
-export type Stdio = "inherit" | "pipe" | "ignore"
+export type Stdio = "inherit" | "pipe" | "ignore" | number | Stream
 export type Shell = boolean | string
 
 export interface Options {

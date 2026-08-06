@@ -5,11 +5,11 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { Effect, Exit, Fiber, Stream } from "effect"
 import { ChildProcess } from "effect/unstable/process"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppProcess } from "@opencode-ai/core/process"
-import { Environment } from "@opencode-ai/core/environment"
 import { testEffect } from "../lib/effect"
 
-const it = testEffect(AppProcess.defaultLayer)
+const it = testEffect(LayerNode.compile(AppProcess.node))
 
 const NODE = process.execPath
 const cmd = (...args: string[]) => ChildProcess.make(NODE, args)
@@ -29,112 +29,6 @@ const waitForFile = (file: string) =>
 describe("AppProcess", () => {
   describe("run", () => {
     it.effect(
-      "extendEnv children inherit normal tool env without sidecar-only controls",
-      Effect.gen(function* () {
-        const saved = new Map<string, string | undefined>()
-        const keys = [
-          "HOME",
-          "XDG_CONFIG_HOME",
-          "OPENCODE_API_KEY",
-          Environment.ISOLATED_ROOT_ENV,
-          "OPENCODE_SERVER_PASSWORD",
-          "OPENCODE_AVALONIA_MANAGED_WSL_STATE_ENVIRONMENT_LABEL",
-        ]
-        for (const key of keys) saved.set(key, process.env[key])
-        process.env.HOME = "normal-home"
-        process.env.XDG_CONFIG_HOME = "normal-xdg-config"
-        process.env.OPENCODE_API_KEY = "provider-present"
-        process.env[Environment.ISOLATED_ROOT_ENV] = "isolated-root"
-        process.env.OPENCODE_SERVER_PASSWORD = "sidecar-secret"
-        process.env.OPENCODE_AVALONIA_MANAGED_WSL_STATE_ENVIRONMENT_LABEL = "source-dev"
-        try {
-          const svc = yield* AppProcess.Service
-          const script = `process.stdout.write(JSON.stringify({
-            home: process.env.HOME === "normal-home",
-            xdg: process.env.XDG_CONFIG_HOME === "normal-xdg-config",
-            tool: process.env.OPENCODE_API_KEY === "provider-present",
-            isolated: process.env.${Environment.ISOLATED_ROOT_ENV} === undefined,
-            serverPassword: process.env.OPENCODE_SERVER_PASSWORD === undefined,
-            stateLabel: process.env.OPENCODE_AVALONIA_MANAGED_WSL_STATE_ENVIRONMENT_LABEL === undefined,
-            overrideSecret: process.env.OPENCODE_AVALONIA_STREAM_DIAGNOSTICS === undefined,
-            overrideTool: process.env.OCA_ALLOWED_TOOL_ENV === "ok"
-          }))`
-          const result = yield* svc.run(
-            ChildProcess.make(NODE, ["-e", script], {
-              extendEnv: true,
-              env: {
-                OPENCODE_AVALONIA_STREAM_DIAGNOSTICS: "1",
-                OCA_ALLOWED_TOOL_ENV: "ok",
-              },
-            }),
-          )
-          expect(JSON.parse(result.stdout.toString("utf8"))).toEqual({
-            home: true,
-            xdg: true,
-            tool: true,
-            isolated: true,
-            serverPassword: true,
-            stateLabel: true,
-            overrideSecret: true,
-            overrideTool: true,
-          })
-        } finally {
-          for (const [key, value] of saved) {
-            if (value === undefined) delete process.env[key]
-            else process.env[key] = value
-          }
-        }
-      }),
-    )
-
-    it.effect(
-      "default child env inherits normal tool env without sidecar-only controls",
-      Effect.gen(function* () {
-        const saved = new Map<string, string | undefined>()
-        const keys = [
-          "HOME",
-          "XDG_CONFIG_HOME",
-          "OPENCODE_API_KEY",
-          Environment.ISOLATED_ROOT_ENV,
-          "OPENCODE_SERVER_PASSWORD",
-          "OPENCODE_AVALONIA_MANAGED_WSL_STATE_ENVIRONMENT_LABEL",
-        ]
-        for (const key of keys) saved.set(key, process.env[key])
-        process.env.HOME = "normal-home"
-        process.env.XDG_CONFIG_HOME = "normal-xdg-config"
-        process.env.OPENCODE_API_KEY = "provider-present"
-        process.env[Environment.ISOLATED_ROOT_ENV] = "isolated-root"
-        process.env.OPENCODE_SERVER_PASSWORD = "sidecar-secret"
-        process.env.OPENCODE_AVALONIA_MANAGED_WSL_STATE_ENVIRONMENT_LABEL = "source-dev"
-        try {
-          const svc = yield* AppProcess.Service
-          const script = `process.stdout.write(JSON.stringify({
-            home: process.env.HOME === "normal-home",
-            xdg: process.env.XDG_CONFIG_HOME === "normal-xdg-config",
-            tool: process.env.OPENCODE_API_KEY === "provider-present",
-            isolated: process.env.${Environment.ISOLATED_ROOT_ENV} === undefined,
-            serverPassword: process.env.OPENCODE_SERVER_PASSWORD === undefined,
-            stateLabel: process.env.OPENCODE_AVALONIA_MANAGED_WSL_STATE_ENVIRONMENT_LABEL === undefined
-          }))`
-          const result = yield* svc.run(ChildProcess.make(NODE, ["-e", script]))
-          expect(JSON.parse(result.stdout.toString("utf8"))).toEqual({
-            home: true,
-            xdg: true,
-            tool: true,
-            isolated: true,
-            serverPassword: true,
-            stateLabel: true,
-          })
-        } finally {
-          for (const [key, value] of saved) {
-            if (value === undefined) delete process.env[key]
-            else process.env[key] = value
-          }
-        }
-      }),
-    )
-
-    it.effect(
       "captures stdout and exit code zero",
       Effect.gen(function* () {
         const svc = yield* AppProcess.Service
@@ -143,6 +37,22 @@ describe("AppProcess", () => {
         expect(result.stdout.toString("utf8")).toBe("hi\n")
         expect(result.stdoutTruncated).toBe(false)
         expect(result.stderrTruncated).toBe(false)
+      }),
+    )
+
+    it.effect(
+      "captures stdout and stderr in emission order",
+      Effect.gen(function* () {
+        const svc = yield* AppProcess.Service
+        const script = [
+          'process.stdout.write("out 1\\n")',
+          'setTimeout(() => process.stderr.write("err 1\\n"), 10)',
+          'setTimeout(() => process.stdout.write("out 2\\n"), 20)',
+        ].join(";")
+        const result = yield* svc.run(cmd("-e", script), { combineOutput: true })
+        expect(result.output?.toString("utf8")).toBe("out 1\nerr 1\nout 2\n")
+        expect(result.stdout.toString("utf8")).toBe("")
+        expect(result.stderr.toString("utf8")).toBe("")
       }),
     )
 
@@ -168,6 +78,7 @@ describe("AppProcess", () => {
           if (reason && reason._tag === "Fail") {
             expect(reason.error).toBeInstanceOf(AppProcess.AppProcessError)
             expect((reason.error as AppProcess.AppProcessError).exitCode).toBe(1)
+            expect((reason.error as AppProcess.AppProcessError).message).toContain("Command failed (exit 1)")
           } else {
             throw new Error("expected fail reason")
           }
@@ -251,7 +162,7 @@ describe("AppProcess", () => {
             const script = `const fs=require('fs');fs.writeFileSync(${JSON.stringify(ready)},String(process.pid));process.on('SIGTERM',()=>{fs.writeFileSync(${JSON.stringify(settled)},'settled');process.exit(0)});setInterval(()=>{},60000)`
             return Effect.gen(function* () {
               const svc = yield* AppProcess.Service
-              const exit = yield* Effect.exit(svc.run(cmd("-e", script), { timeout: "1 second" }))
+              const exit = yield* Effect.exit(svc.run(cmd("-e", script), { timeout: "250 millis" }))
               expect(Exit.isFailure(exit)).toBe(true)
               expect(yield* waitForFile(ready)).toMatch(/^\d+$/)
               expect(yield* waitForFile(settled)).toBe("settled")

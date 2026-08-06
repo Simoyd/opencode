@@ -66,6 +66,17 @@ export function shouldAttachShareAuthHeaders(shareUrl: string, accountBaseUrl: s
   }
 }
 
+export function formatImportFileError(file: string, error: FSUtil.Error) {
+  if (error._tag === "PlatformError") {
+    if (error.reason._tag === "NotFound") return `File not found: ${file}`
+    if (error.reason._tag === "PermissionDenied") return `Failed to read file: Permission denied`
+    return `Failed to read file: ${error.message}`
+  }
+
+  const detail = error.cause instanceof Error ? error.cause.message : error.message
+  return `Invalid JSON in ${file}: ${detail}`
+}
+
 /**
  * Transform ShareNext API response (flat array) into the nested structure for local file storage.
  *
@@ -495,17 +506,11 @@ export const persistImportedSession = Effect.fn("Cli.import.persist")(function* 
         .onConflictDoNothing()
         .run()
         .pipe(Effect.orDie)
-
       for (const part of msg.parts) {
         const { id: partId, sessionID: _s, messageID, ...partData } = part
         yield* db
           .insert(PartTable)
-          .values({
-            id: partId,
-            message_id: messageID,
-            session_id: row.id,
-            data: partData,
-          })
+          .values({ id: partId, message_id: messageID, session_id: row.id, data: partData })
           .onConflictDoNothing()
           .run()
           .pipe(Effect.orDie)
@@ -516,7 +521,6 @@ export const persistImportedSession = Effect.fn("Cli.import.persist")(function* 
   yield* db
     .transaction(() => validateCollisions.pipe(Effect.andThen(writeImportedRows)), { behavior: "immediate" })
     .pipe(Effect.orDie)
-
   return info
 })
 
@@ -593,14 +597,9 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
 
     exportData = transformed
   } else {
-    exportData = (yield* fs.readJson(file).pipe(Effect.orElseSucceed(() => undefined))) as
-      | NonNullable<typeof exportData>
-      | undefined
-    if (!exportData) {
-      process.stdout.write(`File not found: ${file}`)
-      process.stdout.write(EOL)
-      return
-    }
+    exportData = (yield* fs
+      .readJson(file)
+      .pipe(Effect.mapError((error) => new CliError({ message: formatImportFileError(file, error) })))) as ExportData
   }
 
   if (!exportData) {
