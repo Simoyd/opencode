@@ -1,4 +1,5 @@
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -9,6 +10,7 @@ import path from "path"
 import z from "zod"
 import type { Agent } from "../../src/agent/agent"
 import { Provider } from "@/provider/provider"
+import { Question } from "@/question"
 
 import { Session } from "@/session/session"
 import { LLM } from "../../src/session/llm"
@@ -377,6 +379,51 @@ const providerFactsLLM = Layer.succeed(
 const providerFactsEnv = LayerNode.compile(root, [...replacements, [LLM.node, providerFactsLLM]])
 const itProviderFacts = testEffect(providerFactsEnv)
 
+const failedToolLLM = (error: Error, overflow = false) =>
+  Layer.succeed(
+    LLM.Service,
+    LLM.Service.of({
+      stream: () =>
+        Stream.make(
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.toolCall({ id: "rejected-call", name: "read", input: { filePath: "/tmp/rejected" } }),
+          LLMEvent.toolError({
+            id: "rejected-call",
+            name: "read",
+            message: error.message,
+            error,
+          }),
+          LLMEvent.stepFinish({
+            index: 0,
+            reason: "tool-calls",
+            usage: overflow ? { inputTokens: 100, outputTokens: 0, totalTokens: 100 } : undefined,
+          }),
+          LLMEvent.finish({ reason: "tool-calls" }),
+        ),
+    }),
+  )
+
+const permissionRejectedEnv = LayerNode.compile(root, [
+  ...replacements,
+  [LLM.node, failedToolLLM(new PermissionV1.RejectedError())],
+])
+const questionRejectedEnv = LayerNode.compile(root, [
+  ...replacements,
+  [LLM.node, failedToolLLM(new Question.RejectedError())],
+])
+const permissionRejectedOverflowEnv = LayerNode.compile(root, [
+  ...replacements,
+  [LLM.node, failedToolLLM(new PermissionV1.RejectedError(), true)],
+])
+const ordinaryToolErrorEnv = LayerNode.compile(root, [
+  ...replacements,
+  [LLM.node, failedToolLLM(new Error("ordinary tool failure"))],
+])
+const itPermissionRejected = testEffect(permissionRejectedEnv)
+const itQuestionRejected = testEffect(questionRejectedEnv)
+const itPermissionRejectedOverflow = testEffect(permissionRejectedOverflowEnv)
+const itOrdinaryToolError = testEffect(ordinaryToolErrorEnv)
+
 const fragmentFailureLLM = Layer.succeed(
   LLM.Service,
   LLM.Service.of({
@@ -399,6 +446,35 @@ const boot = Effect.fn("test.boot")(function* () {
   const session = yield* Session.Service
   const provider = yield* Provider.Service
   return { processors, session, provider }
+})
+
+const runRejectedTool = Effect.fn("test.runRejectedTool")(function* (dir: string, overflow = false) {
+  const { processors, session, provider } = yield* boot()
+  const chat = yield* session.create({})
+  const parent = yield* user(chat.id, "reject tool")
+  const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+  const base = yield* provider.getModel(ref.providerID, ref.modelID)
+  const model = overflow ? { ...base, limit: { context: 20, output: 10 } } : base
+  const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model })
+  const result = yield* handle.process({
+    user: {
+      id: parent.id,
+      sessionID: chat.id,
+      role: "user",
+      time: parent.time,
+      agent: parent.agent,
+      model: { providerID: ref.providerID, modelID: ref.modelID },
+    } satisfies SessionV1.User,
+    sessionID: chat.id,
+    model,
+    agent: agent(),
+    system: [],
+    messages: [{ role: "user", content: "reject tool" }],
+    tools: {},
+  })
+  const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
+  const call = stored.parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
+  return { result, handle, stored, call }
 })
 
 const processorHarness = Effect.fn("test.processorHarness")(function* (dir: string) {
@@ -616,6 +692,102 @@ it.live("session.processor effect tests stop after token overflow requests compa
         expect(parts.some((part) => part.type === "step-finish")).toBe(true)
       }),
     { config: (url) => providerCfg(url) },
+  ),
+)
+
+itPermissionRejected.live("session.processor terminalizes permission rejection before persisting the assistant", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const { result, handle, stored, call } = yield* runRejectedTool(dir)
+
+        expect(result).toBe("stop")
+        expect(call?.state.status).toBe("error")
+        if (call?.state.status === "error") expect(call.state.error).toBe(new PermissionV1.RejectedError().message)
+        expect(handle.message.finish).toBe("stop")
+        expect(handle.message.time.completed).toBeDefined()
+        expect(stored.info.role).toBe("assistant")
+        if (stored.info.role === "assistant") {
+          expect(stored.info.finish).toBe("stop")
+          expect(stored.info.time.completed).toBeDefined()
+        }
+      }),
+    { config: cfg },
+  ),
+)
+
+itQuestionRejected.live("session.processor terminalizes question rejection before persisting the assistant", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const { result, handle, stored, call } = yield* runRejectedTool(dir)
+
+        expect(result).toBe("stop")
+        expect(call?.state.status).toBe("error")
+        if (call?.state.status === "error") expect(call.state.error).toBe(new Question.RejectedError().message)
+        expect(handle.message.finish).toBe("stop")
+        expect(handle.message.time.completed).toBeDefined()
+        expect(stored.info.role).toBe("assistant")
+        if (stored.info.role === "assistant") {
+          expect(stored.info.finish).toBe("stop")
+          expect(stored.info.time.completed).toBeDefined()
+        }
+      }),
+    { config: cfg },
+  ),
+)
+
+itPermissionRejectedOverflow.live("session.processor prioritizes blocked rejection over compaction", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const { result, handle, stored, call } = yield* runRejectedTool(dir, true)
+
+        expect(result).toBe("stop")
+        expect(call?.state.status).toBe("error")
+        expect(handle.message.finish).toBe("stop")
+        expect(stored.info.role).toBe("assistant")
+        if (stored.info.role === "assistant") expect(stored.info.finish).toBe("stop")
+      }),
+    { config: cfg },
+  ),
+)
+
+itPermissionRejected.live("session.processor preserves tool continuation when continue-on-deny is enabled", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const { result, handle, stored, call } = yield* runRejectedTool(dir)
+
+        expect(result).toBe("continue")
+        expect(call?.state.status).toBe("error")
+        expect(handle.message.finish).toBe("tool-calls")
+        expect(stored.info.role).toBe("assistant")
+        if (stored.info.role === "assistant") expect(stored.info.finish).toBe("tool-calls")
+      }),
+    {
+      config: {
+        ...cfg,
+        experimental: { continue_loop_on_deny: true },
+      },
+    },
+  ),
+)
+
+itOrdinaryToolError.live("session.processor preserves ordinary failed-tool continuation", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const { result, handle, stored, call } = yield* runRejectedTool(dir)
+
+        expect(result).toBe("continue")
+        expect(call?.state.status).toBe("error")
+        if (call?.state.status === "error") expect(call.state.error).toBe("ordinary tool failure")
+        expect(handle.message.finish).toBe("tool-calls")
+        expect(stored.info.role).toBe("assistant")
+        if (stored.info.role === "assistant") expect(stored.info.finish).toBe("tool-calls")
+      }),
+    { config: cfg },
   ),
 )
 
