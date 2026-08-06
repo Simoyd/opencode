@@ -6,6 +6,21 @@ import { MessageV2 } from "../../src/session/message-v2"
 import { SessionPrompt } from "../../src/session/prompt"
 import { ProviderTransform } from "@/provider/transform"
 import type { Provider } from "@/provider/provider"
+import type {
+  ContinuityProvenance as LegacyContinuityProvenance,
+  TextPart as LegacyTextPart,
+  TextPartInput as LegacyTextPartInput,
+  ToolPart as LegacyToolPart,
+} from "@opencode-ai/sdk"
+import type {
+  ContinuityProvenance as V2ContinuityProvenance,
+  TextPart as V2TextPart,
+  TextPartInput as V2TextPartInput,
+  TextPartUpdateInput,
+  ToolPart as V2ToolPart,
+  ToolPartUpdateInput,
+} from "@opencode-ai/sdk/v2"
+import type { Hooks } from "@opencode-ai/plugin"
 
 import { SessionID, MessageID, PartID } from "../../src/session/schema"
 import { Question } from "../../src/question"
@@ -14,6 +29,32 @@ import { ModelV2 } from "@opencode-ai/core/model"
 
 const sessionID = SessionID.make("session")
 const providerID = ProviderV2.ID.make("test")
+type Expect<T extends true> = T
+type HasServerProvenance<T> = "serverProvenance" extends keyof T ? true : false
+type OmitsServerProvenance<T> = HasServerProvenance<T> extends false ? true : false
+type ChatMessageWritablePart = Parameters<NonNullable<Hooks["chat.message"]>>[1]["parts"][number]
+type CommandWritablePart = Parameters<NonNullable<Hooks["command.execute.before"]>>[1]["parts"][number]
+type TransformWritablePart = Parameters<
+  NonNullable<Hooks["experimental.chat.messages.transform"]>
+>[1]["messages"][number]["parts"][number]
+type LegacyTextReadsProvenance = Expect<HasServerProvenance<LegacyTextPart>>
+type LegacyToolReadsProvenance = Expect<HasServerProvenance<LegacyToolPart>>
+type V2TextReadsProvenance = Expect<HasServerProvenance<V2TextPart>>
+type V2ToolReadsProvenance = Expect<HasServerProvenance<V2ToolPart>>
+type LegacyPromptOmitsProvenance = Expect<OmitsServerProvenance<LegacyTextPartInput>>
+type V2PromptOmitsProvenance = Expect<OmitsServerProvenance<V2TextPartInput>>
+type V2TextUpdateOmitsProvenance = Expect<OmitsServerProvenance<TextPartUpdateInput>>
+type V2ToolUpdateOmitsProvenance = Expect<OmitsServerProvenance<ToolPartUpdateInput>>
+type ChatMessageHookOmitsProvenance = Expect<OmitsServerProvenance<Extract<ChatMessageWritablePart, { type: "text" }>>>
+type CommandHookOmitsProvenance = Expect<OmitsServerProvenance<Extract<CommandWritablePart, { type: "tool" }>>>
+type TransformHookOmitsProvenance = Expect<OmitsServerProvenance<Extract<TransformWritablePart, { type: "text" }>>>
+type LegacyAndV2ProvenanceAgree = Expect<
+  LegacyContinuityProvenance extends V2ContinuityProvenance
+    ? V2ContinuityProvenance extends LegacyContinuityProvenance
+      ? true
+      : false
+    : false
+>
 const model: Provider.Model = {
   id: ModelV2.ID.make("test-model"),
   providerID,
@@ -1574,7 +1615,9 @@ describe("session.message-v2.modelTurn continuity", () => {
     const b = MessageID.make("msg_104")
     const summary = MessageID.make("msg_105")
     const replay = MessageID.make("msg_106")
-    const continuation = MessageID.make("msg_107")
+    const continuationTrue = MessageID.make("msg_107")
+    const continuationFalse = MessageID.make("msg_108")
+    const continuationAbsent = MessageID.make("msg_109")
     const physical: SessionV1.WithParts[] = [
       { info: { ...userInfo(a), time: { created: 101 } }, parts: [text(a, "a", "A")] },
       { info: completedAssistant(aAnswer, a), parts: [text(aAnswer, "a-answer", "A answer")] },
@@ -1596,10 +1639,27 @@ describe("session.message-v2.modelTurn continuity", () => {
         ],
       },
       {
-        info: { ...userInfo(continuation), time: { created: 107 } },
+        info: { ...userInfo(continuationTrue), time: { created: 107 } },
         parts: [
-          text(continuation, "continuation", "continue", {
+          text(continuationTrue, "continuation-true", "continue true", {
             synthetic: true,
+            serverProvenance: { type: "compaction-continuation", ownerMessageID: marker },
+          }),
+        ],
+      },
+      {
+        info: { ...userInfo(continuationFalse), time: { created: 108 } },
+        parts: [
+          text(continuationFalse, "continuation-false", "continue false", {
+            synthetic: false,
+            serverProvenance: { type: "compaction-continuation", ownerMessageID: marker },
+          }),
+        ],
+      },
+      {
+        info: { ...userInfo(continuationAbsent), time: { created: 109 } },
+        parts: [
+          text(continuationAbsent, "continuation-absent", "continue absent", {
             serverProvenance: { type: "compaction-continuation", ownerMessageID: marker },
           }),
         ],
@@ -1608,11 +1668,29 @@ describe("session.message-v2.modelTurn continuity", () => {
 
     const view = MessageV2.modelTurn(physical)
 
-    expect(view.messages.map((message) => message.info.id)).toEqual([marker, summary, replay, continuation, b])
+    expect(view.messages.map((message) => message.info.id)).toEqual([
+      marker,
+      summary,
+      replay,
+      continuationTrue,
+      continuationFalse,
+      continuationAbsent,
+      b,
+    ])
     expect(view.target?.id).toBe(b)
     expect(view.pendingExternal.map((message) => message.info.id)).toEqual([b])
     expect(view.tasks).toEqual([])
-    expect(physical.map((message) => message.info.id)).toEqual([a, aAnswer, marker, b, summary, replay, continuation])
+    expect(physical.map((message) => message.info.id)).toEqual([
+      a,
+      aAnswer,
+      marker,
+      b,
+      summary,
+      replay,
+      continuationTrue,
+      continuationFalse,
+      continuationAbsent,
+    ])
   })
 
   test("G3 treats provenance-like metadata as opaque external input", () => {

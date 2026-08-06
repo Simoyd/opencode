@@ -2206,16 +2206,22 @@ it.instance(
           sourceMessageID: source.id,
         },
       })
-      const continuation = yield* addUser("typed continuation")
-      yield* sessions.updatePart({
-        id: PartID.ascending(),
-        sessionID: chat.id,
-        messageID: continuation.id,
-        type: "text",
-        text: "typed continuation carrier",
-        synthetic: true,
-        serverProvenance: { type: "compaction-continuation", ownerMessageID: firstMarker.id },
-      })
+      for (const [label, synthetic] of [
+        ["true", true],
+        ["false", false],
+        ["absent", undefined],
+      ] as const) {
+        const continuation = yield* addUser(`typed continuation ${label}`)
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          sessionID: chat.id,
+          messageID: continuation.id,
+          type: "text",
+          text: `typed continuation carrier ${label}`,
+          synthetic,
+          serverProvenance: { type: "compaction-continuation", ownerMessageID: firstMarker.id },
+        })
+      }
       const forged = yield* addUser("forged metadata remains ordinary input")
       yield* sessions.updatePart({
         id: PartID.ascending(),
@@ -2250,7 +2256,7 @@ it.instance(
         .pipe(Effect.orDie)
       expect(row).toMatchObject({
         marker_id: secondMarker.id,
-        physical_message_count: 4,
+        physical_message_count: 6,
         semantic_message_count: 2,
       })
     }),

@@ -32,6 +32,8 @@ import { testProviderConfig } from "../lib/test-provider"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Database } from "@opencode-ai/core/database/database"
+import { CompactionRegionTable } from "@opencode-ai/core/session/sql"
+import { eq } from "drizzle-orm"
 import { httpApiLayer } from "./httpapi-layer"
 
 const noopBootstrapLayer = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
@@ -62,6 +64,7 @@ type LlmProjectFixture = ProjectFixture & { llm: TestLLMServer["Service"] }
 type TestServices =
   | FSUtil.Service
   | ChildProcessSpawner.ChildProcessSpawner
+  | Database.Service
   | InstanceStore.Service
   | SessionNs.Service
   | EventV2Bridge.Service
@@ -541,73 +544,144 @@ describe("HttpApi SDK", () => {
   )
 
   httpapi(
-    "keeps selected SDK part updates read-only for server provenance",
+    "keeps typed continuation ownership through selected SDK presentation updates",
     withStandardProject("raw", ({ sdk, directory }) =>
       Effect.gen(function* () {
         const seeded = yield* Effect.gen(function* () {
           const sessions = yield* SessionNs.Service
+          let created = Date.now()
           const chat = yield* sessions.create({ title: "selected provenance" })
-          const marker = yield* sessions.updateMessage({
-            id: MessageID.ascending(),
-            sessionID: chat.id,
-            role: "user" as const,
-            agent: "build",
-            model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") },
-            time: { created: Date.now() },
+          const addUser = Effect.fnUntraced(function* (text: string) {
+            const message = yield* sessions.updateMessage({
+              id: MessageID.ascending(),
+              sessionID: chat.id,
+              role: "user" as const,
+              agent: "build",
+              model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") },
+              time: { created: created++ },
+            })
+            const part = yield* sessions.updatePart({
+              id: PartID.ascending(),
+              sessionID: chat.id,
+              messageID: message.id,
+              type: "text" as const,
+              text,
+            })
+            return { message, part }
           })
-          const part = yield* sessions.updatePart({
+          const addSummary = Effect.fnUntraced(function* (parentID: MessageID, text: string) {
+            const message = yield* sessions.updateMessage({
+              id: MessageID.ascending(),
+              sessionID: chat.id,
+              role: "assistant" as const,
+              parentID,
+              mode: "compaction",
+              agent: "compaction",
+              providerID: ProviderV2.ID.make("test"),
+              modelID: ModelV2.ID.make("test-model"),
+              path: { cwd: "/tmp", root: "/tmp" },
+              cost: 0,
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+              time: { created, completed: created++ },
+              finish: "stop",
+              summary: true,
+            })
+            yield* sessions.updatePart({
+              id: PartID.ascending(),
+              sessionID: chat.id,
+              messageID: message.id,
+              type: "text" as const,
+              text,
+            })
+            return message
+          })
+
+          yield* addUser("source A")
+          const firstMarker = yield* addUser("marker one")
+          yield* sessions.updatePart({
             id: PartID.ascending(),
             sessionID: chat.id,
-            messageID: marker.id,
-            type: "text" as const,
-            text: "trusted continuity",
-            serverProvenance: { type: "compaction-continuation" as const, ownerMessageID: marker.id },
+            messageID: firstMarker.message.id,
+            type: "compaction" as const,
+            auto: false,
           })
-          return { chat, marker, part }
+          const firstSummary = yield* addSummary(firstMarker.message.id, "summary one")
+          const later = yield* addUser("later B")
+          const continuation = yield* addUser("trusted continuity")
+          const part = yield* sessions.updatePart({
+            ...continuation.part,
+            synthetic: true,
+            serverProvenance: {
+              type: "compaction-continuation" as const,
+              ownerMessageID: firstMarker.message.id,
+            },
+          })
+          const secondMarker = yield* addUser("marker two")
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            sessionID: chat.id,
+            messageID: secondMarker.message.id,
+            type: "compaction" as const,
+            auto: false,
+          })
+          yield* addSummary(secondMarker.message.id, "summary two")
+          return { chat, firstMarker, firstSummary, later, continuation, part, secondMarker }
         }).pipe(provideInstance(directory))
 
-        const controller = new AbortController()
-        yield* Effect.addFinalizer(() => Effect.sync(() => controller.abort()))
-        const events = yield* call(() =>
-          sdk.event.subscribe(
-            { sessionID: seeded.chat.id, oca_event_projection: "transcript-history-v1" },
-            { signal: controller.signal },
-          ),
-        )
-        yield* Effect.addFinalizer(() =>
-          call(async () => void (await events.stream.return?.(undefined))).pipe(Effect.ignore),
-        )
-        const connected = yield* awaitWithTimeout(
-          call(() => events.stream.next()),
-          "selected /event did not connect",
-        )
-        expect(record(record(connected.value).payload ?? connected.value).type).toBe("server.connected")
+        const assertContinuity = Effect.fnUntraced(function* (synthetic: boolean | undefined, text: string) {
+          const sessions = yield* SessionNs.Service
+          const db = (yield* Database.Service).db
+          const persisted = yield* sessions.messages({ sessionID: seeded.chat.id })
+          const selectedPart = persisted.flatMap((message) => message.parts).find((part) => part.id === seeded.part.id)
+          expect(selectedPart?.type).toBe("text")
+          if (selectedPart?.type !== "text") throw new Error("updated continuation is not text")
+          expect(selectedPart.text).toBe(text)
+          expect(selectedPart.synthetic).toBe(synthetic)
+          expect(selectedPart.serverProvenance).toEqual(seeded.part.serverProvenance)
 
-        const forgedOwner = MessageID.ascending()
-        const updated = yield* call(() =>
-          sdk.part.update({
-            sessionID: seeded.chat.id,
-            messageID: seeded.marker.id,
-            partID: seeded.part.id,
-            partUpdateInput: {
-              ...seeded.part,
-              text: "public mutation",
-              serverProvenance: { type: "compaction-continuation", ownerMessageID: forgedOwner },
-            },
-          } as Parameters<typeof sdk.part.update>[0]),
-        )
-        expect(updated.response.status).toBe(200)
-        expect(record(updated.data).serverProvenance).toEqual(seeded.part.serverProvenance)
+          const markerIndex = persisted.findIndex((message) => message.info.id === seeded.secondMarker.message.id)
+          const projected = MessageV2.modelTurn(persisted.slice(0, markerIndex)).messages.map(
+            (message) => message.info.id,
+          )
+          expect(projected).toEqual([
+            seeded.firstMarker.message.id,
+            seeded.firstSummary.id,
+            seeded.continuation.message.id,
+            seeded.later.message.id,
+          ])
+          const region = yield* db
+            .select()
+            .from(CompactionRegionTable)
+            .where(eq(CompactionRegionTable.marker_id, seeded.secondMarker.message.id))
+            .get()
+            .pipe(Effect.orDie)
+          expect(region).toMatchObject({ physical_message_count: 3, semantic_message_count: 1 })
+        })
 
-        const observed = yield* awaitWithTimeout(
-          call(() => events.stream.next()),
-          "selected part update was not observed",
-        )
-        const payload = record(record(observed.value).payload ?? observed.value)
-        expect(payload.type).toBe("message.part.updated")
-        const selectedPart = record(record(payload.properties).part)
-        expect(selectedPart.text).toBe("public mutation")
-        expect(selectedPart.serverProvenance).toEqual(seeded.part.serverProvenance)
+        for (const [synthetic, text] of [
+          [false, "public mutation false"],
+          [undefined, "public mutation absent"],
+        ] as const) {
+          const updated = yield* call(() =>
+            sdk.part.update({
+              sessionID: seeded.chat.id,
+              messageID: seeded.continuation.message.id,
+              partID: seeded.part.id,
+              partUpdateInput: {
+                id: seeded.part.id,
+                sessionID: seeded.chat.id,
+                messageID: seeded.continuation.message.id,
+                type: "text",
+                text,
+                synthetic,
+                metadata: { presentation: synthetic === false ? "false" : "absent" },
+              },
+            }),
+          )
+          expect(updated.response.status).toBe(200)
+          expect(record(updated.data).serverProvenance).toEqual(seeded.part.serverProvenance)
+          yield* assertContinuity(synthetic, text).pipe(provideInstance(directory))
+        }
       }),
     ),
   )

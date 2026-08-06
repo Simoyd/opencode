@@ -518,7 +518,7 @@ describe("Session", () => {
         )
 
         yield* persistImportedSession(exported, ctx)
-        const persisted = yield* sessions.messages({ sessionID: graph.info.id })
+        let persisted = yield* sessions.messages({ sessionID: graph.info.id })
         expect(
           JSON.stringify(
             persisted.flatMap((message) =>
@@ -528,6 +528,28 @@ describe("Session", () => {
             ),
           ),
         ).toBe(JSON.stringify(exportedClaims))
+
+        yield* remove(graph.info.id)
+        for (const synthetic of [false, undefined] as const) {
+          const variant = structuredClone(exported)
+          const continuation = variant.messages
+            .flatMap((message) => message.parts)
+            .find((part) => part.id === graph.compactionContinuationPart.id)
+          if (!continuation || continuation.type !== "text") throw new Error("missing compaction continuation")
+          if (synthetic === undefined) delete continuation.synthetic
+          else continuation.synthetic = synthetic
+          yield* persistImportedSession(JSON.parse(JSON.stringify(variant)) as ExportData, ctx)
+          persisted = yield* sessions.messages({ sessionID: graph.info.id })
+          const persistedContinuation = persisted
+            .flatMap((message) => message.parts)
+            .find((part) => part.id === graph.compactionContinuationPart.id)
+          expect(persistedContinuation?.type === "text" ? persistedContinuation.synthetic : true).toBe(synthetic)
+          const projected = MessageV2.modelTurn(persisted).messages.map((message) => message.info.id)
+          expect(projected.indexOf(graph.compactionContinuationPart.messageID)).toBeLessThan(
+            projected.indexOf(graph.taskOwner.message.id),
+          )
+          if (synthetic === false) yield* remove(graph.info.id)
+        }
 
         const claim = (data: typeof exported, id: PartID) => {
           const part = data.messages.flatMap((message) => message.parts).find((candidate) => candidate.id === id)

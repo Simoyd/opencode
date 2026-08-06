@@ -157,6 +157,28 @@ export type EventMessageRemoved = {
   }
 }
 
+export type ContinuityProvenance =
+  | {
+      type: "compaction-replay"
+      ownerMessageID: string
+      sourceMessageID: string
+    }
+  | {
+      type: "compaction-continuation"
+      ownerMessageID: string
+    }
+  | {
+      type: "subtask-output"
+      ownerMessageID: string
+      taskPartID: string
+    }
+  | {
+      type: "subtask-continuation"
+      ownerMessageID: string
+      taskPartID: string
+      sourceMessageID: string
+    }
+
 export type TextPart = {
   id: string
   sessionID: string
@@ -172,6 +194,7 @@ export type TextPart = {
   metadata?: {
     [key: string]: unknown
   }
+  serverProvenance?: ContinuityProvenance
 }
 
 export type ReasoningPart = {
@@ -302,6 +325,7 @@ export type ToolPart = {
   metadata?: {
     [key: string]: unknown
   }
+  serverProvenance?: ContinuityProvenance
 }
 
 export type StepStartPart = {

@@ -386,12 +386,9 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
         parts?.data.parts?.some(
           (part) =>
             part.type === "compaction" ||
-            // Auto-compaction resumes via a synthetic user text part. Treat only
-            // that marked followup as agent-initiated so manual prompts stay user-initiated.
-            (part.type === "text" &&
-              part.synthetic &&
-              (part as typeof part & { serverProvenance?: { type?: string } }).serverProvenance?.type ===
-                "compaction-continuation"),
+            // Treat only the server-owned continuation role as agent-initiated so
+            // writable presentation fields cannot reclassify manual prompts.
+            (part.type === "text" && part.serverProvenance?.type === "compaction-continuation"),
         )
       ) {
         output.headers["x-initiator"] = "agent"

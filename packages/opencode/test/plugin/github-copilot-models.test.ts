@@ -425,13 +425,42 @@ test("remaps fallback oauth model urls to the enterprise host", async () => {
 
 test.each([
   [
-    "typed compaction continuation",
+    "synthetic typed compaction continuation",
     {
       parts: [
         {
           type: "text",
           text: "continue",
           synthetic: true,
+          serverProvenance: { type: "compaction-continuation", ownerMessageID: "msg_marker" },
+        },
+      ],
+    },
+    undefined,
+    "agent",
+  ],
+  [
+    "non-synthetic typed compaction continuation",
+    {
+      parts: [
+        {
+          type: "text",
+          text: "continue",
+          synthetic: false,
+          serverProvenance: { type: "compaction-continuation", ownerMessageID: "msg_marker" },
+        },
+      ],
+    },
+    undefined,
+    "agent",
+  ],
+  [
+    "typed compaction continuation without synthetic presentation",
+    {
+      parts: [
+        {
+          type: "text",
+          text: "continue",
           serverProvenance: { type: "compaction-continuation", ownerMessageID: "msg_marker" },
         },
       ],
@@ -451,6 +480,12 @@ test.each([
         },
       ],
     },
+    undefined,
+    undefined,
+  ],
+  [
+    "synthetic presentation without provenance",
+    { parts: [{ type: "text", text: "presentation only", synthetic: true }] },
     undefined,
     undefined,
   ],

@@ -477,7 +477,7 @@ function protocol(message: SessionV1.WithParts) {
       replay = { owner: provenance.ownerMessageID, source: provenance.sourceMessageID }
     }
     if (provenance?.type === "compaction-continuation") {
-      if (part.synthetic !== true || (continuation && continuation.owner !== provenance.ownerMessageID) || replay) {
+      if ((continuation && continuation.owner !== provenance.ownerMessageID) || replay) {
         throw new Error(`Compaction continuation ${message.info.id} has contradictory part provenance`)
       }
       continuation = { owner: provenance.ownerMessageID }
