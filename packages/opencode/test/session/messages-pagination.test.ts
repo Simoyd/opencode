@@ -30,11 +30,14 @@ const withSession = <A, E, R>(
     (input) => input.session.removeLeaf(input.sessionID).pipe(Effect.ignore),
   )
 
+let testMessageCreatedAt = Date.now()
+const nextTestMessageCreatedAt = () => ++testMessageCreatedAt
+
 // Helper functions using Effect.gen
 const fill = Effect.fn("Test.fill")(function* (
   sessionID: SessionID,
   count: number,
-  time = (i: number) => Date.now() + i,
+  time = () => nextTestMessageCreatedAt(),
 ) {
   const session = yield* SessionNs.Service
   const ids = [] as MessageID[]
@@ -69,7 +72,7 @@ const addUser = Effect.fn("Test.addUser")(function* (sessionID: SessionID, text?
     id,
     sessionID,
     role: "user",
-    time: { created: Date.now() },
+    time: { created: nextTestMessageCreatedAt() },
     agent: "test",
     model: { providerID: "test", modelID: "test" },
     tools: {},
@@ -98,7 +101,7 @@ const addAssistant = Effect.fn("Test.addAssistant")(function* (
     id,
     sessionID,
     role: "assistant",
-    time: { created: Date.now() },
+    time: { created: nextTestMessageCreatedAt() },
     parentID,
     modelID: ModelV2.ID.make("test"),
     providerID: ProviderV2.ID.make("test"),
@@ -705,7 +708,7 @@ describe("MessageV2.filterCompacted", () => {
     ),
   )
 
-  it.instance("retains original tail when compaction stores tail_start_id", () =>
+  it.instance("modelTurn retains original tail beside compaction when tail_start_id is stored", () =>
     withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
         const u1 = yield* addUser(sessionID, "first")
@@ -749,14 +752,14 @@ describe("MessageV2.filterCompacted", () => {
           text: "third reply",
         })
 
-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
+        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
 
         expect(result.map((item) => item.info.id)).toEqual([c1, s1, u2, a2, u3, a3])
       }),
     ),
   )
 
-  it.instance("fork remaps compaction tail_start_id for filterCompacted", () =>
+  it.instance("fork remaps compaction tail_start_id for modelTurn", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service
       const lifecycle = yield* SessionLifecycle.Service
@@ -803,11 +806,11 @@ describe("MessageV2.filterCompacted", () => {
         text: "third reply",
       })
 
-      const parentFiltered = MessageV2.filterCompacted(yield* MessageV2.stream(created.id))
+      const parentFiltered = MessageV2.modelTurn(yield* MessageV2.stream(created.id)).messages
       expect(parentFiltered.map((item) => item.info.id)).toEqual([c1, s1, u2, a2, u3, a3])
 
       const forked = yield* lifecycle.fork({ sessionID: created.id })
-      const childFiltered = MessageV2.filterCompacted(yield* MessageV2.stream(forked.id))
+      const childFiltered = MessageV2.modelTurn(yield* MessageV2.stream(forked.id)).messages
       expect(childFiltered).toHaveLength(parentFiltered.length)
 
       const tailPart = childFiltered.flatMap((m) => m.parts).find((p) => p.type === "compaction")
@@ -821,7 +824,7 @@ describe("MessageV2.filterCompacted", () => {
     }),
   )
 
-  it.instance("retains an assistant tail when compaction starts inside a turn", () =>
+  it.instance("modelTurn retains an assistant tail beside compaction when it starts inside a turn", () =>
     withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
         const u1 = yield* addUser(sessionID, "first")
@@ -873,14 +876,14 @@ describe("MessageV2.filterCompacted", () => {
           text: "third reply",
         })
 
-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
+        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
 
         expect(result.map((item) => item.info.id)).toEqual([c1, s1, a3, u3, a4])
       }),
     ),
   )
 
-  it.instance("prefers latest compaction boundary when repeated compactions exist", () =>
+  it.instance("modelTurn prefers latest compaction boundary when repeated compactions exist", () =>
     withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
         const u1 = yield* addUser(sessionID, "first")
@@ -945,7 +948,7 @@ describe("MessageV2.filterCompacted", () => {
           text: "fourth reply",
         })
 
-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
+        const result = MessageV2.modelTurn(yield* MessageV2.stream(sessionID)).messages
 
         expect(result.map((item) => item.info.id)).toEqual([c2, s2, u3, a3, u4, a4])
       }),
