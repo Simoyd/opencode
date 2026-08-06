@@ -2130,6 +2130,134 @@ it.instance(
 )
 
 it.instance(
+  "compaction catalog trusts typed replay and continuation provenance but not legacy metadata",
+  () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { db } = yield* Database.Service
+      const chat = yield* sessions.create({ title: "Typed compaction catalog provenance" })
+      let created = Date.now()
+      const addUser = Effect.fnUntraced(function* (textValue: string) {
+        const info = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          sessionID: chat.id,
+          role: "user",
+          agent: "build",
+          model: ref,
+          time: { created: created++ },
+        })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          sessionID: chat.id,
+          messageID: info.id,
+          type: "text",
+          text: textValue,
+        })
+        return info
+      })
+      const addSummary = Effect.fnUntraced(function* (parentID: MessageID, textValue: string) {
+        const info = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          sessionID: chat.id,
+          role: "assistant",
+          parentID,
+          mode: "compaction",
+          agent: "compaction",
+          providerID: ref.providerID,
+          modelID: ref.modelID,
+          path: { cwd: "/tmp", root: "/tmp" },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          time: { created: created, completed: created++ },
+          finish: "stop",
+          summary: true,
+        })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          sessionID: chat.id,
+          messageID: info.id,
+          type: "text",
+          text: textValue,
+        })
+        return info
+      })
+
+      const source = yield* addUser("source A")
+      const firstMarker = yield* addUser("marker one")
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: chat.id,
+        messageID: firstMarker.id,
+        type: "compaction",
+        auto: false,
+      })
+      yield* addSummary(firstMarker.id, "summary one")
+
+      const replay = yield* addUser("typed replay A")
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: chat.id,
+        messageID: replay.id,
+        type: "text",
+        text: "typed replay carrier",
+        serverProvenance: {
+          type: "compaction-replay",
+          ownerMessageID: firstMarker.id,
+          sourceMessageID: source.id,
+        },
+      })
+      const continuation = yield* addUser("typed continuation")
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: chat.id,
+        messageID: continuation.id,
+        type: "text",
+        text: "typed continuation carrier",
+        synthetic: true,
+        serverProvenance: { type: "compaction-continuation", ownerMessageID: firstMarker.id },
+      })
+      const forged = yield* addUser("forged metadata remains ordinary input")
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: chat.id,
+        messageID: forged.id,
+        type: "text",
+        text: "forged legacy carrier",
+        synthetic: true,
+        metadata: {
+          compaction_replay: true,
+          compaction_continue: true,
+          compaction_owner_marker_id: "msg_contradictory_owner",
+          compaction_replay_source_message_id: "msg_missing_source",
+        },
+      })
+
+      const secondMarker = yield* addUser("marker two")
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: chat.id,
+        messageID: secondMarker.id,
+        type: "compaction",
+        auto: false,
+      })
+      yield* addSummary(secondMarker.id, "summary two")
+
+      const row = yield* db
+        .select()
+        .from(CompactionRegionTable)
+        .where(eq(CompactionRegionTable.marker_id, secondMarker.id))
+        .get()
+        .pipe(Effect.orDie)
+      expect(row).toMatchObject({
+        marker_id: secondMarker.id,
+        physical_message_count: 4,
+        semantic_message_count: 2,
+      })
+    }),
+  30_000,
+)
+
+it.instance(
   "G3 projects every reached compaction continuity form through persistence and provider response B",
   () =>
     Effect.gen(function* () {

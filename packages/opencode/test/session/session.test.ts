@@ -21,6 +21,11 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
 import { NotFoundError } from "@/storage/storage"
+import { collectExportData } from "@/cli/cmd/export"
+import { persistImportedSession, type ExportData } from "@/cli/cmd/import"
+import { InstanceState } from "@/effect/instance-state"
+import { Database } from "@opencode-ai/core/database/database"
+import { SessionStatus } from "@/session/status"
 
 const it = testEffect(
   AppNodeBuilder.build(
@@ -31,6 +36,8 @@ const it = testEffect(
       SessionProjector.node,
       CrossSpawnSpawner.node,
       InstanceStore.node,
+      Database.node,
+      SessionStatus.node,
     ]),
     [
       [RuntimeFlags.node, RuntimeFlags.layer({ experimentalWorkspaces: false })],
@@ -63,6 +70,140 @@ function lifecycleResult(sessionID: SessionID): SessionV1.WithParts {
     parts: [],
   }
 }
+
+const seedContinuityGraph = Effect.fn("TestSession.seedContinuityGraph")(function* () {
+  const sessions = yield* SessionNs.Service
+  const info = yield* sessions.create({ title: "continuity interchange" })
+  let created = Date.now()
+  const addUser = Effect.fnUntraced(function* (text: string) {
+    const message = yield* sessions.updateMessage({
+      id: MessageID.ascending(),
+      sessionID: info.id,
+      role: "user",
+      agent: "build",
+      model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") },
+      time: { created: created++ },
+    })
+    const part = yield* sessions.updatePart({
+      id: PartID.ascending(),
+      sessionID: info.id,
+      messageID: message.id,
+      type: "text",
+      text,
+    })
+    return { message, part }
+  })
+  const addAssistant = Effect.fnUntraced(function* (parentID: MessageID, summary = false) {
+    const message = yield* sessions.updateMessage({
+      id: MessageID.ascending(),
+      sessionID: info.id,
+      role: "assistant",
+      parentID,
+      mode: summary ? "compaction" : "build",
+      agent: summary ? "compaction" : "build",
+      providerID: ProviderV2.ID.make("test"),
+      modelID: ModelV2.ID.make("test-model"),
+      path: { cwd: "/tmp", root: "/tmp" },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: { created, completed: created++ },
+      finish: "stop",
+      summary: summary || undefined,
+    })
+    return message
+  })
+
+  const source = yield* addUser("source")
+  const marker = yield* addUser("compaction owner")
+  const markerPart = yield* sessions.updatePart({
+    id: PartID.ascending(),
+    sessionID: info.id,
+    messageID: marker.message.id,
+    type: "compaction",
+    auto: false,
+  })
+  const summary = yield* addAssistant(marker.message.id, true)
+  yield* sessions.updatePart({
+    id: PartID.ascending(),
+    sessionID: info.id,
+    messageID: summary.id,
+    type: "text",
+    text: "summary",
+  })
+  const replay = yield* addUser("replay")
+  const replayPart = yield* sessions.updatePart({
+    ...replay.part,
+    serverProvenance: {
+      type: "compaction-replay",
+      ownerMessageID: marker.message.id,
+      sourceMessageID: source.message.id,
+    },
+  })
+  const compactionContinuation = yield* addUser("compaction continuation")
+  const compactionContinuationPart = yield* sessions.updatePart({
+    ...compactionContinuation.part,
+    synthetic: true,
+    serverProvenance: { type: "compaction-continuation", ownerMessageID: marker.message.id },
+  })
+  const taskOwner = yield* addUser("subtask owner")
+  const taskPart = yield* sessions.updatePart({
+    id: PartID.ascending(),
+    sessionID: info.id,
+    messageID: taskOwner.message.id,
+    type: "subtask",
+    prompt: "do work",
+    description: "work",
+    agent: "build",
+    command: "continue-work",
+  })
+  const taskOutput = yield* addAssistant(taskOwner.message.id)
+  const taskOutputPart = yield* sessions.updatePart({
+    id: PartID.ascending(),
+    sessionID: info.id,
+    messageID: taskOutput.id,
+    type: "tool",
+    callID: "task-call",
+    tool: "task",
+    serverProvenance: {
+      type: "subtask-output",
+      ownerMessageID: taskOwner.message.id,
+      taskPartID: taskPart.id,
+    },
+    state: {
+      status: "completed",
+      input: {},
+      output: "done",
+      title: "task",
+      metadata: {},
+      time: { start: created - 1, end: created },
+    },
+  })
+  const taskContinuation = yield* addUser("subtask continuation")
+  const taskContinuationPart = yield* sessions.updatePart({
+    ...taskContinuation.part,
+    synthetic: true,
+    serverProvenance: {
+      type: "subtask-continuation",
+      ownerMessageID: taskOwner.message.id,
+      taskPartID: taskPart.id,
+      sourceMessageID: taskOutput.id,
+    },
+  })
+
+  return {
+    info,
+    source,
+    marker,
+    markerPart,
+    replayPart,
+    compactionContinuationPart,
+    taskOwner,
+    taskPart,
+    taskOutput,
+    taskOutputPart,
+    taskContinuationPart,
+  }
+})
 
 describe("session.created event", () => {
   it.instance("should emit session.created event when session is created", () =>
@@ -271,9 +412,290 @@ describe("Session", () => {
       expect(saved.metadata).toBeUndefined()
     }),
   )
+
+  it.instance("fork remaps every typed continuity provenance identity exactly", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const lifecycle = yield* SessionLifecycle.Service
+      const graph = yield* seedContinuityGraph()
+      const source = yield* sessions.messages({ sessionID: graph.info.id })
+      const fork = yield* lifecycle.fork({ sessionID: graph.info.id })
+      const copied = yield* sessions.messages({ sessionID: fork.id })
+      expect(copied).toHaveLength(source.length)
+
+      const messageMap = new Map(source.map((message, index) => [message.info.id, copied[index]!.info.id]))
+      const partMap = new Map(
+        source.flatMap((message, messageIndex) =>
+          message.parts.map((part, partIndex) => [part.id, copied[messageIndex]!.parts[partIndex]!.id] as const),
+        ),
+      )
+      const mappedMessage = (id: MessageID) => {
+        const mapped = messageMap.get(id)
+        if (!mapped) throw new Error(`missing forked message mapping for ${id}`)
+        return mapped
+      }
+      const mappedPart = (id: PartID) => {
+        const mapped = partMap.get(id)
+        if (!mapped) throw new Error(`missing forked part mapping for ${id}`)
+        return mapped
+      }
+      for (const [index, message] of source.entries()) {
+        const clone = copied[index]!
+        expect(clone.info.id).not.toBe(message.info.id)
+        expect(clone.info.sessionID).toBe(fork.id)
+        for (const [partIndex, part] of message.parts.entries()) {
+          const clonedPart = clone.parts[partIndex]!
+          expect(clonedPart.id).not.toBe(part.id)
+          if ((part.type !== "text" && part.type !== "tool") || !part.serverProvenance) continue
+          const provenance = part.serverProvenance
+          const expected = (() => {
+            switch (provenance.type) {
+              case "compaction-replay":
+                return {
+                  ...provenance,
+                  ownerMessageID: mappedMessage(provenance.ownerMessageID),
+                  sourceMessageID: mappedMessage(provenance.sourceMessageID),
+                }
+              case "compaction-continuation":
+                return { ...provenance, ownerMessageID: mappedMessage(provenance.ownerMessageID) }
+              case "subtask-output":
+                return {
+                  ...provenance,
+                  ownerMessageID: mappedMessage(provenance.ownerMessageID),
+                  taskPartID: mappedPart(provenance.taskPartID),
+                }
+              case "subtask-continuation":
+                return {
+                  ...provenance,
+                  ownerMessageID: mappedMessage(provenance.ownerMessageID),
+                  taskPartID: mappedPart(provenance.taskPartID),
+                  sourceMessageID: mappedMessage(provenance.sourceMessageID),
+                }
+            }
+          })()
+          if (clonedPart.type !== "text" && clonedPart.type !== "tool") {
+            throw new Error(`continuity clone ${clonedPart.id} has an invalid target kind`)
+          }
+          expect(clonedPart.serverProvenance).toEqual(expected)
+        }
+      }
+    }),
+  )
+
+  it.instance(
+    "CLI export and import preserve valid typed provenance and reject invalid graphs before persistence",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* SessionNs.Service
+        const ctx = yield* InstanceState.context
+        const graph = yield* seedContinuityGraph()
+        const exported = JSON.parse(JSON.stringify(yield* collectExportData(graph.info.id))) as ExportData
+        const exportedClaims = exported.messages.flatMap((message) =>
+          message.parts.flatMap((part) =>
+            (part.type === "text" || part.type === "tool") && part.serverProvenance ? [part.serverProvenance] : [],
+          ),
+        )
+        expect(JSON.stringify(exportedClaims)).toBe(
+          JSON.stringify([
+            {
+              type: "compaction-replay",
+              ownerMessageID: graph.marker.message.id,
+              sourceMessageID: graph.source.message.id,
+            },
+            { type: "compaction-continuation", ownerMessageID: graph.marker.message.id },
+            {
+              type: "subtask-output",
+              ownerMessageID: graph.taskOwner.message.id,
+              taskPartID: graph.taskPart.id,
+            },
+            {
+              type: "subtask-continuation",
+              ownerMessageID: graph.taskOwner.message.id,
+              taskPartID: graph.taskPart.id,
+              sourceMessageID: graph.taskOutput.id,
+            },
+          ]),
+        )
+
+        yield* persistImportedSession(exported, ctx)
+        const persisted = yield* sessions.messages({ sessionID: graph.info.id })
+        expect(
+          JSON.stringify(
+            persisted.flatMap((message) =>
+              message.parts.flatMap((part) =>
+                (part.type === "text" || part.type === "tool") && part.serverProvenance ? [part.serverProvenance] : [],
+              ),
+            ),
+          ),
+        ).toBe(JSON.stringify(exportedClaims))
+
+        const claim = (data: typeof exported, id: PartID) => {
+          const part = data.messages.flatMap((message) => message.parts).find((candidate) => candidate.id === id)
+          if (!part || (part.type !== "text" && part.type !== "tool")) throw new Error(`missing claim ${id}`)
+          return part
+        }
+        const otherSession = yield* sessions.create({ title: "cross-session owner" })
+        yield* sessions.updateMessage({
+          id: MessageID.make("msg_other_session_owner"),
+          sessionID: otherSession.id,
+          role: "user",
+          agent: "build",
+          model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") },
+          time: { created: Date.now() },
+        })
+        const cases = [
+          {
+            name: "malformed discriminator",
+            mutate(data: typeof exported) {
+              claim(data, graph.replayPart.id).serverProvenance = { type: "unknown" } as never
+            },
+          },
+          {
+            name: "dangling owner",
+            mutate(data: typeof exported) {
+              claim(data, graph.compactionContinuationPart.id).serverProvenance = {
+                type: "compaction-continuation",
+                ownerMessageID: MessageID.make("msg_dangling_owner"),
+              }
+            },
+          },
+          {
+            name: "cross-session owner",
+            mutate(data: typeof exported) {
+              claim(data, graph.compactionContinuationPart.id).serverProvenance = {
+                type: "compaction-continuation",
+                ownerMessageID: MessageID.make("msg_other_session_owner"),
+              }
+            },
+          },
+          {
+            name: "wrong target kind",
+            mutate(data: typeof exported) {
+              claim(data, graph.replayPart.id).serverProvenance = {
+                type: "subtask-output",
+                ownerMessageID: graph.taskOwner.message.id,
+                taskPartID: graph.taskPart.id,
+              }
+            },
+          },
+          {
+            name: "invalid source direction",
+            mutate(data: typeof exported) {
+              claim(data, graph.replayPart.id).serverProvenance = {
+                type: "compaction-replay",
+                ownerMessageID: graph.marker.message.id,
+                sourceMessageID: claim(data, graph.replayPart.id).messageID,
+              }
+            },
+          },
+        ]
+        for (const item of cases) {
+          const invalid = structuredClone(exported)
+          item.mutate(invalid)
+          const exit = yield* persistImportedSession(invalid, ctx).pipe(Effect.exit)
+          expect(Exit.isFailure(exit), item.name).toBe(true)
+          expect((yield* sessions.messages({ sessionID: graph.info.id })).length, item.name).toBe(persisted.length)
+        }
+
+        const legacy = yield* sessions.create({ title: "legacy absence" })
+        const legacyMessage = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          sessionID: legacy.id,
+          role: "user",
+          agent: "build",
+          model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") },
+          time: { created: Date.now() },
+        })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          sessionID: legacy.id,
+          messageID: legacyMessage.id,
+          type: "text",
+          text: "legacy without provenance",
+        })
+        const legacyExport = JSON.parse(JSON.stringify(yield* collectExportData(legacy.id))) as typeof exported
+        expect(JSON.stringify(legacyExport)).not.toContain("serverProvenance")
+        yield* persistImportedSession(legacyExport, ctx)
+        const legacyPart = (yield* sessions.messages({ sessionID: legacy.id }))[0]?.parts[0]
+        expect(
+          legacyPart && (legacyPart.type === "text" || legacyPart.type === "tool")
+            ? legacyPart.serverProvenance
+            : undefined,
+        ).toBeUndefined()
+      }),
+  )
 })
 
 describe("SessionLifecycle", () => {
+  it.instance("does not publish stale Idle over successor work accepted through the lifecycle map", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const lifecycle = yield* SessionLifecycle.Service
+      const status = yield* SessionStatus.Service
+      const events = yield* EventV2Bridge.Service
+      const info = yield* sessions.create({ title: "idle successor ownership" })
+      const result = lifecycleResult(info.id)
+      const activeStarted = yield* Deferred.make<void>()
+      const releaseActive = yield* Deferred.make<void>()
+      const idleEntered = yield* Deferred.make<void>()
+      const releaseIdle = yield* Deferred.make<void>()
+      const successorStarted = yield* Deferred.make<void>()
+      const releaseSuccessor = yield* Deferred.make<void>()
+      yield* events.listen((event) => {
+        if (event.type !== SessionStatus.Event.Idle.type) return Effect.void
+        const data = event.data as typeof SessionStatus.Event.Idle.data.Type
+        if (data.sessionID !== info.id) return Effect.void
+        return Deferred.isDone(idleEntered).pipe(
+          Effect.flatMap((seen) =>
+            seen
+              ? Effect.void
+              : Deferred.succeed(idleEntered, undefined).pipe(Effect.andThen(Deferred.await(releaseIdle))),
+          ),
+        )
+      })
+      const active = yield* lifecycle
+        .ensureRunning(
+          info.id,
+          Effect.succeed(result),
+          status
+            .set(info.id, { type: "busy" })
+            .pipe(
+              Effect.andThen(Deferred.succeed(activeStarted, undefined)),
+              Effect.andThen(Deferred.await(releaseActive)),
+              Effect.as(result),
+            ),
+        )
+        .pipe(Effect.forkChild)
+      yield* Deferred.await(activeStarted)
+      yield* Deferred.succeed(releaseActive, undefined)
+      yield* Deferred.await(idleEntered)
+
+      const successor = yield* lifecycle
+        .submit(
+          info.id,
+          Effect.succeed(result),
+          Effect.void,
+          status
+            .set(info.id, { type: "busy" })
+            .pipe(
+              Effect.andThen(Deferred.succeed(successorStarted, undefined)),
+              Effect.andThen(Deferred.await(releaseSuccessor)),
+              Effect.as(result),
+            ),
+        )
+        .pipe(Effect.forkChild)
+      yield* Effect.yieldNow
+      expect(yield* Deferred.isDone(successorStarted)).toBe(false)
+      yield* Deferred.succeed(releaseIdle, undefined)
+      yield* Fiber.join(active)
+      yield* Deferred.await(successorStarted)
+      expect(yield* status.get(info.id)).toEqual({ type: "busy" })
+      yield* Deferred.succeed(releaseSuccessor, undefined)
+      expect((yield* Fiber.join(successor)).info.sessionID).toBe(info.id)
+      expect(yield* status.get(info.id)).toEqual({ type: "idle" })
+    }),
+  )
+
   it.instance("rejects prompt runner admissions during removal and joins concurrent removals", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionNs.Service
@@ -296,10 +718,7 @@ describe("SessionLifecycle", () => {
         .pipe(Effect.forkChild)
       yield* Deferred.await(running)
       const admitted = yield* lifecycle
-        .admit(
-          info.id,
-          Deferred.succeed(blocked, undefined).pipe(Effect.andThen(Deferred.await(release))),
-        )
+        .admit(info.id, Deferred.succeed(blocked, undefined).pipe(Effect.andThen(Deferred.await(release))))
         .pipe(Effect.forkChild)
       yield* Deferred.await(blocked)
 
@@ -327,9 +746,9 @@ describe("SessionLifecycle", () => {
       yield* Fiber.join(active)
 
       const missing = yield* lifecycle.commit(info.id, Effect.void).pipe(Effect.exit)
-      expect(Option.getOrUndefined(Exit.isFailure(missing) ? Exit.findErrorOption(missing) : Option.none())).toBeInstanceOf(
-        NotFoundError,
-      )
+      expect(
+        Option.getOrUndefined(Exit.isFailure(missing) ? Exit.findErrorOption(missing) : Option.none()),
+      ).toBeInstanceOf(NotFoundError)
     }),
   )
 
@@ -342,9 +761,9 @@ describe("SessionLifecycle", () => {
       yield* lifecycle.admit(info.id, lifecycle.remove(info.id))
 
       const missing = yield* sessions.get(info.id).pipe(Effect.exit)
-      expect(Option.getOrUndefined(Exit.isFailure(missing) ? Exit.findErrorOption(missing) : Option.none())).toBeInstanceOf(
-        NotFoundError,
-      )
+      expect(
+        Option.getOrUndefined(Exit.isFailure(missing) ? Exit.findErrorOption(missing) : Option.none()),
+      ).toBeInstanceOf(NotFoundError)
     }),
   )
 
@@ -378,18 +797,11 @@ describe("SessionLifecycle", () => {
       const release = yield* Deferred.make<void>()
       const stopping = yield* Deferred.make<void>()
       const admitted = yield* lifecycle
-        .admit(
-          info.id,
-          Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(release))),
-        )
+        .admit(info.id, Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(release))))
         .pipe(Effect.forkChild)
       yield* Deferred.await(started)
       const closing = yield* lifecycle
-        .removeWorkspace(
-          workspaceID,
-          Deferred.succeed(stopping, undefined),
-          Effect.die("workspace removal failed"),
-        )
+        .removeWorkspace(workspaceID, Deferred.succeed(stopping, undefined), Effect.die("workspace removal failed"))
         .pipe(Effect.forkChild)
       yield* Deferred.await(stopping)
 

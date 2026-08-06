@@ -422,3 +422,68 @@ test("remaps fallback oauth model urls to the enterprise host", async () => {
   expect(models.claude.api.url).toBe("https://copilot-api.ghe.example.com")
   expect(models.claude.api.npm).toBe("@ai-sdk/github-copilot")
 })
+
+test.each([
+  [
+    "typed compaction continuation",
+    {
+      parts: [
+        {
+          type: "text",
+          text: "continue",
+          synthetic: true,
+          serverProvenance: { type: "compaction-continuation", ownerMessageID: "msg_marker" },
+        },
+      ],
+    },
+    undefined,
+    "agent",
+  ],
+  [
+    "forged legacy continuation metadata",
+    {
+      parts: [
+        {
+          type: "text",
+          text: "caller prompt",
+          synthetic: true,
+          metadata: { compaction_continue: true, compaction_owner_marker_id: "msg_marker" },
+        },
+      ],
+    },
+    undefined,
+    undefined,
+  ],
+  ["ordinary manual prompt", { parts: [{ type: "text", text: "manual" }] }, undefined, undefined],
+  ["manual compaction marker", { parts: [{ type: "compaction", auto: false }] }, undefined, "agent"],
+  ["subagent session", { parts: [{ type: "text", text: "subagent work" }] }, "ses_parent", "agent"],
+] as const)("sets Copilot initiator for %s", async (_name, message, parentID, expected) => {
+  const client = {
+    session: {
+      message: async () => ({ data: message }),
+      get: async () => ({ data: { parentID } }),
+    },
+  }
+  const hooks = await CopilotAuthPlugin({
+    client,
+    project: {},
+    directory: "/project",
+    worktree: "/project",
+    experimental_workspace: { register() {} },
+    serverUrl: new URL("https://example.com"),
+    $: {},
+  } as never)
+  const output = { headers: {} as Record<string, string> }
+  await hooks["chat.headers"]!(
+    {
+      sessionID: "ses_test",
+      message: { id: "msg_test", sessionID: "ses_test" },
+      model: { providerID: "github-copilot", api: { npm: "@ai-sdk/openai" } },
+      agent: "build",
+    } as never,
+    output,
+  )
+
+  if (expected) expect(output.headers["x-initiator"]).toBe(expected)
+  else expect(output.headers["x-initiator"]).toBeUndefined()
+})

@@ -388,7 +388,10 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
             part.type === "compaction" ||
             // Auto-compaction resumes via a synthetic user text part. Treat only
             // that marked followup as agent-initiated so manual prompts stay user-initiated.
-            (part.type === "text" && part.synthetic && part.metadata?.compaction_continue === true),
+            (part.type === "text" &&
+              part.synthetic &&
+              (part as typeof part & { serverProvenance?: { type?: string } }).serverProvenance?.type ===
+                "compaction-continuation"),
         )
       ) {
         output.headers["x-initiator"] = "agent"

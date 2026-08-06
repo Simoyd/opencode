@@ -18,6 +18,10 @@ import { eq } from "drizzle-orm"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { resetDatabase } from "../fixture/db"
 import { pollWithTimeout, testEffect } from "../lib/effect"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { MessageID, PartID } from "@/session/schema"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 
 const env = LayerNode.compile(LayerNode.group([CrossSpawnSpawner.node]))
 const it = testEffect(env)
@@ -169,6 +173,145 @@ describe("ShareNext", () => {
           expect(createRequests).toHaveLength(1)
           expect(createRequests[0].method).toBe("POST")
           expect(createRequests[0].url).toBe("https://legacy-share.example.com/api/share")
+        }).pipe(Effect.provide(integrationLayer(client)))
+      },
+      { config: { enterprise: { url: "https://legacy-share.example.com" } } },
+    ),
+  )
+
+  it.live("ShareNext propagates all typed continuity provenance variants", () =>
+    provideTmpdirInstance(
+      () => {
+        const syncBodies: unknown[] = []
+        const client = HttpClient.make((req) => {
+          if (req.url.endsWith("/api/share")) {
+            return Effect.succeed(
+              json(req, {
+                id: "shr_provenance",
+                url: "https://legacy-share.example.com/share/provenance",
+                secret: "sec_provenance",
+              }),
+            )
+          }
+          if (req.url.endsWith("/sync") && req.body._tag === "Uint8Array") {
+            syncBodies.push(JSON.parse(new TextDecoder().decode(req.body.body)))
+          }
+          return Effect.succeed(json(req, { ok: true }))
+        })
+        return Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const service = yield* ShareNext.Service
+          const info = yield* sessions.create({ title: "share provenance" })
+          yield* service.create(info.id)
+          let created = Date.now()
+          const owner = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            sessionID: info.id,
+            role: "user",
+            agent: "build",
+            model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") },
+            time: { created: created++ },
+          })
+          const source = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            sessionID: info.id,
+            role: "user",
+            agent: "build",
+            model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") },
+            time: { created: created++ },
+          })
+          const taskPartID = PartID.ascending()
+          const outputMessageID = MessageID.ascending()
+          const parts: SessionV1.Part[] = [
+            {
+              id: PartID.ascending(),
+              sessionID: info.id,
+              messageID: source.id,
+              type: "text",
+              text: "replay",
+              serverProvenance: {
+                type: "compaction-replay",
+                ownerMessageID: owner.id,
+                sourceMessageID: source.id,
+              },
+            },
+            {
+              id: PartID.ascending(),
+              sessionID: info.id,
+              messageID: source.id,
+              type: "text",
+              text: "compaction continuation",
+              synthetic: true,
+              serverProvenance: { type: "compaction-continuation", ownerMessageID: owner.id },
+            },
+            {
+              id: PartID.ascending(),
+              sessionID: info.id,
+              messageID: outputMessageID,
+              type: "tool",
+              callID: "share-task-call",
+              tool: "task",
+              serverProvenance: { type: "subtask-output", ownerMessageID: owner.id, taskPartID },
+              state: {
+                status: "completed",
+                input: {},
+                output: "done",
+                title: "task",
+                metadata: {},
+                time: { start: created, end: created + 1 },
+              },
+            },
+            {
+              id: PartID.ascending(),
+              sessionID: info.id,
+              messageID: source.id,
+              type: "text",
+              text: "subtask continuation",
+              synthetic: true,
+              serverProvenance: {
+                type: "subtask-continuation",
+                ownerMessageID: owner.id,
+                taskPartID,
+                sourceMessageID: outputMessageID,
+              },
+            },
+          ]
+          yield* sessions.updateMessage({
+            id: outputMessageID,
+            sessionID: info.id,
+            role: "assistant",
+            parentID: owner.id,
+            mode: "build",
+            agent: "build",
+            providerID: ProviderV2.ID.make("test"),
+            modelID: ModelV2.ID.make("test-model"),
+            path: { cwd: "/tmp", root: "/tmp" },
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            time: { created, completed: created + 1 },
+            finish: "stop",
+          })
+          for (const part of parts) yield* sessions.updatePart(part)
+
+          yield* pollWithTimeout(
+            Effect.sync(() => (syncBodies.length > 0 ? true : undefined)),
+            "timed out waiting for typed provenance share sync",
+            "5 seconds",
+          )
+          const claims = syncBodies.flatMap((body) =>
+            ((body as { data: Array<{ type: string; data: SessionV1.Part }> }).data ?? []).flatMap((item) =>
+              item.type === "part" &&
+              (item.data.type === "text" || item.data.type === "tool") &&
+              item.data.serverProvenance
+                ? [item.data.serverProvenance]
+                : [],
+            ),
+          )
+          expect(claims).toEqual(
+            parts.flatMap((part) =>
+              (part.type === "text" || part.type === "tool") && part.serverProvenance ? [part.serverProvenance] : [],
+            ),
+          )
         }).pipe(Effect.provide(integrationLayer(client)))
       },
       { config: { enterprise: { url: "https://legacy-share.example.com" } } },
