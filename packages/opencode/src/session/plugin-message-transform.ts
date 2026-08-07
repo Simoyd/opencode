@@ -28,13 +28,21 @@ function withoutServerProvenance(messages: SessionV1.WithParts[]) {
   return messages.map((message) => ({ ...message, parts: message.parts.map(stripServerProvenance) }))
 }
 
+export const toPluginTransformedMessages = Effect.fnUntraced(function* (input: {
+  messages: SessionV1.WithParts[]
+  plugin: Plugin.Interface
+}) {
+  const output = { messages: withoutServerProvenance(structuredClone(input.messages)) }
+  yield* input.plugin.trigger("experimental.chat.messages.transform", {}, output)
+  return withoutServerProvenance(output.messages)
+})
+
 export const toPluginTransformedModelMessages = Effect.fnUntraced(function* (input: {
   messages: SessionV1.WithParts[]
   model: Provider.Model
   plugin: Plugin.Interface
   options?: { stripMedia?: boolean; toolOutputMaxChars?: number }
 }) {
-  const output = { messages: withoutServerProvenance(structuredClone(input.messages)) }
-  yield* input.plugin.trigger("experimental.chat.messages.transform", {}, output)
-  return yield* MessageV2.toModelMessagesEffect(withoutServerProvenance(output.messages), input.model, input.options)
+  const messages = yield* toPluginTransformedMessages(input)
+  return yield* MessageV2.toModelMessagesEffect(messages, input.model, input.options)
 })
