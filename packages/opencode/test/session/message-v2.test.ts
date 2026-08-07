@@ -1608,6 +1608,65 @@ describe("session.message-v2.modelTurn continuity", () => {
       ...extra,
     }) as SessionV1.Assistant
 
+  test("selects latest messages by physical creation time when IDs are nonmonotonic", () => {
+    const oldUser = { ...userInfo("msg_z_user"), time: { created: 100 } }
+    const newUser = { ...userInfo("msg_a_user"), time: { created: 200 } }
+    const oldAssistant = completedAssistant(MessageID.make("msg_z_assistant"), oldUser.id, {
+      time: { created: 300, completed: 301 },
+    })
+    const newAssistant = completedAssistant(MessageID.make("msg_a_assistant"), newUser.id, {
+      time: { created: 400, completed: 401 },
+    })
+
+    const state = MessageV2.latest([
+      { info: newAssistant, parts: [] },
+      { info: oldUser, parts: [] },
+      { info: oldAssistant, parts: [] },
+      { info: newUser, parts: [] },
+    ])
+
+    expect(state.user).toBeUndefined()
+    expect(state.assistant).toBeUndefined()
+    expect(state.finished?.id).toBe(newAssistant.id)
+  })
+
+  test("uses UTF-8 message ID order as the deterministic equal-time tie-breaker", () => {
+    const lower = { ...userInfo("msg_a_user"), time: { created: 100 } }
+    const higher = { ...userInfo("msg_z_user"), time: { created: 100 } }
+
+    expect(MessageV2.compareHydratedMessagePhysicalOrder(lower, higher)).toBeLessThan(0)
+    expect(MessageV2.compareHydratedMessagePhysicalOrder(higher, lower)).toBeGreaterThan(0)
+  })
+
+  test("selects compaction and subtask work after the terminal boundary by physical time", () => {
+    const parent = MessageID.make("msg_parent")
+    const finished = completedAssistant(MessageID.make("msg_z_finished"), parent, {
+      time: { created: 200, completed: 201 },
+    })
+    const oldTask: SessionV1.WithParts = {
+      info: { ...userInfo("msg_z_old"), time: { created: 100 } },
+      parts: [{ ...basePart("msg_z_old", "old"), type: "compaction", auto: true }] as SessionV1.Part[],
+    }
+    const newTask: SessionV1.WithParts = {
+      info: { ...userInfo("msg_a_new"), time: { created: 300 } },
+      parts: [
+        {
+          ...basePart("msg_a_new", "new"),
+          type: "subtask",
+          prompt: "inspect",
+          description: "inspect ordering",
+          agent: "general",
+        },
+      ] as SessionV1.Part[],
+    }
+
+    const state = MessageV2.latest([newTask, { info: finished, parts: [] }, oldTask])
+
+    expect(state.finished?.id).toBe(finished.id)
+    expect(state.tasks).toHaveLength(1)
+    expect(state.tasks[0]).toMatchObject({ type: "subtask", prompt: "inspect" })
+  })
+
   test("G3 projects typed compaction continuity beside M before later external B", () => {
     const a = MessageID.make("msg_101")
     const aAnswer = MessageID.make("msg_102")

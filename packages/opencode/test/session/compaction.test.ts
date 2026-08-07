@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
+import { afterEach, describe, expect, mock, test } from "bun:test"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
@@ -940,14 +940,20 @@ describe("session.compaction.process", () => {
     }),
   )
 
-  itCompaction.instance(
-    "sanitizes the actual malicious plugin graph before compaction model conversion",
-    Effect.gen(function* () {
+  itCompaction.instance("sanitizes the malicious plugin graph before serialized compaction input", () => {
+    const stub = llm()
+    let captured: LLM.StreamInput["messages"] = []
+    stub.push(
+      reply("summary", (input) => {
+        captured = input.messages
+      }),
+    )
+    return Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
       maliciousCompactionState.calls = 0
       maliciousCompactionState.inputWasProvenanceFree = false
       const session = yield* ssn.create({})
-      const a = yield* ssn.updateMessage({
+      yield* ssn.updateMessage({
         id: MessageID.ascending(),
         role: "user",
         sessionID: session.id,
@@ -955,63 +961,49 @@ describe("session.compaction.process", () => {
         model: ref,
         time: { created: Date.now() },
       })
+      const source = (yield* ssn.messages({ sessionID: session.id })).at(-1)!
       yield* ssn.updatePart({
         id: PartID.ascending(),
-        messageID: a.id,
+        messageID: source.info.id,
         sessionID: session.id,
         type: "text",
         text: "compaction plugin source",
         metadata: { ordinary: "persisted" },
       })
       const marker = yield* createCompactionMarker(session.id)
-      const b = yield* createUserMessage(session.id, "compaction external B")
+      yield* createUserMessage(session.id, "compaction external B")
       const messages = yield* ssn.messages({ sessionID: session.id })
-      const converted: SessionV1.WithParts[][] = []
-      const convert = MessageV2.toModelMessagesEffect
-      const conversionSpy = spyOn(MessageV2, "toModelMessagesEffect").mockImplementation((input, model, options) => {
-        converted.push(structuredClone(input))
-        return convert(input, model, options)
-      })
 
-      yield* Effect.acquireUseRelease(
-        Effect.void,
-        () =>
-          SessionCompaction.use.process({
-            parentID: marker.id,
-            messages,
-            sessionID: session.id,
-            auto: false,
-          }),
-        () => Effect.sync(() => conversionSpy.mockRestore()),
-      )
+      yield* SessionCompaction.use.process({
+        parentID: marker.id,
+        messages,
+        sessionID: session.id,
+        auto: false,
+      })
 
       expect(maliciousCompactionState.calls).toBe(1)
       expect(maliciousCompactionState.inputWasProvenanceFree).toBe(true)
-      const graph = converted.filter((messages) =>
-        messages.some((message) =>
-          message.parts.some((part) => part.type === "text" && part.text === "compaction plugin injected"),
-        ),
+      expect(captured).toHaveLength(1)
+      expect(captured[0]?.role).toBe("user")
+      const serialized = JSON.stringify(captured)
+      expect(serialized).toContain("compaction plugin source mutated")
+      expect(serialized).toContain("compaction plugin injected")
+      expect(serialized).not.toContain("serverProvenance")
+      expect(serialized).not.toContain("compaction external B")
+      const persisted = yield* ssn.messages({ sessionID: session.id })
+      const persistedSource = persisted.find((message) => message.info.id === source.info.id)
+      expect(persistedSource?.parts).toContainEqual(
+        expect.objectContaining({ text: "compaction plugin source", metadata: { ordinary: "persisted" } }),
       )
-      expect(graph).toHaveLength(1)
-      const convertedGraph = graph[0]!
-      expect(convertedGraph.some((message) => message.info.id === a.id)).toBe(true)
-      expect(convertedGraph.some((message) => message.info.id === marker.id || message.info.id === b.id)).toBe(false)
-      const parts = convertedGraph.flatMap((message) => message.parts)
-      expect(
-        parts.every((part) => (part.type !== "text" && part.type !== "tool") || part.serverProvenance === undefined),
-      ).toBe(true)
-      expect(parts.some((part) => part.type === "text" && part.text === "compaction plugin source mutated")).toBe(true)
-      expect(parts.some((part) => part.type === "text" && part.text === "compaction plugin injected")).toBe(true)
-      const summary = (yield* ssn.messages({ sessionID: session.id })).find(
-        (message) => message.info.role === "assistant" && message.info.summary === true,
-      )
+      const summary = persisted.find((message) => message.info.role === "assistant" && message.info.summary === true)
       expect(summary?.info.role === "assistant" ? summary.info.parentID : undefined).toBe(marker.id)
     }).pipe(
       withCompaction({
+        llm: stub.llmLayer,
         plugin: maliciousCompactionTransform(maliciousCompactionState),
       }),
-    ),
-  )
+    )
+  })
 
   itCompaction.instance(
     "marks summary message as errored on compact result",
@@ -1618,10 +1610,10 @@ describe("session.compaction.process", () => {
     "summarizes only the head and projects retained tail before later B",
     () => {
       const stub = llm()
-      let captured = ""
+      let captured: LLM.StreamInput["messages"] = []
       stub.push(
         reply("summary", (input) => {
-          captured = JSON.stringify(input.messages)
+          captured = input.messages
         }),
       )
       return Effect.gen(function* () {
@@ -1641,11 +1633,14 @@ describe("session.compaction.process", () => {
           auto: false,
         })
 
-        expect(captured).toContain("older context")
-        expect(captured).not.toContain("keep this turn")
-        expect(captured).not.toContain("and this one too")
-        expect(captured).not.toContain("later external B")
-        expect(captured).not.toContain("What did we do so far?")
+        const serialized = JSON.stringify(captured)
+        expect(captured).toHaveLength(1)
+        expect(captured[0]?.role).toBe("user")
+        expect(serialized).toContain("[User]: older context")
+        expect(serialized).not.toContain("keep this turn")
+        expect(serialized).not.toContain("and this one too")
+        expect(serialized).not.toContain("later external B")
+        expect(serialized).not.toContain("What did we do so far?")
         const all = yield* ssn.messages({ sessionID: session.id })
         const summary = all.find((message) => message.info.role === "assistant" && message.info.summary === true)
         const view = MessageV2.modelTurn(all)
@@ -1710,6 +1705,178 @@ describe("session.compaction.process", () => {
         )
         expect(view.target?.id).toBe(b.id)
       }).pipe(withCompaction({ llm: stub.llmLayer }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "serializes repeated compaction history as one textual user message",
+    () => {
+      const stub = llm()
+      let captured: LLM.StreamInput["messages"] = []
+      stub.push(
+        reply("summary two", (input) => {
+          captured = input.messages
+        }),
+      )
+
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const fixture = yield* TestInstance
+        const session = yield* ssn.create({})
+        const turn = yield* createUserMessage(session.id, "original request")
+        const kept = yield* createAssistantMessage(session.id, turn.id, fixture.directory)
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: kept.id,
+          sessionID: session.id,
+          type: "text",
+          text: "assistant answer",
+        })
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: kept.id,
+          sessionID: session.id,
+          type: "reasoning",
+          text: "assistant reasoning",
+          time: { start: Date.now(), end: Date.now() },
+        })
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: kept.id,
+          sessionID: session.id,
+          type: "tool",
+          callID: "read-call",
+          tool: "read",
+          state: {
+            status: "completed",
+            input: { filePath: "src/index.ts" },
+            output: "file contents",
+            title: "src/index.ts",
+            metadata: {},
+            time: { start: Date.now(), end: Date.now() },
+          },
+        })
+
+        const previous = yield* ssn.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          model: ref,
+          sessionID: session.id,
+          agent: "build",
+          time: { created: Date.now() },
+        })
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: previous.id,
+          sessionID: session.id,
+          type: "compaction",
+          auto: false,
+          tail_start_id: kept.id,
+        })
+        yield* createSummaryAssistantMessage(session.id, previous.id, fixture.directory, "summary one")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = MessageV2.modelTurn(yield* MessageV2.stream(session.id)).messages
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        expect(captured).toHaveLength(1)
+        expect(captured[0]?.role).toBe("user")
+        const serialized = JSON.stringify(captured)
+        expect(serialized).toContain("[Assistant]: assistant answer")
+        expect(serialized).toContain("[Assistant reasoning]: assistant reasoning")
+        expect(serialized).toContain('[Assistant tool call]: read({\\"filePath\\":\\"src/index.ts\\"})')
+        expect(serialized).toContain("[Tool result]: file contents")
+        expect(serialized).not.toContain('\\"role\\":\\"assistant\\"')
+      }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 0 }) }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "applies the 2000 UTF-16-code-unit tool-result boundary after attachment aggregation",
+    () => {
+      const stub = llm()
+      let captured: LLM.StreamInput["messages"] = []
+      stub.push(
+        reply("summary", (input) => {
+          captured = input.messages
+        }),
+      )
+
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const fixture = yield* TestInstance
+        const session = yield* ssn.create({})
+        const turn = yield* createUserMessage(session.id, "inspect boundaries")
+        const assistant = yield* createAssistantMessage(session.id, turn.id, fixture.directory)
+        const addTool = Effect.fnUntraced(function* (
+          callID: string,
+          output: string,
+          attachments: SessionV1.FilePart[] = [],
+        ) {
+          yield* ssn.updatePart({
+            id: PartID.ascending(),
+            messageID: assistant.id,
+            sessionID: session.id,
+            type: "tool",
+            callID,
+            tool: callID,
+            state: {
+              status: "completed",
+              input: { callID },
+              output,
+              title: callID,
+              metadata: {},
+              time: { start: Date.now(), end: Date.now() },
+              attachments,
+            },
+          })
+        })
+        yield* addTool("below", "b".repeat(1_999))
+        yield* addTool("at", "a".repeat(2_000))
+        const splitSurrogate = `${"s".repeat(1_999)}😀z`
+        yield* addTool("above-unicode", splitSurrogate)
+        const attachmentOutput = "m".repeat(1_980)
+        const attachment: SessionV1.FilePart = {
+          id: PartID.ascending(),
+          messageID: assistant.id,
+          sessionID: session.id,
+          type: "file",
+          mime: "image/png",
+          filename: "attachment.png",
+          url: "data:image/png;base64,Zm9v",
+        }
+        yield* addTool("attachment", attachmentOutput, [attachment])
+        const marker = yield* createCompactionMarker(session.id)
+        const messages = yield* ssn.messages({ sessionID: session.id })
+
+        yield* SessionCompaction.use.process({
+          parentID: marker.id,
+          messages,
+          sessionID: session.id,
+          auto: false,
+        })
+
+        expect(captured).toHaveLength(1)
+        expect(captured[0]?.role).toBe("user")
+        const content = captured[0]?.content
+        if (!Array.isArray(content) || content[0]?.type !== "text") throw new Error("missing compaction history text")
+        const history = content[0].text
+        expect(history).toContain(`[Tool result]: ${"b".repeat(1_999)}`)
+        expect(history).toContain(`[Tool result]: ${"a".repeat(2_000)}`)
+        expect(history).not.toContain(`${"a".repeat(2_000)}\n[truncated]`)
+        const unicodeExpected = `${splitSurrogate.slice(0, 2_000)}\n[truncated]`
+        expect(unicodeExpected.length).toBe(2_012)
+        expect(unicodeExpected.charCodeAt(1_999)).toBe(0xd83d)
+        expect(history).toContain(`[Tool result]: ${unicodeExpected}`)
+        expect(history).not.toContain("😀z")
+        const attachmentAggregate = `${attachmentOutput}\n[Attached image/png: attachment.png]`
+        expect(history).toContain(`[Tool result]: ${attachmentAggregate.slice(0, 2_000)}\n[truncated]`)
+        expect(history).not.toContain("attachment.png]")
+      }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 0 }) }))
     },
     { git: true },
   )

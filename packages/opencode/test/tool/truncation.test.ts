@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test"
+import { describe, test, expect, spyOn } from "bun:test"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { filesystem } from "@opencode-ai/core/effect/app-node-platform"
@@ -12,6 +12,7 @@ import path from "path"
 import { testEffect } from "../lib/effect"
 import { writeFileStringScoped } from "../lib/filesystem"
 import { TestConfig } from "../fixture/config"
+import fs from "fs/promises"
 
 const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
 const ROOT = path.resolve(import.meta.dir, "..", "..")
@@ -242,22 +243,34 @@ describe("Truncate", () => {
   describe("cleanup", () => {
     const DAY_MS = 24 * 60 * 60 * 1000
 
-    it.live("deletes files older than 7 days and preserves recent files", () =>
+    it.live("uses file mtime across wrapped IDs and tolerates unreadable entries", () =>
       Effect.gen(function* () {
         const svc = yield* Truncate.Service
-        const fs = yield* FileSystem.FileSystem
+        const files = yield* FileSystem.FileSystem
+        const now = Date.now()
+        const clock = spyOn(Date, "now").mockReturnValue(now)
+        yield* Effect.addFinalizer(() => Effect.sync(() => clock.mockRestore()))
 
-        yield* fs.makeDirectory(Truncate.DIR, { recursive: true })
+        yield* files.makeDirectory(Truncate.DIR, { recursive: true })
 
-        const old = path.join(Truncate.DIR, Identifier.create("tool", "ascending", Date.now() - 10 * DAY_MS))
-        const recent = path.join(Truncate.DIR, Identifier.create("tool", "ascending", Date.now() - 3 * DAY_MS))
+        const old = path.join(Truncate.DIR, Identifier.create("tool", "ascending", 2 ** 36 - 1))
+        const atCutoff = path.join(Truncate.DIR, Identifier.create("tool", "ascending", 2 ** 36))
+        const recent = path.join(Truncate.DIR, Identifier.create("tool", "ascending", 2 ** 36 + 1))
+        const unreadable = path.join(Truncate.DIR, "tool_unreadable")
 
         yield* writeFileStringScoped(old, "old content")
+        yield* writeFileStringScoped(atCutoff, "cutoff content")
         yield* writeFileStringScoped(recent, "recent content")
+        yield* files.utimes(old, new Date(now), new Date(now - 10 * DAY_MS))
+        yield* files.utimes(atCutoff, new Date(now), new Date(now - 7 * DAY_MS))
+        yield* files.utimes(recent, new Date(now), new Date(now - 3 * DAY_MS))
+        yield* Effect.promise(() => fs.symlink(path.join(Truncate.DIR, "missing-target"), unreadable))
         yield* svc.cleanup()
 
-        expect(yield* fs.exists(old)).toBe(false)
-        expect(yield* fs.exists(recent)).toBe(true)
+        expect(yield* files.exists(old)).toBe(false)
+        expect(yield* files.exists(atCutoff)).toBe(true)
+        expect(yield* files.exists(recent)).toBe(true)
+        expect(yield* Effect.promise(() => fs.lstat(unreadable).then(() => true))).toBe(true)
       }),
     )
   })

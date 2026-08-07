@@ -1050,7 +1050,10 @@ export function modelTurn(messages: WithParts[]) {
   const terminal = terminalMessage?.info.role === "assistant" ? terminalMessage.info : undefined
   const reminderBoundary = boundary >= 0 ? projected[boundary] : undefined
   const tasks = analysis.executions.filter(
-    (execution) => selectedIDs.has(execution.owner.info.id) && execution.state === "unstarted",
+    (execution) =>
+      selectedIDs.has(execution.owner.info.id) &&
+      execution.state === "unstarted" &&
+      (!terminalMessage || compareHydratedMessagePhysicalOrder(execution.owner, terminalMessage) > 0),
   )
   return { messages: projected, tasks, target, assistant, terminal, reminderBoundary, pendingExternal }
 }
