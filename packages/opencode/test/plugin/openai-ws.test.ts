@@ -216,6 +216,30 @@ describe("plugin.openai.ws-pool", () => {
     fetch.close()
   })
 
+  test("uses one initial websocket attempt plus five retries before same-request HTTP fallback", async () => {
+    const attempts: number[] = []
+    await using server = await createRejectingWebSocketServer(() => attempts.push(attempts.length))
+    const fetch = OpenAIWebSocketPool.createWebSocketFetch({
+      url: server.url,
+      connectTimeout: 100,
+    })
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const response = await fetch(server.url, streamRequest())
+      expect(await readTextError(response.text())).toBeInstanceOf(ProviderError.ResponseStreamError)
+      expect(server.httpRequests).toHaveLength(0)
+    }
+
+    const finalRetry = await fetch(server.url, streamRequest())
+    const afterFallback = await fetch(server.url, streamRequest())
+
+    expect(await finalRetry.text()).toBe("http")
+    expect(await afterFallback.text()).toBe("http")
+    expect(attempts).toEqual([0, 1, 2, 3, 4, 5])
+    expect(server.httpRequests).toHaveLength(2)
+    fetch.close()
+  })
+
   test("keeps HTTP fallback active after its idle timeout", async () => {
     let websocketAttempts = 0
     await using server = await createRejectingWebSocketServer(() => websocketAttempts++)

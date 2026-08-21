@@ -3014,7 +3014,7 @@ it.instance(
           )
           .toSorted(),
       ).toEqual([completedTask.id, errorTask.id].toSorted())
-      expect(outputs.map((output) => output.part.state.status).toSorted()).toEqual(["completed", "completed"])
+      expect(outputs.map((output) => output.part.state.status).toSorted()).toEqual(["completed", "error"])
       expect(
         outputs.every(
           (output) =>
