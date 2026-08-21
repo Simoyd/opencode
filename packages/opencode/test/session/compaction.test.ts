@@ -441,6 +441,20 @@ function maliciousCompactionTransform(state: { calls: number; inputWasProvenance
   })
 }
 
+function compactionContext(context: string) {
+  return Layer.mock(Plugin.Service)({
+    trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => {
+      if (name !== "experimental.session.compacting") return Effect.succeed(output)
+      return Effect.sync(() => {
+        ;(output as { context: string[] }).context.push(context)
+        return output
+      })
+    },
+    list: () => Effect.succeed([]),
+    init: () => Effect.void,
+  })
+}
+
 const maliciousCompactionState = { calls: 0, inputWasProvenanceFree: false }
 
 describe("session.compaction.isOverflow", () => {
@@ -1636,6 +1650,11 @@ describe("session.compaction.process", () => {
         const serialized = JSON.stringify(captured)
         expect(captured).toHaveLength(1)
         expect(captured[0]?.role).toBe("user")
+        expect(serialized).toContain("Here is the conversation so far:")
+        expect(serialized).toContain("<conversation>")
+        expect(serialized.indexOf("[User]: older context")).toBeLessThan(
+          serialized.indexOf("Create a new anchored summary"),
+        )
         expect(serialized).toContain("[User]: older context")
         expect(serialized).not.toContain("keep this turn")
         expect(serialized).not.toContain("and this one too")
@@ -1649,7 +1668,12 @@ describe("session.compaction.process", () => {
           view.messages.findIndex((message) => message.info.id === b.id),
         )
         expect(view.target?.id).toBe(b.id)
-      }).pipe(withCompaction({ llm: stub.llmLayer }))
+      }).pipe(
+        withCompaction({
+          llm: stub.llmLayer,
+          config: cfg({ tail_turns: 2, preserve_recent_tokens: 10_000 }),
+        }),
+      )
     },
     { git: true },
   )
@@ -1690,9 +1714,11 @@ describe("session.compaction.process", () => {
           auto: false,
         })
 
-        expect(captured).toContain("<previous-summary>")
+        expect(captured).toContain("<prior-summary>")
         expect(captured).toContain("summary one")
         expect(captured.match(/summary one/g)?.length).toBe(1)
+        expect(captured.indexOf("latest turn")).toBeLessThan(captured.indexOf("<prior-summary>"))
+        expect(captured).toContain("summary of the conversation before the <conversation> above")
         expect(captured).toContain("## Important Details")
         expect(captured).toContain("## Work State")
         expect(captured).not.toContain("later external B")
@@ -1705,6 +1731,49 @@ describe("session.compaction.process", () => {
         )
         expect(view.target?.id).toBe(b.id)
       }).pipe(withCompaction({ llm: stub.llmLayer }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "keeps plugin context outside the serialized conversation",
+    () => {
+      const stub = llm()
+      let captured = ""
+      stub.push(
+        reply("summary", (input) => {
+          captured = JSON.stringify(input.messages)
+        }),
+      )
+
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "older context")
+        yield* createUserMessage(session.id, "keep this turn")
+        yield* createUserMessage(session.id, "and this one too")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        })
+
+        expect(captured).toContain("Prioritize unresolved migration details")
+        expect(captured.indexOf("</conversation>")).toBeLessThan(
+          captured.indexOf("Prioritize unresolved migration details"),
+        )
+      }).pipe(
+        withCompaction({
+          llm: stub.llmLayer,
+          plugin: compactionContext("Prioritize unresolved migration details"),
+        }),
+      )
     },
     { git: true },
   )
@@ -2084,6 +2153,22 @@ describe("SessionNs.getUsage", () => {
     expect(result.tokens.cache.read).toBe(0)
     expect(result.tokens.cache.write).toBe(0)
     expect(Number.isNaN(result.cost)).toBe(false)
+  })
+
+  test("ignores malformed cost fields", () => {
+    const model = createModel({
+      context: 100_000,
+      output: 32_000,
+      cost: { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
+    })
+    Object.assign(model.cost, { input: {} })
+
+    const result = SessionNs.getUsage({
+      model,
+      usage: usage({ inputTokens: 1_000_000, outputTokens: 100_000, totalTokens: 1_100_000 }),
+    })
+
+    expect(result.cost).toBe(1.5)
   })
 
   test("calculates cost correctly", () => {
